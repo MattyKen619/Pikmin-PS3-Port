@@ -68,7 +68,7 @@ BOOL JV_InitHeader_M(immut char* fileName, u8* barcData, u8* archiveWork)
 	strcpy(JV_ARC_NAME[JV_CURRENT_ARCS], &fileName[dirSeparatorIndex + 1]);
 
 	JV_ARC[JV_CURRENT_ARCS]           = (Barc*)barcData;
-	JV_ARC[JV_CURRENT_ARCS]->meta._04 = (u32)archiveWork;
+	JV_ARC[JV_CURRENT_ARCS]->meta._04 = (u32)(uptr)archiveWork;
 
 	JV_CURRENT_ARCS++;
 	return TRUE;
@@ -199,7 +199,7 @@ u32 JV_LoadFile(u32 handle, u8* dst, u32 offset, u32 length)
 	strcpy(path, JV_DIR_NAME[archiveIndex]);
 	strcat(path, "/");
 	strcat(path, JV_ARC[archiveIndex]->meta.arcName);
-	DVDT_LoadtoDRAM(0, path, (u32)dst, sourceOffset, length, (u32*)&loadStatus, NULL);
+	DVDT_LoadtoDRAM(0, path, (u32)(uptr)dst, sourceOffset, length, (u32*)&loadStatus, NULL);
 
 	while (loadStatus == 0) {
 		;
@@ -233,7 +233,7 @@ u32 JV_LoadFile_Async2(u32 handle, u8* dst, u32 offset, u32 length, void (*callb
 	strcat(path, "/");
 	strcat(path, JV_ARC[archiveIndex]->meta.arcName);
 
-	DVDT_LoadtoDRAM(owner, path, (u32)dst, sourceOffset, length, NULL, callback);
+	DVDT_LoadtoDRAM(owner, path, (u32)(uptr)dst, sourceOffset, length, NULL, callback);
 	return length;
 }
 

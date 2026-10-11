@@ -286,7 +286,7 @@ bool GeneratorCache::hasUfoParts(u32 stageID, u32 ufoPartIdx)
 {
 	Cache* cache = findCache(mAliveCacheList, stageID);
 	if (cache) {
-		void* heap = (void*)(((u32)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize) + cache->mCreatureCacheSize);
+		void* heap = (void*)(((u32)(uptr)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize) + cache->mCreatureCacheSize);
 		RamStream stream(heap, cache->mUfoPartsCacheSize);
 		for (int i = 0; i < cache->mUfoPartsCount; i++) {
 			int thisPartIdx = stream.readInt();
@@ -318,7 +318,7 @@ void GeneratorCache::load(u32 stageID)
 	PRINT("cahce = %x\n", cache);
 	if (cache) {
 		PRINT("cache = %x\n", cache);
-		void* heap = (void*)(((u32)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize));
+		void* heap = (void*)(((u32)(uptr)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize));
 		PRINT("load from %x : %d creatures\n", heap, cache->mCreatureCount);
 		RamStream stream(heap, cache->mCreatureCacheSize);
 		for (int i = 0; i < cache->mCreatureCount; i++) {
@@ -425,9 +425,9 @@ void GeneratorCache::saveGenerator(Generator* gen)
 			ERROR("currID(%d) is broken !\n", mCurrentSaveCacheIdx);
 		}
 
-		void* heap = (void*)(((u32)mCacheHeap + mUsedSize));
+		void* heap = (void*)(((u32)(uptr)mCacheHeap + mUsedSize));
 		RamStream stream(heap, mFreeSize);
-		PRINT("ramStream :%08x - %08x (%.2fK free)\n", (u32)heap, (u32)heap + mFreeSize, mFreeSize / 1024.0f);
+		PRINT("ramStream :%08x - %08x (%.2fK free)\n", (u32)(uptr)heap, (u32)(uptr)heap + mFreeSize, mFreeSize / 1024.0f);
 
 		Generator::ramMode     = true;
 		gen->mGeneratorListIdx = cache->mGenCount;
@@ -461,7 +461,7 @@ void GeneratorCache::prepareUfoParts(GeneratorCache::Cache* cache)
 {
 	PRINT("prepare ufo parts ** %d\n", cache->mUfoPartsCount);
 
-	void* heap = (void*)(((u32)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize) + cache->mCreatureCacheSize);
+	void* heap = (void*)(((u32)(uptr)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize) + cache->mCreatureCacheSize);
 	RamStream stream(heap, cache->mUfoPartsCacheSize);
 
 	for (int i = 0; i < cache->mUfoPartsCount; i++) {
@@ -492,8 +492,8 @@ void GeneratorCache::prepareUfoParts(GeneratorCache::Cache* cache)
  */
 void GeneratorCache::loadUfoParts(GeneratorCache::Cache* cache)
 {
-	void* heap = (void*)(((u32)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize) + cache->mCreatureCacheSize);
-	PRINT("load from %x : %d ufo parts\n", (u32)heap, cache->mUfoPartsCount);
+	void* heap = (void*)(((u32)(uptr)mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize) + cache->mCreatureCacheSize);
+	PRINT("load from %x : %d ufo parts\n", (u32)(uptr)heap, cache->mUfoPartsCount);
 	RamStream stream(heap, cache->mUfoPartsCacheSize);
 	PRINT("********* LOAD UFO PARTS (%d)*************************\n", cache->mUfoPartsCount);
 
@@ -523,7 +523,7 @@ void GeneratorCache::saveUfoParts(Pellet* part)
 		ERROR("currID(%d) is broken !\n", mCurrentSaveCacheIdx);
 	}
 
-	void* heap = (void*)(((u32)mCacheHeap + mUsedSize));
+	void* heap = (void*)(((u32)(uptr)mCacheHeap + mUsedSize));
 	RamStream stream(heap, mFreeSize);
 	stream.writeInt(part->mConfig->mModelId.mId);
 	part->save(stream, true);
@@ -557,9 +557,9 @@ void GeneratorCache::saveGeneratorCreature(Generator* gen)
 		ERROR("currID(%d) is broken !\n", mCurrentSaveCacheIdx);
 	}
 
-	void* heap = (void*)(((u32)mCacheHeap + mUsedSize));
+	void* heap = (void*)(((u32)(uptr)mCacheHeap + mUsedSize));
 	RamStream stream(heap, mFreeSize);
-	PRINT("ramStream :%08x - %08x (%.2fK free)\n", (u32)heap, (u32)heap + mFreeSize, mFreeSize / 1024.0f);
+	PRINT("ramStream :%08x - %08x (%.2fK free)\n", (u32)(uptr)heap, (u32)(uptr)heap + mFreeSize, mFreeSize / 1024.0f);
 	if (!gen->mLatestSpawnCreature) {
 		return;
 	}

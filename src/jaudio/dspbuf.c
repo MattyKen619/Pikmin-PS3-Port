@@ -72,7 +72,7 @@ s16* DspbufProcess(DSPBUF_EVENTS event)
 #if defined(VERSION_GPIP01)
 			DsyncFrame2(JAC_SUBFRAMES, (u32)dsp_buf[write_buffer], (u32)&dsp_buf[write_buffer][JAC_FRAMESAMPLES]);
 #else
-			DsyncFrame(JAC_SUBFRAMES, (u32)dsp_buf[write_buffer], (u32)&dsp_buf[write_buffer][JAC_FRAMESAMPLES]);
+			DsyncFrame(JAC_SUBFRAMES, (u32)(uptr)dsp_buf[write_buffer], (u32)(uptr)&dsp_buf[write_buffer][JAC_FRAMESAMPLES]);
 #endif
 			dspstatus = 1;
 			UpdateDSP();

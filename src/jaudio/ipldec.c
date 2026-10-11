@@ -94,7 +94,7 @@ void Jac_IPLDspSec(void)
  */
 void Jac_DSPcardDecodeAsync(void* task, void* cmd, DSPCallback callback)
 {
-	while (WriteTask(DSPTARGET_IPL, (u32)cmd, task, callback) == NULL) {
+	while (WriteTask(DSPTARGET_IPL, (u32)(uptr)cmd, task, callback) == NULL) {
 		;
 	}
 }
@@ -105,7 +105,7 @@ void Jac_DSPcardDecodeAsync(void* task, void* cmd, DSPCallback callback)
  */
 void Jac_DSPagbDecodeAsync(void* task, void* cmd, DSPCallback callback)
 {
-	while (WriteTask(DSPTARGET_AGB, (u32)cmd, task, callback) == NULL) {
+	while (WriteTask(DSPTARGET_AGB, (u32)(uptr)cmd, task, callback) == NULL) {
 		;
 	}
 }

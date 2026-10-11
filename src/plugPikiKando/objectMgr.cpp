@@ -749,7 +749,7 @@ int PolyObjectMgr::getTemplateIndex(int id)
  */
 Creature* PolyObjectMgr::get(int i)
 {
-	return (Creature*)((int)mObjectPool + mMaxSize * i);
+	return (Creature*)(uptr)(u32)((int)(uptr)mObjectPool + mMaxSize * i); // via u32: no sign extension on 64-bit pointers
 }
 
 /**

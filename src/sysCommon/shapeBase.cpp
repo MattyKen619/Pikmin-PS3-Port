@@ -3372,6 +3372,12 @@ static inline void addMatrixWeights(register f32* animMtx, register f32* weighte
 		ps_madd  f3, f2, f0, f3;
 		psq_st   f3, 0x28 (animMtx), 0, 0;
 	}
+#else
+	// C equivalent of the paired-singles code above: a 3x4 matrix (12 floats) accumulated pairwise,
+	// even elements weighted by weights[0] and odd elements by weights[1] (ps_madd on psq_l pairs).
+	for (int i = 0; i < 12; i++) {
+		animMtx[i] += weightedMtx[i] * weights[i & 1];
+	}
 #endif
 }
 

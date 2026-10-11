@@ -55,11 +55,11 @@ void Play_DirectPCM(dspch_* dspch, s16* baseAddr, u16 loopStart, u32 length)
 {
 	DSPchannel_* buff = GetDspHandle(dspch->buffer_idx); // r3
 
-	buff->baseAddress       = (u32)baseAddr;
+	buff->baseAddress       = (u32)(uptr)baseAddr;
 	buff->isLooping         = FALSE;
 	buff->samplesSourceType = 0x21; // todo: find out what this is
 	buff->remainingLength   = length;
-	buff->loopAddress       = (u32)baseAddr;
+	buff->loopAddress       = (u32)(uptr)baseAddr;
 	buff->loopStartPosition = loopStart << 16;
 
 	DSP_SetMixerInitDelayMax(dspch->buffer_idx, 0);
@@ -346,7 +346,7 @@ BOOL StreamAudio_Start(u32 ctrlID, int soundId, immut char* name, BOOL r6, BOOL 
 
 	for (i = 0; i < 6; i++) {
 		ctrl->buffCtrl[i].state   = 0;
-		ctrl->buffCtrl[i].mLength = (u32)&ctrl->data[i]; // TODO: should be a pointer?
+		ctrl->buffCtrl[i].mLength = (u32)(uptr)&ctrl->data[i]; // TODO: should be a pointer?
 	}
 
 	for (i = 0; i < 2; i++) {
@@ -387,7 +387,7 @@ BOOL StreamAudio_Start(u32 ctrlID, int soundId, immut char* name, BOOL r6, BOOL 
 	LoadADPCM(ctrl, 1);
 
 	for (u32 i = 0; i < 2; i++) {
-		DeAllocDSPchannel(ctrl->dspch[i], (u32)(&ctrl->dspch[i]));
+		DeAllocDSPchannel(ctrl->dspch[i], (u32)(uptr)(&ctrl->dspch[i]));
 
 		ctrl->dspch[i] = 0;
 	}
@@ -424,7 +424,7 @@ static s32 StreamAudio_Callback(void* data)
 
 	if (!ctrl->dspch[0]) {
 		for (channelIdx = 0; channelIdx < 2; channelIdx++) {
-			ctrl->dspch[channelIdx] = AllocDSPchannel(0, (u32)&ctrl->dspch[channelIdx]);
+			ctrl->dspch[channelIdx] = AllocDSPchannel(0, (u32)(uptr)&ctrl->dspch[channelIdx]);
 #if defined(VERSION_GPIP01)
 			if (ctrl->dspch[channelIdx])
 #endif
@@ -447,7 +447,7 @@ static s32 StreamAudio_Callback(void* data)
 
 			for (channelIdx = 0; channelIdx < 2; channelIdx++) {
 				Stop_DirectPCM(ctrl->dspch[channelIdx]);
-				DeAllocDSPchannel(ctrl->dspch[channelIdx], (u32)&ctrl->dspch[channelIdx]);
+				DeAllocDSPchannel(ctrl->dspch[channelIdx], (u32)(uptr)&ctrl->dspch[channelIdx]);
 				ctrl->dspch[channelIdx] = NULL;
 			}
 

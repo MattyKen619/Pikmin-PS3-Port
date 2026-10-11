@@ -63,12 +63,14 @@ public:
 	static inline int max() { return 0x7FFFFFFF; }
 };
 
+#if !TYPES_32_ARE_INT // same type as int/uint on LP64 targets
 template <>
 class numeric_limits<s32> {
 public:
 	static inline s32 min() { return -0x80000000; }
 	static inline s32 max() { return 0x7FFFFFFF; }
 };
+#endif
 
 template <>
 class numeric_limits<u8> {
@@ -91,12 +93,14 @@ public:
 	static inline uint max() { return 0xFFFFFFFF; }
 };
 
+#if !TYPES_32_ARE_INT // same type as int/uint on LP64 targets
 template <>
 class numeric_limits<u32> {
 public:
 	static inline u32 min() { return 0x0; }
 	static inline u32 max() { return 0xFFFFFFFF; }
 };
+#endif
 
 } // namespace std
 #endif

@@ -69,8 +69,8 @@ void* System::alloc(size_t size)
 			info = static_cast<MemInfo*>(info->mParent);
 		}
 
-		if (reinterpret_cast<u32>(result) & 3) {
-			ERROR("acquired memory not long aligned %08x!!\n", reinterpret_cast<u32>(result));
+		if ((u32)reinterpret_cast<uptr>(result) & 3) {
+			ERROR("acquired memory not long aligned %08x!!\n", (u32)reinterpret_cast<uptr>(result));
 		}
 #endif
 
@@ -187,7 +187,7 @@ void* operator new(size_t size, int alignment)
 	u32 intptr;
 
 	void* ptr = operator new(size + alignment);
-	intptr    = reinterpret_cast<u32>(ptr);
+	intptr    = (u32)reinterpret_cast<uptr>(ptr);
 
 	// This minor discrepancy might be explained by this code originally living in two different TUs.
 #if defined(WIN32)
@@ -206,7 +206,7 @@ void* operator new[](size_t size, int alignment)
 	u32 intptr;
 
 	void* ptr = operator new[](size + alignment);
-	intptr    = reinterpret_cast<u32>(ptr);
+	intptr    = (u32)reinterpret_cast<uptr>(ptr);
 
 	// This minor discrepancy might be explained by this code originally living in two different TUs.
 #if defined(WIN32)

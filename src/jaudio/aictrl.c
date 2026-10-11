@@ -102,7 +102,7 @@ void Jac_Init()
 	}
 
 	AIInit(NULL);
-	AIInitDMA((u32)dac[2], DAC_SIZE * 2);
+	AIInitDMA((u32)(uptr)dac[2], DAC_SIZE * 2);
 	STACK_PAD_VAR(4);
 }
 
@@ -399,7 +399,7 @@ void Jac_UpdateDAC()
 	}
 
 	if (use_rsp_madep != NULL) {
-		AIInitDMA((u32)use_rsp_madep, DAC_SIZE * 2);
+		AIInitDMA((u32)(uptr)use_rsp_madep, DAC_SIZE * 2);
 		use_rsp_madep = NULL;
 	} else {
 		UNIVERSAL_DACCOUNTER++;

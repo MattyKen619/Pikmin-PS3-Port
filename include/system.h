@@ -565,7 +565,7 @@ struct AramStream : public RandomAccessStream {
 	virtual void read(void* data, int size)       // _3C (weak)
 	{
 		int readSize = OSRoundUp32B(size);
-		gsys->copyCacheToRam((u32)data, mBaseAddress + mOffset, readSize);
+		gsys->copyCacheToRam((u32)(uptr)data, mBaseAddress + mOffset, readSize);
 		gsys->copyWaitUntilDone();
 		mOffset += readSize;
 	}

@@ -395,7 +395,7 @@ void StdSystem::invalidateObjs(u32 lowerBound, u32 upperBound)
 	for (GfxobjInfo* c = mGfxobjInfo.mNext; c != &mGfxobjInfo;) {
 		next = c->mNext;
 
-		u32 address = reinterpret_cast<u32>(c);
+		u32 address = (u32)reinterpret_cast<uptr>(c);
 		if (address >= lowerBound && address < upperBound) {
 			c->remove();
 		}
@@ -600,7 +600,7 @@ void StdSystem::loadBundle(immut char* pPath, bool loadWithCache)
 				cacheTex->mTexImage    = texImg;
 				newTex                 = cacheTex;
 				texImg->importBti(cacheTex, *fs, (u8*)OSRoundUp32B(mGraphics->mMatrixBuffer));
-				cacheTex->mAramAddress = copyRamToCache((u32)texImg->mTextureData, texImg->mDataSize, 0);
+				cacheTex->mAramAddress = copyRamToCache((u32)(uptr)texImg->mTextureData, texImg->mDataSize, 0);
 				copyWaitUntilDone();
 				texImg->mTextureData = nullptr;
 			} else {
@@ -696,7 +696,7 @@ void TextureCacher::cacheTexture(CacheTexture* tex)
 			if (!alloc) {
 				ERROR("Could not get memory from cache! %d : %d\n", texSize, largestBlockFree);
 			}
-			tex->mTexImage->mTextureData = (void*)OSRoundDown32B((u32)alloc + 0x33);
+			tex->mTexImage->mTextureData = (void*)OSRoundDown32B((u32)(uptr)alloc + 0x33);
 			TexCacheInfo* info           = (TexCacheInfo*)alloc;
 			info->mActiveCacheSlot       = &tex->mActiveCache;
 			tex->mActiveCache            = info;

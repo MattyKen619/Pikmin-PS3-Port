@@ -135,7 +135,12 @@ static inline int getBit(BitBuffer* str)
 	int bit;
 
 	if ((bit = str->shift) < 0) {
+#if defined(__MWERKS__)
 		value = str->word = *((u32*)str->ptr)++;
+#else
+		value = str->word = *(u32*)str->ptr;
+		str->ptr += sizeof(u32);
+#endif
 		bit               = 31;
 	} else {
 		value = str->word;
@@ -160,7 +165,12 @@ static inline s16 getByte(BitBuffer* str)
 	} else {
 		value = str->word;
 		value <<= 7 - bit;
+#if defined(__MWERKS__)
 		str->word = *((u32*)str->ptr)++;
+#else
+		str->word = *(u32*)str->ptr;
+		str->ptr += sizeof(u32);
+#endif
 		value |= str->word >> (bit + 25);
 		bit += 24;
 	}

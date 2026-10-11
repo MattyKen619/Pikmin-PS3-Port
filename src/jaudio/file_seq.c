@@ -244,7 +244,7 @@ u32 __LoadSeqA(u32 callbackArg, u32 seqIndex, u8* seqBuffer, void (*finishCallba
 	as[slotIndex]._08       = callbackArg;
 
 	seq_loadbuffer[seqIndex] = (u8*)1;
-	return JV_LoadFile_Async2(seqArchiveHandle, seqBuffer, 0, seqSize, finishCallback, (u32)&as[slotIndex]);
+	return JV_LoadFile_Async2(seqArchiveHandle, seqBuffer, 0, seqSize, finishCallback, (u32)(uptr)&as[slotIndex]);
 }
 
 /**

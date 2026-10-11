@@ -426,7 +426,7 @@ s32 DVDT_LoadtoARAM_Main(void* dvdCall)
 			call->length -= buffersize;
 		}
 
-		ARQPostRequest(&req[arq_index], 0x12345678, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_HIGH, (u32)buf, call->dst, readSize,
+		ARQPostRequest(&req[arq_index], 0x12345678, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_HIGH, (u32)(uptr)buf, call->dst, readSize,
 		               ARAM_DMAfinish);
 		buffer_full++;
 		arq_index++;
@@ -551,7 +551,7 @@ s32 DVDT_LoadFile(immut char* file, u8* dst)
 	vu32 status           = 0;
 	immut char** REF_file = &file;
 	STACK_PAD_VAR(2);
-	DVDT_LoadtoDRAM(0, file, (u32)dst, 0, 0, (u32*)&status, NULL);
+	DVDT_LoadtoDRAM(0, file, (u32)(uptr)dst, 0, 0, (u32*)&status, NULL);
 
 	while (status == 0) { }
 

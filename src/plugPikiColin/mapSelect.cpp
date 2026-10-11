@@ -124,13 +124,13 @@ public:
 				bool valid = gameflow.mGamePrefs.isStageOpen(inf->mChalStageID);
 				// must be both open and marked visible in its .ini
 				if (inf->mIsVisible && valid) {
-					mMapListMenu->addOption((int)inf, StdSystem::stringDup(inf->mStageName), nullptr);
+					mMapListMenu->addOption((int)(uptr)inf, StdSystem::stringDup(inf->mStageName), nullptr);
 				}
 			} else {
 				bool valid = gameflow.mPlayState.isStageOpen(inf->mStageID);
 				// must be open, marked visible in its .ini, and also *not* a challenge mode stage (to avoid dupes)
 				if (inf->mIsVisible && valid && inf->mChalStageID == CHALSTAGE_NOT) {
-					mMapListMenu->addOption((int)inf, StdSystem::stringDup(inf->mStageName), nullptr);
+					mMapListMenu->addOption((int)(uptr)inf, StdSystem::stringDup(inf->mStageName), nullptr);
 				}
 			}
 		}

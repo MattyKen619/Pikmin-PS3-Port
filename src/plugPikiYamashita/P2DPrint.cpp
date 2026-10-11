@@ -181,7 +181,7 @@ f32 P2DPrint::parse(const u8* textBuffer, int textLen, int maxWidth, u16* outXPo
 
 	while (true) {
 		bool isDrawableChar = true;
-		if (currChar == 0 || (u32)textBuffer - (u32)textStart > textLen) {
+		if (currChar == 0 || (u32)(uptr)textBuffer - (u32)(uptr)textStart > textLen) {
 			if (!doDraw && outXPosBuffer) {
 				outXPosBuffer[charNum] = (currLineWidth + 0.5f);
 			}
@@ -218,7 +218,7 @@ f32 P2DPrint::parse(const u8* textBuffer, int textLen, int maxWidth, u16* outXPo
 			bool isMultiByteChar = false;
 			if (mFont->getFontType() == OS_FONT_ENCODE_SJIS) {
 				currChar = (currChar << 8) | *textBuffer++;
-				if ((u32)textBuffer - (u32)textStart <= textLen) {
+				if ((u32)(uptr)textBuffer - (u32)(uptr)textStart <= textLen) {
 					isMultiByteChar = true;
 				} else {
 					continue;
@@ -229,7 +229,7 @@ f32 P2DPrint::parse(const u8* textBuffer, int textLen, int maxWidth, u16* outXPo
 			} else if (mFont->getFontType() == OS_FONT_ENCODE_UNK2 && currChar >= ASCII_PRINTABLE_MAX && *textBuffer != 0) {
 #endif
 				currChar = (currChar << 8) | *textBuffer++;
-				if ((u32)textBuffer - (u32)textStart <= textLen) {
+				if ((u32)(uptr)textBuffer - (u32)(uptr)textStart <= textLen) {
 					isMultiByteChar = true;
 				} else {
 					continue;
@@ -520,9 +520,9 @@ s32 P2DPrint::getNumber(const u8** strPtr, s32 defaultValue, s32 invalidValue, i
 		value = strtoul((char*)*strPtr, &endStr, base);
 
 		// RBGA is valid length 8 format.
-		if ((u32)endStr - (u32)*strPtr != 8) {
+		if ((u32)(uptr)endStr - (u32)(uptr)*strPtr != 8) {
 			// only other valid format is RGB, length 6.
-			if ((u32)endStr - (u32)*strPtr == 6) {
+			if ((u32)(uptr)endStr - (u32)(uptr)*strPtr == 6) {
 				value = (value << 8) | 0xFF; // set alpha to max
 			} else {
 				// invalid format!

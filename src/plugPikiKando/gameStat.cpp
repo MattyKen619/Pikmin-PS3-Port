@@ -94,7 +94,7 @@ void GameStat::Counter::dump(immut char* name)
  */
 void GameStat::ColCounter::dump(immut char* name)
 {
-	PRINT("<%s> %d (%d + %d + %d)\n", name, int(mCounts), mCounts[Blue], mCounts[Red], mCounts[Yellow]);
+	PRINT("<%s> %d (%d + %d + %d)\n", name, int((uptr)mCounts), mCounts[Blue], mCounts[Red], mCounts[Yellow]);
 }
 
 /**

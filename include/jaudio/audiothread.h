@@ -15,10 +15,16 @@ BEGIN_SCOPE_EXTERN_C
 #define AUDIO_STACK_SIZE       0x1000
 #define AUDIOPROC_MQ_BUF_COUNT 16
 
-#define AUDIOPROC_MESSAGE_UPDATE_DAC ((OSMessage)0)
-#define AUDIOPROC_MESSAGE_DSP_SYNC   ((OSMessage)1)
-#define AUDIOPROC_MESSAGE_NEOS_SYNC  ((OSMessage)2)
-#define AUDIOPROC_MESSAGE_3          ((OSMessage)3)
+// Integer IDs, usable as `case` labels in standard C++; the OSMessage forms below are sent through the queue.
+#define AUDIOPROC_MESSAGE_ID_UPDATE_DAC 0
+#define AUDIOPROC_MESSAGE_ID_DSP_SYNC   1
+#define AUDIOPROC_MESSAGE_ID_NEOS_SYNC  2
+#define AUDIOPROC_MESSAGE_ID_3          3
+
+#define AUDIOPROC_MESSAGE_UPDATE_DAC ((OSMessage)AUDIOPROC_MESSAGE_ID_UPDATE_DAC)
+#define AUDIOPROC_MESSAGE_DSP_SYNC   ((OSMessage)AUDIOPROC_MESSAGE_ID_DSP_SYNC)
+#define AUDIOPROC_MESSAGE_NEOS_SYNC  ((OSMessage)AUDIOPROC_MESSAGE_ID_NEOS_SYNC)
+#define AUDIOPROC_MESSAGE_3          ((OSMessage)AUDIOPROC_MESSAGE_ID_3)
 
 ///////////////////////////////////////////////////////
 

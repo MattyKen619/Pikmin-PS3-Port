@@ -194,7 +194,7 @@ void KIOContext::write()
 		HIOWriteMailbox(0x100000 | 0x4);
 
 		// Move the buffer pointer and decrease the buffer size
-		mBufferStart = (void*)((u32)mBufferStart + writeSize);
+		mBufferStart = (void*)((u32)(uptr)mBufferStart + writeSize);
 		mBufferSize -= writeSize;
 	}
 }

@@ -35,7 +35,7 @@ void AyuStack::create(immut char* name, int allocFlags, void* stackBase, int sta
 	mAllocType         = allocFlags;
 	mIsActive          = true;
 	mName              = name;
-	mInitialStackTop   = (u32)stackBase;
+	mInitialStackTop   = (u32)(uptr)stackBase;
 	mInitialStackLimit = mInitialStackTop + stackSizeBytes;
 	mSize              = mInitialStackLimit - mInitialStackTop;
 	mProtectOverflow   = enableOverflowGuard;
@@ -195,7 +195,7 @@ AyuCache::AyuCache(u32 cacheSize)
 
 	s32 alignedSize = OSRoundUp32B(cacheSize);
 	char* bufAddr   = new char[(alignedSize / 4) * 4];
-	init((u32)bufAddr, (u32)bufAddr + alignedSize);
+	init((u32)(uptr)bufAddr, (u32)(uptr)bufAddr + alignedSize);
 }
 
 /**

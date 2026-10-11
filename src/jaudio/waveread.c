@@ -35,7 +35,7 @@ CtrlGroup_* Wave_Test(u8* data)
 {
 	u32 i, j;
 	STACK_PAD_VAR(1);
-	u32 base_addr = (u32)data;
+	u32 base_addr = (u32)(uptr)data;
 	WaveArchiveBank_* arcBank;
 	CtrlGroup_* group;
 	WaveArchive_* arc;

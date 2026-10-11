@@ -76,8 +76,8 @@ void Jac_bcopy(void* src, void* dest, s32 size)
 	u8* bsrc  = (u8*)src;
 	u8* bdest = (u8*)dest;
 
-	alignedSrc = (reinterpret_cast<u32>(bsrc) & 0x03);
-	alignedDst = (reinterpret_cast<u32>(bdest) & 0x03);
+	alignedSrc = ((u32)reinterpret_cast<uptr>(bsrc) & 0x03);
+	alignedDst = ((u32)reinterpret_cast<uptr>(bdest) & 0x03);
 	if ((alignedSrc) == (alignedDst) && (size & 0x0f) == 0) {
 		Jac_bcopyfast((u32*)src, (u32*)dest, size);
 	} else if ((alignedSrc) == (alignedDst) && (size >= 16)) {
@@ -130,7 +130,7 @@ void Jac_bzero(void* dest, s32 size)
 {
 	u32* udest;
 	u8* bdest         = (u8*)dest;
-	u8 alignedbitsDst = reinterpret_cast<u32>(bdest) & 0x3;
+	u8 alignedbitsDst = (u32)reinterpret_cast<uptr>(bdest) & 0x3;
 	if (alignedbitsDst == 0) {
 		if ((size & 0x1f) == 0) {
 			DCZeroRange(dest, size);

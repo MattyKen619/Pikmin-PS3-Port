@@ -14,8 +14,8 @@ BEGIN_SCOPE_EXTERN_C
 //////////////////////////////////
 
 // Macros for rounding to 32-alignment.
-#define OSRoundUp32B(x)   (((u32)(x) + 0x1F) & ~(0x1F))
-#define OSRoundDown32B(x) (((u32)(x)) & ~(0x1F))
+#define OSRoundUp32B(x)   (((u32)(uptr)(x) + 0x1F) & ~(0x1F))
+#define OSRoundDown32B(x) (((u32)(uptr)(x)) & ~(0x1F))
 
 // Address conversions.
 #define OSPhysicalToCached(paddr)    ((void*)((u32)(paddr) + OS_BASE_CACHED))

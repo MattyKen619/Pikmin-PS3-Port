@@ -247,7 +247,7 @@ void Jac_PlayBgm(u32 trackIndex, u32 bgmID)
 	if (bgmID < 2) {
 		bgmID = BGM_Dummy2;
 	}
-	seqState = (u32)Jaf_CheckSeq(bgmID);
+	seqState = (u32)(uptr)Jaf_CheckSeq(bgmID);
 	if (seqState == 0) {
 		int* bufferedSeqId = &buffer_mus[lastside];
 		if (*bufferedSeqId != -1) {
@@ -259,7 +259,7 @@ void Jac_PlayBgm(u32 trackIndex, u32 bgmID)
 		lastside             = 1 - lastside;
 	} else if (seqState == 1) {
 		while (seqState == 1) {
-			seqState = (u32)Jaf_CheckSeq(bgmID);
+			seqState = (u32)(uptr)Jaf_CheckSeq(bgmID);
 		}
 	}
 

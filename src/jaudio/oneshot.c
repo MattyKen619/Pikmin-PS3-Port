@@ -217,7 +217,7 @@ static jc_* __Oneshot_Play_Start(jcs_* jcs, jc_* jc, u32 noteId)
 	jc->noteId         = noteId;
 	jc->lastNotePlayed = jc->noteId;
 	jc->updateCallback = Jesus1Shot_Update;
-	jc->dspChannel     = AllocDSPchannel(0, (u32)jc);
+	jc->dspChannel     = AllocDSPchannel(0, (u32)(uptr)jc);
 
 	if (jc->dspChannel == NULL) {
 		play = CheckLogicalChannel(jc);
@@ -234,7 +234,7 @@ static jc_* __Oneshot_Play_Start(jcs_* jcs, jc_* jc, u32 noteId)
 			return NULL;
 		}
 	} else if (play == FALSE) {
-		DeAllocDSPchannel(jc->dspChannel, (u32)jc);
+		DeAllocDSPchannel(jc->dspChannel, (u32)(uptr)jc);
 		jc->dspChannel = NULL;
 		List_AddChannelTail(&jcs->freeChannels, jc);
 		return NULL;
@@ -329,7 +329,7 @@ Inst_* InstRead(u32 bankIndex, u32 instIndex)
  */
 Vmap_* VmapRead(Inst_* inst, u8 key, u8 velocity)
 {
-	Vmap_* map = (Vmap_*)Bank_GetInstVmap(inst, key, velocity);
+	Vmap_* map = (Vmap_*)(uptr)(u32)Bank_GetInstVmap(inst, key, velocity); // via u32: no sign extension on 64-bit pointers
 	return !map ? NULL : map;
 }
 

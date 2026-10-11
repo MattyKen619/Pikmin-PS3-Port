@@ -39,9 +39,9 @@ static void ARAM_TO_ARAM_DMA(u32 src, u32 dst, u32 totalSize)
 	while (totalSize != 0) {
 		burstSize = totalSize >= DMABUFFER_SIZE ? DMABUFFER_SIZE : totalSize;
 
-		ARQPostRequest(&request, (u32)&msgQueue, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_LOW, src, (u32)dmabuffer, burstSize, &ARAMFinish);
+		ARQPostRequest(&request, (u32)(uptr)&msgQueue, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_LOW, src, (u32)(uptr)dmabuffer, burstSize, &ARAMFinish);
 		OSReceiveMessage(&msgQueue, NULL, OS_MESSAGE_BLOCK);
-		ARQPostRequest(&request, (u32)&msgQueue, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_LOW, (u32)dmabuffer, dst, burstSize, &ARAMFinish);
+		ARQPostRequest(&request, (u32)(uptr)&msgQueue, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_LOW, (u32)(uptr)dmabuffer, dst, burstSize, &ARAMFinish);
 		OSReceiveMessage(&msgQueue, NULL, OS_MESSAGE_BLOCK);
 
 		totalSize -= burstSize;
@@ -61,16 +61,16 @@ static void DRAM_TO_DRAM_DMA(u32 src, u32 dst, u32 totalSize)
 	u32 dma_buffer_top;
 	u32 burstSize;
 
-	dma_buffer_top = (u32)JAC_ARAM_DMA_BUFFER_TOP;
+	dma_buffer_top = (u32)(uptr)JAC_ARAM_DMA_BUFFER_TOP;
 	OSInitMessageQueue(&msgQueue, &msg, 1);
 	DCFlushRange((void*)src, totalSize);
 	DCInvalidateRange((void*)dst, totalSize);
 	while (totalSize != 0) {
 		burstSize = totalSize >= DMABUFFER_SIZE ? DMABUFFER_SIZE : totalSize;
 
-		ARQPostRequest(&request, (u32)&msgQueue, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_LOW, src, dma_buffer_top, burstSize, &ARAMFinish);
+		ARQPostRequest(&request, (u32)(uptr)&msgQueue, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_LOW, src, dma_buffer_top, burstSize, &ARAMFinish);
 		OSReceiveMessage(&msgQueue, NULL, OS_MESSAGE_BLOCK);
-		ARQPostRequest(&request, (u32)&msgQueue, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_LOW, dma_buffer_top, dst, burstSize, &ARAMFinish);
+		ARQPostRequest(&request, (u32)(uptr)&msgQueue, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_LOW, dma_buffer_top, dst, burstSize, &ARAMFinish);
 		OSReceiveMessage(&msgQueue, NULL, OS_MESSAGE_BLOCK);
 
 		totalSize -= burstSize;

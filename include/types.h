@@ -14,6 +14,18 @@ typedef unsigned __int8 u8;
 typedef unsigned __int16 u16;
 typedef unsigned __int32 u32;
 typedef unsigned __int64 u64;
+#elif defined(__LP64__)
+#define TYPES_32_ARE_INT 1
+// 64-bit-long targets (e.g. the PS3 PPU with the ps3dev toolchain): `long` is 64 bits there, so the
+// 32-bit types must be based on `int` to keep struct layouts and file formats intact.
+typedef signed char s8;
+typedef signed short s16;
+typedef signed int s32;
+typedef signed long long s64;
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef unsigned long long u64;
 #else
 typedef signed char s8;
 typedef signed short s16;
@@ -23,6 +35,18 @@ typedef unsigned char u8;
 typedef unsigned short u16;
 typedef unsigned long u32;
 typedef unsigned long long u64;
+#endif
+
+#ifndef TYPES_32_ARE_INT
+#define TYPES_32_ARE_INT 0
+#endif
+
+// Pointer-sized unsigned integer: 32 bits on GameCube, 64 bits on the PS3 (LP64).
+// Used for pointer<->integer casts, e.g. `(u32)(uptr)ptr`. Identical to `u32` for the matching build.
+#if defined(__UINTPTR_TYPE__)
+typedef __UINTPTR_TYPE__ uptr;
+#else
+typedef u32 uptr;
 #endif
 
 // Volatile types
@@ -330,6 +354,8 @@ inline void padStack(void)
 #define TRAP_UNIMPLEMENTED asm { trap } ((void)0)
 #elif defined(_MSC_VER)
 #define TRAP_UNIMPLEMENTED __asm { ud2 } __assume(0)
+#elif defined(__GNUC__)
+#define TRAP_UNIMPLEMENTED __builtin_trap()
 #else
 #define TRAP_UNIMPLEMENTED ((void)0) /* Replace me */
 #endif // clang-format on
@@ -380,6 +406,72 @@ inline void padStack(void)
 #define __mwerks_alloca(size)             /* void*  */ __alloca(size)             // unsigned long
 #define __mwerks_va_setup(args)           /* void   */ __va_setup(args)           // void*
 #define __mwerks_builtin_va_info(args)    /* void   */ __builtin_va_info(args)    // va_list*
+#elif defined(__GNUC__)
+// Portable equivalents for GCC/Clang builds (PS3 port). Semantics follow the Gekko instructions.
+// Cache-control hints are no-ops; dcbz keeps its GameCube meaning (zero one 32-byte block).
+#if defined(__powerpc__) || defined(__PPC__)
+#define __mwerks_eieio() __asm__ volatile("eieio" ::: "memory")
+#define __mwerks_sync()  __asm__ volatile("sync" ::: "memory")
+#define __mwerks_isync() __asm__ volatile("isync" ::: "memory")
+#else
+#define __mwerks_eieio() __sync_synchronize()
+#define __mwerks_sync()  __sync_synchronize()
+#define __mwerks_isync() __sync_synchronize()
+#endif
+#define __mwerks_abs(value)               __builtin_abs(value)
+#define __mwerks_labs(value)              __builtin_labs(value)
+#define __mwerks_fabs(value)              __builtin_fabs(value)
+#define __mwerks_fnabs(value)             (-__builtin_fabs(value))
+#define __mwerks_cntlzw(value)            __ps3_cntlzw((u32)(value))
+#define __mwerks_lhbrx(base, idx)         ((int)__builtin_bswap16(*(const u16*)((const u8*)(base) + (idx))))
+#define __mwerks_lwbrx(base, idx)         ((int)__builtin_bswap32(*(const u32*)((const u8*)(base) + (idx))))
+#define __mwerks_sthbrx(value, base, idx) (void)(*(u16*)((u8*)(base) + (idx)) = __builtin_bswap16((u16)(value)))
+#define __mwerks_stwbrx(value, base, idx) (void)(*(u32*)((u8*)(base) + (idx)) = __builtin_bswap32((u32)(value)))
+#define __mwerks_dcbf(base, offset)       ((void)(base), (void)(offset))
+#define __mwerks_dcbt(base, offset)       ((void)(base), (void)(offset))
+#define __mwerks_dcbst(base, offset)      ((void)(base), (void)(offset))
+#define __mwerks_dcbtst(base, offset)     ((void)(base), (void)(offset))
+#define __mwerks_dcbz(base, offset)       ((void)__builtin_memset((void*)(((__UINTPTR_TYPE__)(base) + (offset)) & ~(__UINTPTR_TYPE__)31), 0, 32))
+#define __mwerks_mulhw(lhs, rhs)          ((int)(((s64)(s32)(lhs) * (s64)(s32)(rhs)) >> 32))
+#define __mwerks_mulhwu(lhs, rhs)         ((u32)(((u64)(u32)(lhs) * (u64)(u32)(rhs)) >> 32))
+#define __mwerks_divw(dividend, divisor)  ((int)(s32)(dividend) / (s32)(divisor))
+#define __mwerks_divwu(dividend, divisor) ((u32)(dividend) / (u32)(divisor))
+#define __mwerks_fmadd(p1, p2, p3)        ((double)(p1) * (double)(p2) + (double)(p3))
+#define __mwerks_fmsub(p1, p2, p3)        ((double)(p1) * (double)(p2) - (double)(p3))
+#define __mwerks_fnmadd(p1, p2, p3)       (-((double)(p1) * (double)(p2) + (double)(p3)))
+#define __mwerks_fnmsub(p1, p2, p3)       (-((double)(p1) * (double)(p2) - (double)(p3)))
+#define __mwerks_fsel(A, C, B)            (((double)(A) >= 0.0) ? (double)(C) : (double)(B))
+#define __mwerks_fmadds(p1, p2, p3)       ((float)(p1) * (float)(p2) + (float)(p3))
+#define __mwerks_fmsubs(p1, p2, p3)       ((float)(p1) * (float)(p2) - (float)(p3))
+#define __mwerks_fnmadds(p1, p2, p3)      (-((float)(p1) * (float)(p2) + (float)(p3)))
+#define __mwerks_fnmsubs(p1, p2, p3)      (-((float)(p1) * (float)(p2) - (float)(p3)))
+#define __mwerks_fres(value)              (1.0f / (float)(value))
+#define __mwerks_fabsf(value)             __builtin_fabsf(value)
+#define __mwerks_fnabsf(value)            (-__builtin_fabsf(value))
+#define __mwerks_frsqrte(value)           (1.0 / __builtin_sqrt((double)(value))) // exact; Gekko's estimate differs slightly
+#define __mwerks_mffs()                   (0.0)                                   // FPSCR access not ported
+#define __mwerks_setflm(value)            ((void)(value), 0.0f)                   // FPSCR access not ported
+#define __mwerks_rlwinm(S, SH, MB, ME)    ((int)(__ps3_rotl32((u32)(S), (SH)) & __ps3_ppcmask((MB), (ME))))
+#define __mwerks_rlwnm(S, SH, MB, ME)     ((int)(__ps3_rotl32((u32)(S), (SH)) & __ps3_ppcmask((MB), (ME))))
+#define __mwerks_rlwimi(A, S, SH, MB, ME) ((int)(((u32)(A) & ~__ps3_ppcmask((MB), (ME))) | (__ps3_rotl32((u32)(S), (SH)) & __ps3_ppcmask((MB), (ME)))))
+#define __mwerks_strcpy(dest, src)        __builtin_strcpy(dest, src)
+#define __mwerks_memcpy(dest, src, size)  __builtin_memcpy(dest, src, size)
+#define __mwerks_alloca(size)             __builtin_alloca(size)
+
+static inline int __ps3_cntlzw(u32 x) { return x ? __builtin_clz(x) : 32; }
+static inline u32 __ps3_rotl32(u32 x, unsigned int n) { n &= 31; return n ? (x << n) | (x >> (32 - n)) : x; }
+// PowerPC mask: bits MB..ME set, numbered 0 = most significant bit, wrapping when MB > ME.
+static inline u32 __ps3_ppcmask(unsigned int mb, unsigned int me)
+{
+	u32 m1 = 0xFFFFFFFFu >> (mb & 31);
+	u32 m2 = 0xFFFFFFFFu << (31 - (me & 31));
+	return ((mb & 31) <= (me & 31)) ? (m1 & m2) : (m1 | m2);
+}
+
+// Raw CodeWarrior intrinsics used directly by the MSL headers (include/stl/math.h).
+static inline double __fabs(double x) { return __builtin_fabs(x); }
+static inline float __fabsf(float x) { return __builtin_fabsf(x); }
+static inline double __frsqrte(double x) { return 1.0 / __builtin_sqrt(x); } // exact; the NR steps in sqrtf then converge immediately
 #endif
 
 // Disable MSVC errors.  This is typically done via a compiler flag `/wdXXXX`, but that doesn't appear to work under MSVC 6.0.

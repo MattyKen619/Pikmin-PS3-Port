@@ -560,13 +560,13 @@ static s32 DoSave(s32 chan, CARDStat* fileState, void* fileData)
 
 	// copy comment data from save buffer, if present
 	if (fileState->commentAddr <= fileState->length - CARD_COMMENT_SIZE) {
-		memmove(entry->mFileCommentData, (void*)((u32)fileData + fileState->commentAddr), CARD_COMMENT_SIZE);
+		memmove(entry->mFileCommentData, (void*)((u32)(uptr)fileData + fileState->commentAddr), CARD_COMMENT_SIZE);
 	}
 
 	// handle icon/banner data, if present
 	entry->mAnimTotalFrames = 0;
 	if (fileState->bannerFormat || fileState->iconFormat) {
-		memmove(entry, (void*)((u32)fileData + fileState->iconAddr), fileState->offsetData - fileState->iconAddr);
+		memmove(entry, (void*)((u32)(uptr)fileData + fileState->iconAddr), fileState->offsetData - fileState->iconAddr);
 		DCFlushRange(entry, fileState->offsetData - fileState->iconAddr);
 
 		int iconCnt;
@@ -742,7 +742,7 @@ void CardUtilOpen(s32 chan, s32 fileNo, void* workBuffer)
 void CardUtilSave(s32 chan, CARDStat* fileState, void* data)
 {
 	// no clue why they needed to force the CARDStat pointer in as a long
-	CardUtilCommand(chan, CARDCMD_Save, (s32)fileState, data, 0, 0);
+	CardUtilCommand(chan, CARDCMD_Save, (s32)(uptr)fileState, data, 0, 0);
 }
 
 /**
@@ -842,12 +842,12 @@ static void* CardUtilMain(void*)
 		}
 		case CARDCMD_Erase:
 		{
-			res = DoErase(chan, (s32)file);
+			res = DoErase(chan, (s32)(uptr)file);
 			break;
 		}
 		case CARDCMD_Open:
 		{
-			res = DoOpen(chan, (s32)file, data);
+			res = DoOpen(chan, (s32)(uptr)file, data);
 			break;
 		}
 		case CARDCMD_Save:
@@ -857,7 +857,7 @@ static void* CardUtilMain(void*)
 		}
 		case CARDCMD_Write:
 		{
-			s32 f   = (s32)file;
+			s32 f   = (s32)(uptr)file;
 			u32 v   = length;
 			void* a = data;
 

@@ -170,8 +170,8 @@ void Nas_HeapInit(ALHeap* heap, u8* basePtr, s32 heapSize)
 		heap->current = NULL;
 		heap->last    = NULL;
 	} else {
-		length        = heapSize - ((u32)basePtr & 0x1F);
-		heap->base    = (u8*)ALIGN_NEXT((u32)basePtr, 32);
+		length        = heapSize - ((u32)(uptr)basePtr & 0x1F);
+		heap->base    = (u8*)ALIGN_NEXT((u32)(uptr)basePtr, 32);
 		heap->current = heap->base;
 		heap->length  = length;
 		heap->last    = NULL;
