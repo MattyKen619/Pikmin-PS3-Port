@@ -269,9 +269,10 @@ public:
 		mPrev->mNext = mNext;
 	}
 
-	immut char* mName; // _00
-	CacheInfo* mPrev;  // _04
-	CacheInfo* mNext;  // _08
+	// PTR32: cache headers live at the start of fixed-size blocks (see TextureCacher/AnimFrameCacher), so their size is fixed.
+	PTR32(immut char) mName; // _00
+	PTR32(CacheInfo) mPrev;  // _04
+	PTR32(CacheInfo) mNext;  // _08
 };
 
 /**
@@ -284,7 +285,7 @@ public:
 	void initData() { _10 = 0; }
 
 	// _00 - _0C = CacheInfo
-	TexCacheInfo** mActiveCacheSlot; // _0C
+	PTR32(TexCacheInfo*) mActiveCacheSlot; // _0C
 	u32 _10;                         // _10
 };
 
@@ -332,5 +333,11 @@ public:
 	// _00 - _10 = TexCacheInfo
 	AyuCache* mCache; // _14
 };
+
+// TextureCacher places texture data at RoundUp32(header) inside fixed-size blocks.
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(CacheInfo) == 0xC, "CacheInfo header size changed");
+static_assert(sizeof(TexCacheInfo) == 0x14, "TexCacheInfo must stay 0x14: TextureCacher::cacheTexture assumes it");
+#endif
 
 #endif

@@ -612,10 +612,10 @@ public:
  */
 struct FrameCacher : public CacheInfo {
 	// _00-_0C = CacheInfo
-	CacheInfo** mInfo;     // _0C
-	u8 _10[4];             // _10, unknown
-	u32* mBoneMatricesEnd; // _14
-	u32* mBoneMtxList;     // _18
+	PTR32(CacheInfo*) mInfo;     // _0C
+	u8 _10[4];                   // _10, unknown
+	PTR32(u32) mBoneMatricesEnd; // _14
+	PTR32(u32) mBoneMtxList;     // _18
 	u32 mBoneMatrices[1];  // _1C
 };
 
@@ -635,5 +635,10 @@ public:
 	CacheInfo mInfo;  // _04
 	u8 _10[0x8];      // _10, unknown
 };
+
+// AnimFrameCacher::cacheFrameSpace sizes blocks assuming this header layout.
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(__builtin_offsetof(FrameCacher, mBoneMatrices) == 0x1C, "FrameCacher header size changed");
+#endif
 
 #endif

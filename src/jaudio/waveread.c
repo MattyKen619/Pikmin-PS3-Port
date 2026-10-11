@@ -18,6 +18,14 @@ CtrlGroup_* CGRP_ARRAY[16];
 
 static void PTconvert(void** pointer, u32 base_address)
 {
+#if defined(__LP64__)
+	// File pointers are 32-bit slots (PTR32 fields); relocate the offset in place.
+	u32* slot = (u32*)pointer;
+	if (*slot == 0 || *slot >= base_address) {
+		return;
+	}
+	*slot += base_address;
+#else
 	if (*pointer == NULL) {
 		*pointer = NULL;
 		return;
@@ -26,6 +34,7 @@ static void PTconvert(void** pointer, u32 base_address)
 		return;
 	}
 	*pointer = *(char**)pointer + base_address;
+#endif
 }
 
 /**
@@ -48,8 +57,8 @@ CtrlGroup_* Wave_Test(u8* data)
 
 	PTconvert((void**)&((Wsys_*)data)->waveArcBank, base_addr);
 	PTconvert((void**)&((Wsys_*)data)->ctrlGroup, base_addr);
-	arcBank       = *(WaveArchiveBank_**)(data + 0x10);
-	group         = *(CtrlGroup_**)(data + 0x14);
+	arcBank       = *(PTR32(WaveArchiveBank_)*)(data + 0x10);
+	group         = *(PTR32(CtrlGroup_)*)(data + 0x14);
 	CGRP_ARRAY[0] = group;
 
 	if (arcBank->magic != 'WINF') {

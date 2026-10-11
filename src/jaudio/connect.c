@@ -49,7 +49,7 @@ static BOOL UpdateWave_Extern(WaveArchiveBank_* bank, CtrlGroup_* group, Ctrl_* 
 		}
 
 		if (index != cdf->count) {
-			WaveID_** wave2 = &cdf->waveIDs[index];
+			PTR32(WaveID_)* wave2 = &cdf->waveIDs[index];
 			if ((*wave2)->heap.startAddress) {
 				wave->data = (*wave2)->data;
 				Jac_SelfInitHeap(&wave->heap, (*wave2)->heap.startAddress, 0, (*wave2)->heap.memoryType);
@@ -167,7 +167,7 @@ WaveID_* __GetSoundHandle(CtrlGroup_* group, u32 id, u32 id2)
 	ctrl = scene->cdf;
 	if (ctrl) {
 		WaveID_* wave = SearchWave(ctrl, wId);
-		if (wave && wave->data && (int)(uptr)wave->data != 0xffffffff) {
+		if (wave && wave->data && (int)(uptr)(Wave_*)wave->data != 0xffffffff) {
 			return wave;
 		}
 	}
@@ -175,14 +175,14 @@ WaveID_* __GetSoundHandle(CtrlGroup_* group, u32 id, u32 id2)
 	ctrl = scene->cex;
 	if (ctrl) {
 		WaveID_* wave = SearchWave(ctrl, wId);
-		if (wave && wave->data && (int)(uptr)wave->data != 0xffffffff) {
+		if (wave && wave->data && (int)(uptr)(Wave_*)wave->data != 0xffffffff) {
 			return wave;
 		}
 	}
 
 	for (u32 i = 0; i < scene->dependencyCount; i++) {
 		WaveID_* wave = __GetSoundHandle(group, id, scene->dependencyIds[i]);
-		if (wave && wave->data && (int)(uptr)wave->data != 0xffffffff) {
+		if (wave && wave->data && (int)(uptr)(Wave_*)wave->data != 0xffffffff) {
 			return wave;
 		}
 	}

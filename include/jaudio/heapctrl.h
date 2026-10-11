@@ -13,12 +13,12 @@ struct jaheap_ {
 	u32 startAddress;          // _08
 	u32 usedSize;              // _0C
 	u32 size;                  // _10
-	jaheap_* firstChild;       // _14
-	jaheap_* parent;           // _18
-	jaheap_* nextSibling;      // _1C
-	jaheap_* groupOwner;       // _20
-	jaheap_* firstGroupedHeap; // _24
-	jaheap_* nextGroupedHeap;  // _28
+	PTR32(jaheap_) firstChild;       // _14
+	PTR32(jaheap_) parent;           // _18
+	PTR32(jaheap_) nextSibling;      // _1C
+	PTR32(jaheap_) groupOwner;       // _20
+	PTR32(jaheap_) firstGroupedHeap; // _24
+	PTR32(jaheap_) nextGroupedHeap;  // _28
 };
 
 void Jac_GetUnlockHeap(jaheap_*);
@@ -35,5 +35,11 @@ void Jac_GarbageCollection_St(jaheap_*);
 void Jac_CheckFreeHeap_Total(jaheap_*);
 void Jac_CheckFreeHeap_Linear(jaheap_*);
 void Jac_ShowHeap(jaheap_*, u32);
+
+// jaheap_ is embedded in file data (WaveID_, WaveArchive_), so its size is fixed. See PTR32 in types.h.
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(jaheap_) == 0x2C, "jaheap_: file layout size changed");
+static_assert(__builtin_offsetof(jaheap_, nextGroupedHeap) == 0x28, "jaheap_::nextGroupedHeap: file layout offset changed");
+#endif
 
 #endif

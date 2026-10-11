@@ -6,8 +6,9 @@
 class MemHead {
 public:
 	u32 mTagAndSize; // _00, tag in high byte; size in low 24 bits
-	MemHead* mNext;  // _04, next node in list
-	MemHead* mPrev;  // _08, previous node in list
+	// PTR32: the allocator works in 16-byte units (sizeof(MemHead) on GameCube), so the header size is fixed.
+	PTR32(MemHead) mNext; // _04, next node in list
+	PTR32(MemHead) mPrev; // _08, previous node in list
 	u32 mGuardValue; // _10, guard/canary value written into headers/trailers
 };
 
@@ -95,5 +96,10 @@ public:
 	// _00-_24 = AyuStack
 	u8 _24; // _24
 };
+
+// The allocator's 16-byte units assume this size (see PTR32 in types.h).
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(MemHead) == 0x10, "MemHead must stay 16 bytes: AyuCache sizes blocks in 16-byte units");
+#endif
 
 #endif

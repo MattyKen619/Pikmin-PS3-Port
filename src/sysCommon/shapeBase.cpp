@@ -3235,7 +3235,7 @@ void AnimFrameCacher::updateInfo(AnimCacheInfo* info)
  */
 void AnimFrameCacher::removeOldest()
 {
-	AnimCacheInfo* oldest = static_cast<AnimCacheInfo*>(mInfo.mPrev);
+	AnimCacheInfo* oldest = static_cast<AnimCacheInfo*>((CacheInfo*)mInfo.mPrev);
 	mInfo.mPrev->remove();
 	*oldest->_0C = nullptr;
 	mCache->cacheFree(oldest);

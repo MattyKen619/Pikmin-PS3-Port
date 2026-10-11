@@ -467,7 +467,7 @@ s32 DVDT_LoadtoARAM(u32 owner, immut char* path, u32 dst, u32 src, u32 length, u
 	pCall->src      = src;
 	pCall->length   = length;
 
-	DVDT_AddTask(DVDT_LoadtoARAM_Main, pCall, 0x58);
+	DVDT_AddTask(DVDT_LoadtoARAM_Main, pCall, sizeof(DVDCall));
 
 	return 0;
 }
@@ -574,7 +574,7 @@ void DVDT_CheckPass(u32 owner, u32* status, Jac_DVDCallback callback)
 	call.callbackStatus = status;
 	call.callback       = callback;
 
-	DVDT_AddTask((TaskCallback)__DVDT_CheckBack, cb, 0x58);
+	DVDT_AddTask((TaskCallback)__DVDT_CheckBack, cb, sizeof(DVDCall));
 }
 
 /**

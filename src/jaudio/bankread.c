@@ -12,10 +12,19 @@ static Bank_* bankp[BANKP_SIZE];
  */
 static void PTconvert(void** pointer, u32 base_address)
 {
+#if defined(__LP64__)
+	// File pointers are 32-bit slots (PTR32 fields); relocate the offset in place.
+	u32* slot = (u32*)pointer;
+	if (*slot >= base_address || *slot == 0) {
+		return;
+	}
+	*slot += base_address;
+#else
 	if (*pointer >= (void*)base_address || *pointer == NULL) {
 		return;
 	}
 	*pointer = *(char**)pointer + base_address;
+#endif
 }
 
 /**

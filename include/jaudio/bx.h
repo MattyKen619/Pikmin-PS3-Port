@@ -47,9 +47,9 @@ struct Bank_ {
 	union {     // _04 | Can point to INST, VOICE, PERC.
 		// There's no way this was actually an anonymous union, as this only became a feature
 		// of the C programming language in C11. However, it does make the code nicer to read.
-		Inst_* mInstruments[BANK_INST_COUNT];
-		Voice_* mVoices[BANK_INST_COUNT];
-		Perc_* mPercs[BANK_INST_COUNT];
+		PTR32(Inst_) mInstruments[BANK_INST_COUNT];
+		PTR32(Voice_) mVoices[BANK_INST_COUNT];
+		PTR32(Perc_) mPercs[BANK_INST_COUNT];
 	};
 };
 
@@ -58,7 +58,7 @@ struct Ibnk_ {
 	u32 _04;                              // _04
 	u32 _08;                              // _08
 	int _0C;                              // _0C
-	struct WaveArchiveBank_* waveArcBank; // _10
+	PTR32(struct WaveArchiveBank_) waveArcBank; // _10
 	u8 _14[0x20 - 0x14];                  // _14
 	Bank_ bank;                           // _20
 };
@@ -84,7 +84,7 @@ struct Vmap_ {
 struct InstKeymap_ {
 	u8 mBaseKey;           // _00
 	u32 mVelocityCount;    // _04
-	Vmap_* mVelocities[2]; // _08
+	PTR32(Vmap_) mVelocities[2]; // _08
 };
 
 /**
@@ -95,10 +95,10 @@ struct InstKeymap_ {
 struct PercKeymap_ {
 	f32 mPitch;            // _00
 	f32 mVolume;           // _04
-	void* _08;             // _08, pointer type unknown, but gets hit by PTconvert in Bank_Test
-	void* _0C;             // _0C, pointer type unknown, but gets hit by PTconvert in Bank_Test
+	PTR32(void) _08;       // _08, pointer type unknown, but gets hit by PTconvert in Bank_Test
+	PTR32(void) _0C;       // _0C, pointer type unknown, but gets hit by PTconvert in Bank_Test
 	int mVelocityCount;    // _10
-	Vmap_* mVelocities[2]; // _14
+	PTR32(Vmap_) mVelocities[2]; // _14
 };
 
 struct Sense_ {
@@ -112,8 +112,8 @@ struct Sense_ {
 struct Osc_ {
 	u8 mode;               // _00
 	f32 rate;              // _04
-	s16* attackVecOffset;  // _08
-	s16* releaseVecOffset; // _0C
+	PTR32(s16) attackVecOffset;  // _08
+	PTR32(s16) releaseVecOffset; // _0C
 	f32 width;             // _10
 	f32 vertex;            // _14
 };
@@ -140,23 +140,23 @@ struct Inst_ {
 	u32 mFlag;                   // _04
 	f32 mFreqMultiplier;         // _08
 	f32 mGainMultiplier;         // _0C
-	Osc_* mOscillators[2];       // _10
-	Rand_* mEffects[2];          // _18
-	Sense_* mSensors[2];         // _20
+	PTR32(Osc_) mOscillators[2];       // _10
+	PTR32(Rand_) mEffects[2];          // _18
+	PTR32(Sense_) mSensors[2];         // _20
 	int mKeyRegionCount;         // _28
-	InstKeymap_* mKeyRegions[5]; // _2C
+	PTR32(InstKeymap_) mKeyRegions[5]; // _2C
 };
 
 struct Voice_ {
 	u8 _00[0x8];  // _00, unknown
 	int size;     // _08, count of whatever's at 0xC
-	void* _0C[1]; // _0C, unsure of length of array or type
+	PTR32(void) _0C[1]; // _0C, unsure of length of array or type
 };
 
 struct Perc_ {
 	int mMagic;                    // _00 | 'PER2' (or 'PERC'?)
 	u8 _04[0x84];                  // _04, unknown
-	PercKeymap_* mKeyRegions[128]; // _88
+	PTR32(PercKeymap_) mKeyRegions[128]; // _88
 	s8 panTable[128];              // _288
 	u16 releaseTable[128];         // _308
 };
@@ -169,7 +169,7 @@ struct Rand_ {
 };
 
 struct Pmap_ {
-	Rand_* randomEffect; // _00
+	PTR32(Rand_) randomEffect; // _00
 	int _04;             // _04
 };
 
@@ -182,21 +182,21 @@ struct Wsys_ {
 	int size;                      // _04
 	int globalID;                  // _08
 	int _0C;                       // _0C, unused?
-	WaveArchiveBank_* waveArcBank; // _10
-	CtrlGroup_* ctrlGroup;         // _14
+	PTR32(WaveArchiveBank_) waveArcBank; // _10
+	PTR32(CtrlGroup_) ctrlGroup;         // _14
 };
 
 struct WaveArchiveBank_ {
 	int magic;                   // _00, 'WINF'
 	int count;                   // _04, same count as CtrlGroup_
-	WaveArchive_* waveGroups[1]; // _08, array size variable
+	PTR32(WaveArchive_) waveGroups[1]; // _08, array size variable
 };
 
 struct CtrlGroup_ {
 	int magic;              // _00, 'WBCT'
 	u32 mCurrentSceneIndex; // _04
 	int count;              // _08, same count as WaveArchiveBank_
-	SCNE_* scenes[1];       // _0C, array size variable
+	PTR32(SCNE_) scenes[1];       // _0C, array size variable
 };
 
 // Name fabricated based on magic ID.
@@ -204,16 +204,16 @@ struct SCNE_ {
 	int magic;            // _00, 'SCNE'
 	u32 externalMode;     // _04
 	u32 dependencyCount;  // _08
-	Ctrl_* cdf;           // _0C
-	Ctrl_* cex;           // _10
-	Ctrl_* cst;           // _14
+	PTR32(Ctrl_) cdf;           // _0C
+	PTR32(Ctrl_) cex;           // _10
+	PTR32(Ctrl_) cst;           // _14
 	int dependencyIds[1]; // _18, variable size?
 };
 
 struct Ctrl_ {
 	int magic;           // _00, 'C-DF', 'C-EX' or 'C-ST'
 	int count;           // _04
-	WaveID_* waveIDs[1]; // _08, array size variable
+	PTR32(WaveID_) waveIDs[1]; // _08, array size variable
 };
 
 // Name fabricated from Xayr's tools.
@@ -221,7 +221,7 @@ struct WaveID_ {
 	u32 id;         // _00, split into sound id and ws id
 	jaheap_ heap;   // _04
 	u32 loadStatus; // _30
-	Wave_* data;    // _34
+	PTR32(Wave_) data;    // _34
 };
 
 struct WaveArchive_ {
@@ -229,7 +229,7 @@ struct WaveArchive_ {
 	jaheap_ heap;        // _40
 	u32 fileLoadStatus;  // _6C
 	int waveCount;       // _70
-	Wave_* waves[1];     // _74, array size variable
+	PTR32(Wave_) waves[1];     // _74, array size variable
 };
 
 /**
@@ -248,7 +248,40 @@ struct Wave_ {
 	s32 _1C;               // _1C
 	s16 loopYN1;           // _20
 	s16 loopYN2;           // _22
-	u32* fileLoadStatus;   // _24, set to dolphin/dvd.h 'DVD_RESULT_*' defines
+	PTR32(u32) fileLoadStatus; // _24, set to dolphin/dvd.h 'DVD_RESULT_*' defines
 };
+
+// These structures are laid directly over loaded file data, so their layout must not depend on the
+// target's pointer size (see PTR32 in types.h). Checked on non-CodeWarrior C++11 builds only.
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(Bank_) == 0x3C4, "Bank_: file layout size changed");
+static_assert(sizeof(Ibnk_) == 0x3E4, "Ibnk_: file layout size changed");
+static_assert(sizeof(Vmap_) == 0x10, "Vmap_: file layout size changed");
+static_assert(sizeof(InstKeymap_) == 0x10, "InstKeymap_: file layout size changed");
+static_assert(sizeof(PercKeymap_) == 0x1C, "PercKeymap_: file layout size changed");
+static_assert(sizeof(Sense_) == 0xC, "Sense_: file layout size changed");
+static_assert(sizeof(Osc_) == 0x18, "Osc_: file layout size changed");
+static_assert(sizeof(Inst_) == 0x40, "Inst_: file layout size changed");
+static_assert(sizeof(Voice_) == 0x10, "Voice_: file layout size changed");
+static_assert(sizeof(Perc_) == 0x408, "Perc_: file layout size changed");
+static_assert(sizeof(Rand_) == 0x10, "Rand_: file layout size changed");
+static_assert(sizeof(Pmap_) == 0x8, "Pmap_: file layout size changed");
+static_assert(sizeof(Wsys_) == 0x18, "Wsys_: file layout size changed");
+static_assert(sizeof(WaveArchiveBank_) == 0xC, "WaveArchiveBank_: file layout size changed");
+static_assert(sizeof(CtrlGroup_) == 0x10, "CtrlGroup_: file layout size changed");
+static_assert(sizeof(SCNE_) == 0x1C, "SCNE_: file layout size changed");
+static_assert(sizeof(Ctrl_) == 0xC, "Ctrl_: file layout size changed");
+static_assert(sizeof(WaveID_) == 0x38, "WaveID_: file layout size changed");
+static_assert(sizeof(WaveArchive_) == 0x78, "WaveArchive_: file layout size changed");
+static_assert(sizeof(Wave_) == 0x28, "Wave_: file layout size changed");
+static_assert(__builtin_offsetof(Wsys_, waveArcBank) == 0x10, "Wsys_::waveArcBank: file layout offset changed");
+static_assert(__builtin_offsetof(Wsys_, ctrlGroup) == 0x14, "Wsys_::ctrlGroup: file layout offset changed");
+static_assert(__builtin_offsetof(Inst_, mKeyRegions) == 0x2C, "Inst_::mKeyRegions: file layout offset changed");
+static_assert(__builtin_offsetof(Perc_, mKeyRegions) == 0x88, "Perc_::mKeyRegions: file layout offset changed");
+static_assert(__builtin_offsetof(SCNE_, cst) == 0x14, "SCNE_::cst: file layout offset changed");
+static_assert(__builtin_offsetof(WaveID_, data) == 0x34, "WaveID_::data: file layout offset changed");
+static_assert(__builtin_offsetof(WaveArchive_, waves) == 0x74, "WaveArchive_::waves: file layout offset changed");
+static_assert(__builtin_offsetof(Wave_, fileLoadStatus) == 0x24, "Wave_::fileLoadStatus: file layout offset changed");
+#endif
 
 #endif

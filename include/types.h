@@ -49,6 +49,34 @@ typedef __UINTPTR_TYPE__ uptr;
 typedef u32 uptr;
 #endif
 
+// PTR32(T): a pointer field that is always 4 bytes, for structures laid directly over data loaded from
+// game files (whose layouts store 32-bit pointers/offsets). CodeWarrior (and any 32-bit target) gets a
+// plain `T*`. On LP64 targets such as the PS3, `Ptr32<T>` stores the address in 32 bits; PS3 user
+// addresses fit in 32 bits, so no information is lost (PSL1GHT uses the same idea for system structs).
+#if defined(__cplusplus) && defined(__LP64__)
+template <typename T>
+struct Ptr32 {
+	Ptr32() = default;
+	Ptr32(T* ptr)
+	    : mAddr((u32)(uptr)ptr)
+	{
+	}
+	Ptr32& operator=(T* ptr)
+	{
+		mAddr = (u32)(uptr)ptr;
+		return *this;
+	}
+	operator T*() const { return (T*)(uptr)mAddr; }
+	T* operator->() const { return (T*)(uptr)mAddr; }
+	T* get() const { return (T*)(uptr)mAddr; }
+
+	u32 mAddr;
+};
+#define PTR32(...) Ptr32<__VA_ARGS__>
+#else
+#define PTR32(...) __VA_ARGS__*
+#endif
+
 // Volatile types
 typedef volatile u8 vu8;
 typedef volatile u16 vu16;

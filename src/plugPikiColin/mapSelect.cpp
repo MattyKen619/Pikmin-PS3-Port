@@ -146,7 +146,7 @@ public:
 	void menuSelectOption(Menu& parent)
 	{
 		// for this menu, the payload data is a pointer to the map's StageInfo
-		StageInfo* info = reinterpret_cast<StageInfo*>(parent.mCurrentItem->mData);
+		StageInfo* info = reinterpret_cast<StageInfo*>((uptr)(u32)parent.mCurrentItem->mData); // via u32: no sign extension
 
 		// prepare to enter gameplay for the selected course
 		enterCourse(info);
