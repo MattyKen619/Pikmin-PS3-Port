@@ -51,15 +51,23 @@ f64 log10(f64);
 f64 fmod(f64, f64);
 f64 scalbn(f64, int);
 
+// C99 `inline` (non-CodeWarrior C builds, e.g. the PS3 port's mtx/*.c) would emit an external
+// definition in every C file that includes this header, so those builds use `static inline`.
+#if !defined(__MWERKS__) && !defined(__cplusplus)
+#define MSL_MATH_INLINE static inline
+#else
+#define MSL_MATH_INLINE inline
+#endif
+
 #define fabs(x)  __fabs(x)
 #define fabsf(x) __fabsf(x)
 
-inline f128 fabsl(f128 x)
+MSL_MATH_INLINE f128 fabsl(f128 x)
 {
 	return __fabs((f64)x);
 }
 
-inline f32 sqrtf(f32 x)
+MSL_MATH_INLINE f32 sqrtf(f32 x)
 {
 	// these REALLY don't have to be static.
 	static const f64 _half  = .5;
@@ -83,7 +91,7 @@ END_SCOPE_EXTERN_C
 #ifdef __cplusplus
 namespace std {
 
-inline f32 sqrtf(f32 x)
+MSL_MATH_INLINE f32 sqrtf(f32 x)
 {
 	// these REALLY don't have to be static.
 	static const f64 _half  = 0.5;
@@ -102,7 +110,7 @@ inline f32 sqrtf(f32 x)
 	return x;
 }
 
-inline f32 fmodf(f32 x, f32 m)
+MSL_MATH_INLINE f32 fmodf(f32 x, f32 m)
 {
 	f32 b, a;
 	a = fabsf(m);
@@ -116,7 +124,7 @@ inline f32 fmodf(f32 x, f32 m)
 }
 } // namespace std
 
-inline f32 fmod(f32 x, f32 m)
+MSL_MATH_INLINE f32 fmod(f32 x, f32 m)
 {
 	return std::fmodf(x, m);
 }

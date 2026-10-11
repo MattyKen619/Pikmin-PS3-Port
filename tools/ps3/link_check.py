@@ -100,6 +100,7 @@ def main():
     ap.add_argument("--extra-src", action="append", default=[], help="additional source")
     ap.add_argument("--no-port-sources", action="store_true", help="link only the game code (shows the full SDK inventory)")
     ap.add_argument("-j", type=int, default=os.cpu_count() or 2)
+    ap.add_argument("--ppu-bin", help="use the ps3dev toolchain in this bin dir (ppu-gcc, ELFv1, newlib) instead of Clang/ld.lld")
     args = ap.parse_args()
     os.chdir(ROOT)
     out = ROOT / args.out
@@ -112,14 +113,20 @@ def main():
     extra = ([] if args.no_port_sources else PORT_SOURCES) + args.extra_src
     units += [("port__" + Path(s).stem, s, "extra") for s in extra]
 
+    if args.ppu_bin:
+        cc, cxx = os.path.join(args.ppu_bin, "ppu-gcc"), os.path.join(args.ppu_bin, "ppu-g++")
+        cflags = CFLAGS[2:]  # drop --target / -mabi: ppu-gcc is natively powerpc64-ps3-elf, ELFv1
+    else:
+        cc, cxx, cflags = "clang", "clang++", CFLAGS
+
     def build(item):
         name, src, group = item
         o = out / "obj" / (name.replace("/", "__") + ".o")
         is_c = src.endswith(".c") and group not in ("jaudio",)
         if src.endswith((".cpp", ".cc")) or not is_c:
-            cmd = ["clang++", *CFLAGS, *CXXFLAGS] + (["-x", "c++"] if src.endswith(".c") else []) + [src, "-o", str(o)]
+            cmd = [cxx, *cflags, *CXXFLAGS] + (["-x", "c++"] if src.endswith(".c") else []) + [src, "-o", str(o)]
         else:
-            cmd = ["clang", *CFLAGS, "-std=gnu99", src, "-o", str(o)]
+            cmd = [cc, *cflags, "-std=gnu99", src, "-o", str(o)]
         p = subprocess.run(cmd, capture_output=True, text=True)
         return (src, p.returncode == 0, p.stderr[-2000:], str(o))
 
@@ -131,9 +138,15 @@ def main():
     for src, _, err, _ in failed:
         print(f"  FAILED {src}: {err.strip().splitlines()[0] if err.strip() else ''}")
 
-    link = subprocess.run(["ld.lld", "-m", "elf64ppc", "--gc-sections", "-e", "main", "--error-limit=0",
-                           "-o", str(out / "pikmin_ps3_linktest.elf"), *objs],
-                          capture_output=True, text=True)
+    elf = str(out / "pikmin_ps3_linktest.elf")
+    if args.ppu_bin:
+        # Real PS3 link (ELFv1): PSL1GHT's startup code (which calls main), newlib, the lv2 system-call
+        # layer (-lsysbase -lrt -llv2, added by the ppu-gcc driver specs) and GCC's C++ runtime.
+        # Requires $PSL1GHT to point at an installed PSL1GHT.
+        link_cmd = [cxx, "-Wl,--gc-sections", "-o", elf, *objs, "-lsupc++", "-lm"]
+    else:
+        link_cmd = ["ld.lld", "-m", "elf64ppc", "--gc-sections", "-e", "main", "--error-limit=0", "-o", elf, *objs]
+    link = subprocess.run(link_cmd, capture_output=True, text=True)
     undef = defaultdict(set)
     cur = None
     for line in link.stderr.splitlines():
@@ -145,7 +158,12 @@ def main():
         m = re.match(r"^>>> referenced by (.*)$", line)
         if m and cur:
             undef[cur].add(m.group(1).strip())
-    other_errors = [l for l in link.stderr.splitlines() if l.startswith("ld.lld: error:") and "undefined symbol" not in l]
+            continue
+        m = re.match(r"^(.*?):\(.*\): undefined reference to [`'](.*)'$", line)
+        if m:  # GNU ld format
+            undef[m.group(2).strip()].add(os.path.basename(m.group(1)))
+    other_errors = [l for l in link.stderr.splitlines()
+                    if ("error" in l.lower() and "undefined" not in l and "collect2" not in l and "ld returned" not in l)]
 
     # lld prints demangled names; recover raw names via the objects' symbol tables for grouping.
     raw = set()
@@ -167,8 +185,11 @@ def main():
     complete = not other_errors and not outside
     if complete:
         # Produce the ELF anyway, leaving the toolchain-provided symbols unresolved, for inspection.
-        subprocess.run(["ld.lld", "-m", "elf64ppc", "--gc-sections", "-e", "main", "--unresolved-symbols=ignore-all",
-                        "-o", str(out / "pikmin_ps3_linktest.elf"), *objs], check=True)
+        if args.ppu_bin:
+            subprocess.run(link_cmd[:1] + ["-Wl,--unresolved-symbols=ignore-all"] + link_cmd[1:], check=True)
+        else:
+            subprocess.run(["ld.lld", "-m", "elf64ppc", "--gc-sections", "-e", "main", "--unresolved-symbols=ignore-all",
+                            "-o", elf, *objs], check=True)
     lines = [f"link: {'OK' if link.returncode == 0 else 'FAILED'}; undefined symbols: {len(undef)}"]
     lines.append(f"complete apart from toolchain-provided symbols: {'YES' if complete else 'NO'}"
                  + ("" if complete else f" ({len(outside)} other symbols missing)"))
