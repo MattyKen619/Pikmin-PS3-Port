@@ -108,7 +108,11 @@ public:
  */
 class SRTNode : public Node {
 public:
+#if defined(__MWERKS__) || defined(_MSC_VER)
 	SRTNode(immut char* name); // unused/inlined
+#else
+	SRTNode(immut char* name = "<SRTNode>"); // default argument moved here for standard C++ (Clang rejects adding it on the definition)
+#endif
 
 	virtual void update();                                    // _10
 	virtual void concat(Matrix4f&) { }                        // _28 (weak)

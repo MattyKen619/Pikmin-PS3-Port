@@ -153,7 +153,11 @@ void Node::render(Graphics& gfx)
  * @todo: Documentation
  * @note UNUSED Size: 000128 (Matching by size)
  */
+#if defined(__MWERKS__) || defined(_MSC_VER)
 SRTNode::SRTNode(immut char* name = "<SRTNode>")
+#else
+SRTNode::SRTNode(immut char* name)
+#endif
     : Node(name)
 {
 	setPosition(Vector3f(0.0f, 0.0f, 0.0f));
