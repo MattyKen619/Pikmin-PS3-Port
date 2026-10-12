@@ -235,7 +235,9 @@ void Jac_HVQM_Init(immut char* movieFilePath, u8* data, u32 bufferSize)
 	dvdfile_size -= 0x80000;
 	volatile u32 status;
 	DVDT_LoadtoDRAM(dvdcount, movieFilePath, (u32)(uptr)dvd_buf[dvdcount % 3], 0, 0x80000, (u32*)&status, 0);
-	while (status == 0) { }
+	while (status == 0) {
+		PS3_SPIN_WAIT();
+	}
 
 	dvd_ctrl[0].mFileOffset = 0;
 	dvd_ctrl[0].mState      = 2;
@@ -335,7 +337,9 @@ void Jac_HVQM_Init(immut char* movieFilePath, u8* data, u32 bufferSize)
 
 		InitPic();
 		int start = Jac_GetCurrentSCounter();
-		while (start == Jac_GetCurrentSCounter()) { }
+		while (start == Jac_GetCurrentSCounter()) {
+			PS3_SPIN_WAIT();
+		}
 	}
 
 	return;
@@ -529,7 +533,9 @@ void Jac_HVQM_ForceStop(void)
 	dvdfile_size = 0;
 	if (dvd_loadfinish != 1 && dvd_active != 0) {
 		OSRestoreInterrupts(inter);
-		while (dvd_loadfinish != 1) { }
+		while (dvd_loadfinish != 1) {
+			PS3_SPIN_WAIT();
+		}
 
 	} else {
 		OSRestoreInterrupts(inter);

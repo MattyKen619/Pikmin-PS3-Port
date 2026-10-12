@@ -11,7 +11,9 @@
 extern "C" void ps3OsMiscInit(void);
 extern "C" void ps3StartWatchdog(void);
 
-#define PS3_TEST_BUILD 2
+#ifndef PS3_TEST_BUILD
+#define PS3_TEST_BUILD 0
+#endif
 
 extern "C" void ps3BootStage(const char* what)
 {

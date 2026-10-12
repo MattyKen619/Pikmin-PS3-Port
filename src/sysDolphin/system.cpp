@@ -1198,7 +1198,9 @@ void doneDMA(u32 cache)
  */
 void System::copyWaitUntilDone()
 {
-	while (mDmaComplete == FALSE) { }
+	while (mDmaComplete == FALSE) {
+		PS3_SPIN_WAIT();
+	}
 }
 
 /**
@@ -1343,7 +1345,9 @@ void System::copyCacheToTexture(CacheTexture* tex)
 	DCInvalidateRange((void*)mainMemAddr, size);
 	ARQPostRequest(cache, (u32)(uptr)tex, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_HIGH, aramAddr, (u32)mainMemAddr, size, freeBuffer);
 
-	while (mTexComplete == FALSE) { }
+	while (mTexComplete == FALSE) {
+		PS3_SPIN_WAIT();
+	}
 }
 
 /**

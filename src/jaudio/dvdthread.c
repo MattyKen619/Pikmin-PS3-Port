@@ -411,7 +411,7 @@ s32 DVDT_LoadtoARAM_Main(void* dvdCall)
 		u8* buf     = ADVD_BUFFER[buffer_load];
 		buffer_load = (buffer_load + 1) % buffers;
 		while (buffer_full == buffers)
-			;
+			PS3_SPIN_WAIT();
 
 		if (call->length < buffersize) {
 			readSize = ALIGN_NEXT(call->length, 32);
@@ -437,7 +437,7 @@ s32 DVDT_LoadtoARAM_Main(void* dvdCall)
 	DVDClose(&finfo);
 
 	while (buffer_full != 0)
-		;
+		PS3_SPIN_WAIT();
 
 	OSGetTick();
 
@@ -553,7 +553,9 @@ s32 DVDT_LoadFile(immut char* file, u8* dst)
 	STACK_PAD_VAR(2);
 	DVDT_LoadtoDRAM(0, file, (u32)(uptr)dst, 0, 0, (u32*)&status, NULL);
 
-	while (status == 0) { }
+	while (status == 0) {
+		PS3_SPIN_WAIT();
+	}
 
 	if (status == -1) {
 		return 0;

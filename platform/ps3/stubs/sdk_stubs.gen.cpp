@@ -35,7 +35,6 @@ void GXCallDisplayList(void *, u32) { PS3_STUB("GXCallDisplayList"); }
 u32 GXEndDisplayList(void) { PS3_STUB("GXEndDisplayList"); return {}; }
 
 // ---- Dolphin/GX/GXFrameBuffer.h
-void GXCopyDisp(void *, GXBool) { PS3_STUB("GXCopyDisp"); }
 void GXCopyTex(void *, GXBool) { PS3_STUB("GXCopyTex"); }
 void GXSetCopyClear(GXColor, u32) { PS3_STUB("GXSetCopyClear"); }
 void GXSetCopyFilter(GXBool, const u8[12][2], GXBool, const u8[7]) { PS3_STUB("GXSetCopyFilter"); }
@@ -65,8 +64,6 @@ void GXSetChanMatColor(GXChannelID, GXColor) { PS3_STUB("GXSetChanMatColor"); }
 void GXSetNumChans(u8) { PS3_STUB("GXSetNumChans"); }
 
 // ---- Dolphin/GX/GXMisc.h
-void GXDrawDone(void) { PS3_STUB("GXDrawDone"); }
-void GXFlush(void) { PS3_STUB("GXFlush"); }
 GXFifoObj * GXInit(void *, u32) { PS3_STUB("GXInit"); return {}; }
 void GXPixModeSync(void) { PS3_STUB("GXPixModeSync"); }
 struct OSThread * GXSetCurrentGXThread(void) { PS3_STUB("GXSetCurrentGXThread"); return {}; }
@@ -118,22 +115,11 @@ void GXSetViewport(f32, f32, f32, f32, f32, f32) { PS3_STUB("GXSetViewport"); }
 // ---- Dolphin/ai.h
 u32 AIGetStreamSampleCount(void) { PS3_STUB("AIGetStreamSampleCount"); return {}; }
 u32 AIGetStreamTrigger(void) { PS3_STUB("AIGetStreamTrigger"); return {}; }
-void AIInit(u8 *) { PS3_STUB("AIInit"); }
-void AIInitDMA(u32, u32) { PS3_STUB("AIInitDMA"); }
-AIDCallback AIRegisterDMACallback(AIDCallback) { PS3_STUB("AIRegisterDMACallback"); return {}; }
 void AIResetStreamSampleCount(void) { PS3_STUB("AIResetStreamSampleCount"); }
-void AISetDSPSampleRate(u32) { PS3_STUB("AISetDSPSampleRate"); }
 void AISetStreamPlayState(u32) { PS3_STUB("AISetStreamPlayState"); }
 void AISetStreamSampleRate(u32) { PS3_STUB("AISetStreamSampleRate"); }
 void AISetStreamVolLeft(u8) { PS3_STUB("AISetStreamVolLeft"); }
 void AISetStreamVolRight(u8) { PS3_STUB("AISetStreamVolRight"); }
-void AIStartDMA(void) { PS3_STUB("AIStartDMA"); }
-
-// ---- Dolphin/dsp.h
-u32 DSPCheckMailFromDSP(void) { PS3_STUB("DSPCheckMailFromDSP"); return {}; }
-u32 DSPCheckMailToDSP(void) { PS3_STUB("DSPCheckMailToDSP"); return {}; }
-u32 DSPReadMailFromDSP(void) { PS3_STUB("DSPReadMailFromDSP"); return {}; }
-void DSPSendMailToDSP(u32) { PS3_STUB("DSPSendMailToDSP"); }
 
 // ---- Dolphin/hio.h
 BOOL HIOEnumDevices(HIOEnumCallback) { PS3_STUB("HIOEnumDevices"); return {}; }

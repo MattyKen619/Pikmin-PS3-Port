@@ -64,13 +64,16 @@ static unsigned long long elapsedGcTicks(void)
 	return (d / sTbFreq) * GC_TIMER_HZ + ((d % sTbFreq) * GC_TIMER_HZ) / sTbFreq;
 }
 
+// Both are polled in timing loops: they are switch points (cheap when no interrupt is pending).
 OSTick OSGetTick(void)
 {
+	ps3DeliverInterrupts();
 	return (OSTick)elapsedGcTicks();
 }
 
 OSTime OSGetTime(void)
 {
+	ps3DeliverInterrupts();
 	long long secsSince2000 = sEpoch0 - GC_EPOCH_OFFSET;
 	return (OSTime)(secsSince2000 * (long long)GC_TIMER_HZ + (long long)elapsedGcTicks());
 }
@@ -184,3 +187,9 @@ void DCStoreRange(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
 void DCStoreRangeNoSync(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
 void DCZeroRange(void* addr, u32 nBytes) { memset(addr, 0, nBytes); }
 void PPCSync(void) { __sync_synchronize(); }
+
+// Used by the game's error screen (System::showError).
+u32 OSGetStackPointer()
+{
+	return (u32)(uptr)__builtin_frame_address(0); // PS3 user addresses are below 4 GB
+}

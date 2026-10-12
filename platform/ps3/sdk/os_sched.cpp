@@ -20,6 +20,7 @@
 #define GAME_LV2_PRIO   1500    // all game threads share one lv2 priority; the baton decides who runs
 #define GAME_STACK_SIZE 0x40000 // 256 KB: 64-bit code uses more stack than the GameCube build did
 #define MAX_INTERRUPTS  256
+#define SHADOW_DEPTH    128
 
 struct ThreadImpl {
 	OSThread* os;
@@ -35,6 +36,13 @@ struct ThreadImpl {
 	u32 readySeq;
 	int intrEnabled;
 	int index;
+
+	// Shadow call stack, kept by the -finstrument-functions hooks (see "preemption points" below).
+	void* stackFn[SHADOW_DEPTH];
+	void* stackSite[SHADOW_DEPTH];
+	volatile int depth;
+	volatile u32 calls;
+	u32 reportedCalls;
 };
 
 struct Interrupt {
@@ -291,6 +299,56 @@ extern "C" void ps3DeliverInterrupts(void)
 
 extern "C" int ps3InInterrupt(void) { return sInInterrupt; }
 
+// ------------------------------------------------------------------ preemption points
+//
+// On the GameCube an interrupt can stop the running thread at any instruction and switch to a
+// higher-priority thread (the audio thread wakes every 17.5 ms this way). Pikmin depends on it: the main
+// thread busy-waits until the audio thread has set things up. Here the game code is compiled with
+// -finstrument-functions, so every function entry calls the hook below. If an interrupt is pending,
+// the hook delivers it and, if that woke a higher-priority thread, hands over the baton right there,
+// as the GameCube would have. The hooks also keep a shadow call stack per thread for stall reports.
+// Busy-wait loops that call no function at all use PS3_SPIN_WAIT() (types.h) instead.
+
+extern "C" void __cyg_profile_func_enter(void* fn, void* site) __attribute__((no_instrument_function));
+extern "C" void __cyg_profile_func_exit(void* fn, void* site) __attribute__((no_instrument_function));
+
+extern "C" void __cyg_profile_func_enter(void* fn, void* site)
+{
+	ThreadImpl* t = sRunning;
+	if (!t) {
+		return; // static constructors, before the scheduler starts
+	}
+	int d = t->depth;
+	if (d < SHADOW_DEPTH) {
+		t->stackFn[d]   = fn;
+		t->stackSite[d] = site;
+	}
+	t->depth = d + 1;
+	t->calls++;
+	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
+		ps3DeliverInterrupts();
+	}
+}
+
+extern "C" void __cyg_profile_func_exit(void* fn, void* site)
+{
+	(void)fn;
+	(void)site;
+	ThreadImpl* t = sRunning;
+	if (t && t->depth > 0) {
+		t->depth--;
+	}
+}
+
+extern "C" void ps3SpinWait(void)
+{
+	if (sIntrHead != sIntrTail) {
+		ps3DeliverInterrupts();
+	} else {
+		ps3b_sleep_us(20);
+	}
+}
+
 extern "C" void ps3WaitOn(void* key, const char* reason)
 {
 	lockS();
@@ -338,6 +396,24 @@ __OSInterruptHandler __OSSetInterruptHandler(__OSInterrupt interrupt, __OSInterr
 	__OSInterruptHandler old = sHandlers[interrupt];
 	sHandlers[interrupt]     = handler;
 	return old;
+}
+
+// Raises a GameCube hardware interrupt: its registered handler (__OSSetInterruptHandler) runs like an
+// interrupt, at the next delivery point.
+static OSContext sInterruptContext;
+
+static void runInterruptHandler(void* arg)
+{
+	int interrupt              = (int)(uptr)arg;
+	__OSInterruptHandler handler = (interrupt >= 0 && interrupt < 32) ? sHandlers[interrupt] : NULL;
+	if (handler) {
+		handler((__OSInterrupt)interrupt, &sInterruptContext);
+	}
+}
+
+extern "C" void ps3RaiseInterrupt(int interrupt)
+{
+	ps3PostInterrupt(runInterruptHandler, (void*)(uptr)interrupt);
 }
 
 OSInterruptMask __OSUnmaskInterrupts(OSInterruptMask mask)
@@ -428,6 +504,7 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 	impl->hasBaton    = 0;
 	impl->intrEnabled = 1;
 	impl->waitKey     = NULL;
+	impl->depth       = 0;
 	unlockS();
 	ps3Log("[ps3] thread %d created (priority %d)\n", impl->index, (int)priority);
 	return TRUE;
@@ -693,41 +770,73 @@ static const char* stateName(int s)
 	}
 }
 
+extern "C" void ps3AudioStatus(char* buf, unsigned int size);
+extern "C" unsigned int ps3FramesDrawn(void);
+
 static void reportThreads(const char* title)
 {
-	ps3Log("[ps3] %s: last SDK call \"%s\", %u frames, %u dropped interrupts\n", title, sLastActivity, ps3FrameCounter(),
-	       (unsigned)sIntrDropped);
+	char audio[96];
+	ps3AudioStatus(audio, sizeof(audio));
+	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s\n",
+	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",
+	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, audio);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];
 		if (!t->os) {
 			continue;
 		}
-		ps3Log("[ps3]   thread %d prio %d %s%s%s%s\n", i, (int)t->os->priority, stateName(t->os->state), t->waitReason ? " in " : "",
-		       t->waitReason ? t->waitReason : "", t == sRunning ? "  <- has the baton" : "");
+		u32 calls        = t->calls;
+		u32 recent       = calls - t->reportedCalls;
+		t->reportedCalls = calls;
+		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls\n", i, (int)t->os->priority, stateName(t->os->state),
+		       t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "", t == sRunning ? "  <- has the baton" : "",
+		       (unsigned)recent);
+		// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
+		int depth = t->depth;
+		if (depth > 0) {
+			char line[512];
+			int n = snprintf(line, sizeof(line), "[stack]   thread %d depth %d:", i, depth);
+			int shown = depth < SHADOW_DEPTH ? depth : SHADOW_DEPTH;
+			for (int f = shown - 1; f >= 0 && f >= shown - 10 && n < (int)sizeof(line) - 40; f--) {
+				n += snprintf(line + n, sizeof(line) - n, " %p<%p", t->stackFn[f], t->stackSite[f]);
+			}
+			ps3Log("%s\n", line);
+		}
 	}
 }
 
 static void watchdogThread(void*)
 {
-	u32 last     = sActivity;
-	int stalled  = 0;
-	int seconds  = 0;
+	u32 lastActivity = sActivity;
+	u32 lastCalls    = 0;
+	ThreadImpl* lastRunner = NULL;
+	int idleSdk      = 0;
+	int idleCalls    = 0;
+	int seconds      = 0;
 	for (;;) {
 		ps3b_sleep_us(1000 * 1000);
 		seconds++;
 		u32 now = sActivity;
-		if (now == last) {
-			stalled++;
-			if (stalled == 5 || stalled % 30 == 0) {
-				char title[64];
-				snprintf(title, sizeof(title), "STALL: no SDK activity for %d s", stalled);
-				reportThreads(title);
-			}
-		} else {
-			stalled = 0;
-		}
-		last = now;
-		if (seconds % 15 == 0) {
+		idleSdk = (now == lastActivity) ? idleSdk + 1 : 0;
+		lastActivity = now;
+
+		// The baton holder is executing game code but has not called a function: a loop without calls.
+		ThreadImpl* runner = sRunning;
+		u32 calls          = runner ? runner->calls : 0;
+		int running        = runner && runner->os && runner->os->state == OS_THREAD_STATE_RUNNING;
+		idleCalls          = (running && runner == lastRunner && calls == lastCalls) ? idleCalls + 1 : 0;
+		lastRunner         = runner;
+		lastCalls          = calls;
+
+		if (idleSdk == 5 || (idleSdk > 0 && idleSdk % 30 == 0)) {
+			char title[64];
+			snprintf(title, sizeof(title), "STALL: no SDK activity for %d s", idleSdk);
+			reportThreads(title);
+		} else if (idleCalls == 5 || (idleCalls > 0 && idleCalls % 30 == 0)) {
+			char title[80];
+			snprintf(title, sizeof(title), "STALL: thread %d looping without calls for %d s", runner->index, idleCalls);
+			reportThreads(title);
+		} else if (seconds % 15 == 0) {
 			reportThreads("heartbeat");
 		}
 	}

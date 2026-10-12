@@ -43,6 +43,14 @@ static int sTotalLines = 1;
 static volatile int sDirty = 1;
 static unsigned int sConMutex = 0;
 
+#ifndef PS3_TEST_BUILD
+#define PS3_TEST_BUILD 0
+#endif
+#define CON_STR2(x) #x
+#define CON_STR(x)  CON_STR2(x)
+static const char sTitle[] = "Pikmin PS3 port - test build " CON_STR(PS3_TEST_BUILD)
+                             " - boot log   (exit: PS button > Quit Game, or hold Start+Select)";
+
 static void conLog(const char* fmt, ...)
 {
 	char buf[256];
@@ -154,8 +162,7 @@ static void redraw()
 	}
 	const int lineH = 8 * CON_SCALE + 2;
 	const int top   = 40;
-	drawText(fb, 40, 12, "Pikmin PS3 port - test build 2 - boot log   (exit: PS button > Quit Game, or hold Start+Select)",
-	         0x00FFD040);
+	drawText(fb, 40, 12, sTitle, 0x00FFD040);
 	int rows = ((int)sHeight - top - 30) / lineH;
 	ps3b_mutex_lock(sConMutex);
 	int avail = sTotalLines < CON_LINES ? sTotalLines : CON_LINES;

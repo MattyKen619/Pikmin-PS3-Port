@@ -290,13 +290,6 @@ void StartAudioThread(void* heap, s32 heapSize, u32 aramSize, u32 flags)
 
 	Jac_StackInit(jac_audioStack, 0x200);
 	if ((flags & AUDIO_THREAD_FLAG_AUDIO)) {
-#if defined(TARGET_PS3)
-		// PS3 port: this thread boots the GameCube audio DSP and waits for it to answer, which would
-		// hang forever on the PS3. Audio is replaced in Phase 5; until then it is not started.
-		OSReport("[ps3] audio thread not started (audio is not implemented yet)\n");
-	}
-	if (0) {
-#endif
 		// point to top of audioStack
 		u8* stack_p = jac_audioStack;
 		OSCreateThread(&jac_audioThread.thread, &audioproc, NULL, stack_p + AUDIO_STACK_SIZE, AUDIO_STACK_SIZE, pri, OS_THREAD_ATTR_DETACH);

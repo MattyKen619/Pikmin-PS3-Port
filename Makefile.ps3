@@ -42,12 +42,19 @@ OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(LIBS_C) $(PLATFORM_CPP) $(BA
 #---------------------------------------------------------------------------------
 OPT       := -O2 -fno-strict-aliasing
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) -fno-exceptions -funsigned-char -w
-GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1
+# Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
+TEST_BUILD := 3
+GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
-GAME_CXXFLAGS    := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(GAME_DEFS) $(GAME_INC)
+# Game code (C++ and jaudio) is instrumented: every function entry is a thread-switch point and keeps a
+# shadow call stack for stall reports (see "preemption points" in platform/ps3/sdk/os_sched.cpp).
+# The SDK layer that implements the hooks is not.
+INSTRUMENT       := -finstrument-functions
+PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(GAME_DEFS) $(GAME_INC)
+GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
-BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti $(LIBPSL1GHT_INC)
+BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUILD) $(LIBPSL1GHT_INC)
 
 LIBS    := -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
 LDFLAGS := $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map
@@ -62,12 +69,19 @@ $(BUILD)/$(TARGET).elf: $(OBJECTS)
 	@echo linking ... $(notdir $@)
 	@$(CXX) $(LDFLAGS) $(OBJECTS) $(LIBPSL1GHT_LIB) $(LIBS) -o $@
 	@python3 tools/ps3/check_imports.py $@ || (rm -f $@; false)
+	@mkdir -p $(BUILD)/archive/test$(TEST_BUILD) && cp $@ $(BUILD)/$(TARGET).map $(BUILD)/archive/test$(TEST_BUILD)/
 
 # game C++
-$(addprefix $(OBJDIR)/,$(addsuffix .o,$(GAME_CPP) $(PLATFORM_CPP))): $(OBJDIR)/%.o: %
+$(call objs_of,$(GAME_CPP)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
 	@$(CXX) $(GAME_CXXFLAGS) -c $< -o $@
+
+# Nintendo SDK replacement (game headers, not instrumented)
+$(call objs_of,$(PLATFORM_CPP)): $(OBJDIR)/%.o: %
+	@mkdir -p $(dir $@)
+	@echo $<
+	@$(CXX) $(PLATFORM_CXXFLAGS) -c $< -o $@
 
 # jaudio: .c files that the original build compiles as C++
 $(call objs_of,$(JAUDIO_C)): $(OBJDIR)/%.o: %

@@ -581,7 +581,9 @@ void Jac_StartDemo(u32 cinID)
 	}
 	default:
 	{
-		while (now_loading < 3) { }
+		while (now_loading < 3) {
+			PS3_SPIN_WAIT();
+		}
 		break;
 	}
 	}
@@ -593,7 +595,7 @@ void Jac_StartDemo(u32 cinID)
 		__Prepare_BGM(DEMOID_ShipUpgradePractice);
 		if (now_loading) {
 			while (now_loading < 3)
-				;
+				PS3_SPIN_WAIT();
 		}
 	}
 
@@ -602,7 +604,7 @@ void Jac_StartDemo(u32 cinID)
 		__Prepare_BGM(DEMOID_ShipUpgradeLast);
 		if (now_loading) {
 			while (now_loading < 3)
-				;
+				PS3_SPIN_WAIT();
 		}
 	}
 

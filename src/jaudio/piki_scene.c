@@ -269,7 +269,9 @@ void Jac_SceneSetup(u32 sceneID, u32 stage)
 					dvd = TRUE;
 				}
 			} else {
-				while (now_loading) { }
+				while (now_loading) {
+					PS3_SPIN_WAIT();
+				}
 				Collect_AramMotherHeap();
 				Jac_PlayBgm(0, bgm2);
 			}
@@ -368,6 +370,7 @@ void Jac_SceneExit(u32 nextSceneID, u32 stage)
 	{
 		if (now_loading) {
 			do {
+				PS3_SPIN_WAIT();
 			} while (now_loading != 0);
 		}
 
@@ -464,6 +467,7 @@ void Jac_PrepareDemoSound(u32 id)
 		stop_ready = 0;
 		Jac_StopDemoSound(id);
 		do {
+			PS3_SPIN_WAIT();
 		} while (stop_ready == 0);
 	}
 	DVDT_ExtendPath(buffer, filelist[id]);
@@ -482,6 +486,7 @@ void Jac_StartDemoSound(u32 id)
 		stop_ready = 0;
 		Jac_StopDemoSound(id);
 		do {
+			PS3_SPIN_WAIT();
 		} while (stop_ready == 0);
 	}
 	current_prepare = 0xffffffff;

@@ -388,6 +388,19 @@ inline void padStack(void)
 #define TRAP_UNIMPLEMENTED ((void)0) /* Replace me */
 #endif // clang-format on
 
+// Body of a busy-wait loop that calls no function and waits for another thread or an interrupt
+// handler to change a variable. Empty on the GameCube, where an interrupt can switch threads at any
+// instruction. The PS3 port only switches threads at function calls and SDK calls, so such a loop
+// must offer a switch point itself (platform/ps3/sdk/os_sched.cpp).
+#if defined(TARGET_PS3)
+BEGIN_SCOPE_EXTERN_C
+void ps3SpinWait(void);
+END_SCOPE_EXTERN_C
+#define PS3_SPIN_WAIT() ps3SpinWait()
+#else
+#define PS3_SPIN_WAIT()
+#endif
+
 // Documenting MetroWerks intrinsic functions for PowerPC and placing them behind macros for portability.
 #if defined(__MWERKS__)
 #define __mwerks_eieio()                  /* void   */ __eieio()                  //
