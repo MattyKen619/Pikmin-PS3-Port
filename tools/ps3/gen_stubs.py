@@ -30,6 +30,20 @@ SDK_HEADERS = ["Dolphin/os.h", "Dolphin/gx.h", "Dolphin/dvd.h", "Dolphin/card.h"
 HANDWRITTEN = {"GXWGFifo", "__DSPRegs", "__OSBusClock", "__OSCurrHeap"}
 
 OUT = ROOT / "platform/ps3/stubs/sdk_stubs.gen.cpp"
+IMPL_DIR = ROOT / "platform/ps3/sdk"  # real implementations; their functions get no stub
+
+
+def implemented_functions():
+    """Names of functions defined at file scope in the platform SDK layer."""
+    import re
+    names = set()
+    rx = re.compile(r"^[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\([^)]*\)\s*(\{|$)")
+    for f in sorted(IMPL_DIR.glob("*.cpp")):
+        for line in f.read_text(errors="ignore").splitlines():
+            m = rx.match(line)
+            if m and not line.startswith(("static", "return", "if", "for", "while", "switch")):
+                names.add(m.group(1))
+    return names
 
 
 def main():
@@ -42,7 +56,10 @@ def main():
     ci.Config.set_library_file(args.libclang)
 
     rows = json.loads((ROOT / "build/ps3link/undefined.json").read_text())
-    wanted = sorted(r["symbol"] for r in rows if r["group"].startswith("sdk:") and r["symbol"] not in HANDWRITTEN)
+    implemented = implemented_functions()
+    wanted = sorted(r["symbol"] for r in rows
+                    if r["group"].startswith("sdk:") and r["symbol"] not in HANDWRITTEN and r["symbol"] not in implemented)
+    print(f"implemented in platform/ps3/sdk: {len([r for r in rows if r['symbol'] in implemented])} SDK symbols")
 
     probe = "".join(f'#include "{h}"\n' for h in SDK_HEADERS)
     idx = ci.Index.create()

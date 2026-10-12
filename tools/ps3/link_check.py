@@ -35,10 +35,13 @@ CXXFLAGS = ["-std=gnu++14", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cx
 
 # Port sources compiled in addition to the kept game code.
 PORT_SOURCES = [
-    "platform/ps3/stubs/sdk_stubs.gen.cpp",   # generated SDK placeholders (tools/ps3/gen_stubs.py)
-    "platform/ps3/stubs/sdk_globals.cpp",     # SDK globals the game touches directly
-    "platform/ps3/stubs/stub_report.cpp",
+    # The platform SDK layer (real implementations) + generated stubs for what is not implemented yet.
+    *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform/ps3/sdk").glob("*.cpp")),
+    *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform/ps3/stubs").glob("*.cpp")),
     "src/MSL_C/PPCEABI/bare/H/float.c",       # MSL float constants (__float_nan etc.); not in newlib
+    # The real backend needs PSL1GHT headers; the link check uses a do-nothing stand-in.
+    # (The PS3 build itself is Makefile.ps3.)
+    "tools/ps3/null_backend/ps3_backend_null.cpp",
 ]
 
 # Symbols the ps3dev toolchain supplies: newlib 1.20 (checked against its libc/libm sources) and
@@ -46,7 +49,7 @@ PORT_SOURCES = [
 TOOLCHAIN_PROVIDED = {
     "acosf", "atan2", "atan2f", "atexit", "atof", "atoi", "cosf", "memcpy", "memmove", "memset", "printf", "rand",
     "sinf", "sprintf", "sqrt", "sscanf", "strcat", "strchr", "strcmp", "strcpy", "strlen", "strncmp", "strncpy",
-    "strtol", "strtoul", "tanf", "vsprintf",
+    "strtol", "strtoul", "tanf", "vsprintf", "snprintf", "vsnprintf",
     "__cxa_pure_virtual",
 }
 

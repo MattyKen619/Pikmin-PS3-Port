@@ -71,7 +71,7 @@ def main():
 
     common = [
         "-fsyntax-only", "-funsigned-char", "-fno-exceptions",
-        "-nostdinc", "-isystem", "include/stl", "-I", "include", "-I", "build/GPIE01_01/include",
+        "-nostdinc", "-isystem", "include/stl", "-I", "include", "-I", "build/GPIE01_01/include", "-I", "platform/ps3/include",
         "-fmax-errors=0",
         *DEFINES, *args.extra,
     ]

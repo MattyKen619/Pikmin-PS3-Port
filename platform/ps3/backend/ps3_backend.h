@@ -1,0 +1,90 @@
+#ifndef _PS3_BACKEND_H
+#define _PS3_BACKEND_H
+
+// PS3 port: the boundary between the game-facing SDK layer (compiled with the game's headers) and the
+// PS3 system code (compiled with PSL1GHT/newlib headers). The two header sets define `u64` differently,
+// so nothing here uses either; only plain C types cross this line.
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ---- process / startup
+void ps3b_init(void);              // sysutil callbacks, timebase; call first
+int ps3b_exit_requested(void);     // XMB "Quit Game" was chosen
+void ps3b_exit(int code) __attribute__((noreturn));
+
+// ---- memory (newlib heap)
+void* ps3b_memalign(unsigned int align, unsigned int size);
+
+// ---- time
+unsigned long long ps3b_timebase(void);       // PPU timebase counter
+unsigned long long ps3b_timebase_freq(void);  // ticks per second (79.8 MHz on retail consoles)
+long long ps3b_epoch_seconds(void);           // wall clock, seconds since 1970-01-01 (UTC)
+void ps3b_sleep_us(unsigned int usec);
+
+// ---- kernel synchronisation (lv2 mutex / condition variable)
+int ps3b_mutex_create(unsigned int* out);
+void ps3b_mutex_lock(unsigned int m);
+void ps3b_mutex_unlock(unsigned int m);
+int ps3b_cond_create(unsigned int* out, unsigned int mutex);
+int ps3b_cond_wait(unsigned int c, unsigned int timeout_usec); // 0 = signalled, 1 = timed out; mutex held
+void ps3b_cond_signal(unsigned int c);
+void ps3b_cond_broadcast(unsigned int c);
+
+// ---- threads
+int ps3b_thread_create(void (*entry)(void*), void* arg, int priority, unsigned int stack_size, const char* name);
+void ps3b_thread_exit(void) __attribute__((noreturn));
+
+// ---- files (read-only game data + log)
+int ps3b_file_exists(const char* path);
+int ps3b_file_open(const char* path);                     // read-only; returns fd or -1
+long long ps3b_file_size(int fd);
+int ps3b_file_pread(int fd, void* buf, unsigned long long offset, unsigned int len); // bytes read or -1
+void ps3b_file_close(int fd);
+int ps3b_file_read_all(const char* path, char** out_data, unsigned int* out_size); // malloc'd, NUL-terminated
+
+// ---- data location: the folder holding fst.txt and files/ (see tools/ps3/extract_disc.py)
+const char* ps3b_data_root(void); // NULL if not found
+
+// ---- logging: TTY, log file next to the game data, and the on-screen console
+void ps3b_log_write(const char* text);
+
+// ---- on-screen text console (shown while graphics are not implemented)
+void ps3b_console_init(void);
+
+// ---- controllers
+enum {
+	PS3B_BTN_LEFT = 1 << 0,
+	PS3B_BTN_DOWN = 1 << 1,
+	PS3B_BTN_RIGHT = 1 << 2,
+	PS3B_BTN_UP = 1 << 3,
+	PS3B_BTN_START = 1 << 4,
+	PS3B_BTN_R3 = 1 << 5,
+	PS3B_BTN_L3 = 1 << 6,
+	PS3B_BTN_SELECT = 1 << 7,
+	PS3B_BTN_SQUARE = 1 << 8,
+	PS3B_BTN_CROSS = 1 << 9,
+	PS3B_BTN_CIRCLE = 1 << 10,
+	PS3B_BTN_TRIANGLE = 1 << 11,
+	PS3B_BTN_R1 = 1 << 12,
+	PS3B_BTN_L1 = 1 << 13,
+	PS3B_BTN_R2 = 1 << 14,
+	PS3B_BTN_L2 = 1 << 15,
+};
+
+typedef struct Ps3bPad {
+	int connected;
+	unsigned int buttons;          // PS3B_BTN_* bits
+	int lx, ly, rx, ry;            // 0..255, 128 = centre; y grows downwards
+	int l2, r2;                    // 0..255
+} Ps3bPad;
+
+void ps3b_pad_init(void);
+void ps3b_pad_read(int port, Ps3bPad* out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // _PS3_BACKEND_H

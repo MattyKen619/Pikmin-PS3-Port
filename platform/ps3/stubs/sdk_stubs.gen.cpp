@@ -115,79 +115,6 @@ void GXSetScissor(u32, u32, u32, u32) { PS3_STUB("GXSetScissor"); }
 void GXSetScissorBoxOffset(s32, s32) { PS3_STUB("GXSetScissorBoxOffset"); }
 void GXSetViewport(f32, f32, f32, f32, f32, f32) { PS3_STUB("GXSetViewport"); }
 
-// ---- Dolphin/OS/OSAlloc.h
-void * OSAllocFromHeap(OSHeapHandle, u32) { PS3_STUB("OSAllocFromHeap"); return {}; }
-void * OSInitAlloc(void *, void *, int) { PS3_STUB("OSInitAlloc"); return {}; }
-
-// ---- Dolphin/OS/OSArena.h
-void * OSGetArenaHi(void) { PS3_STUB("OSGetArenaHi"); return {}; }
-void * OSGetArenaLo(void) { PS3_STUB("OSGetArenaLo"); return {}; }
-
-// ---- Dolphin/OS/OSCache.h
-void DCFlushRange(void *, u32) { PS3_STUB("DCFlushRange"); }
-void DCFlushRangeNoSync(void *, u32) { PS3_STUB("DCFlushRangeNoSync"); }
-void DCInvalidateRange(void *, u32) { PS3_STUB("DCInvalidateRange"); }
-void DCStoreRange(void *, u32) { PS3_STUB("DCStoreRange"); }
-void DCStoreRangeNoSync(void *, u32) { PS3_STUB("DCStoreRangeNoSync"); }
-void DCZeroRange(void *, u32) { PS3_STUB("DCZeroRange"); }
-
-// ---- Dolphin/OS/OSContext.h
-void OSClearContext(OSContext *) { PS3_STUB("OSClearContext"); }
-void OSSetCurrentContext(OSContext *) { PS3_STUB("OSSetCurrentContext"); }
-
-// ---- Dolphin/OS/OSError.h
-void OSPanic(const char *, int, const char *, ...) { PS3_STUB("OSPanic"); }
-void OSReport(const char *, ...) { PS3_STUB("OSReport"); }
-
-// ---- Dolphin/OS/OSInterrupt.h
-BOOL OSDisableInterrupts(void) { PS3_STUB("OSDisableInterrupts"); return {}; }
-BOOL OSRestoreInterrupts(BOOL) { PS3_STUB("OSRestoreInterrupts"); return {}; }
-__OSInterruptHandler __OSSetInterruptHandler(__OSInterrupt, __OSInterruptHandler) { PS3_STUB("__OSSetInterruptHandler"); return {}; }
-OSInterruptMask __OSUnmaskInterrupts(OSInterruptMask) { PS3_STUB("__OSUnmaskInterrupts"); return {}; }
-
-// ---- Dolphin/OS/OSMessage.h
-void OSInitMessageQueue(OSMessageQueue *, OSMessage *, s32) { PS3_STUB("OSInitMessageQueue"); }
-BOOL OSReceiveMessage(OSMessageQueue *, OSMessage *, s32) { PS3_STUB("OSReceiveMessage"); return {}; }
-BOOL OSSendMessage(OSMessageQueue *, OSMessage, s32) { PS3_STUB("OSSendMessage"); return {}; }
-
-// ---- Dolphin/OS/OSMutex.h
-void OSInitCond(OSCond *) { PS3_STUB("OSInitCond"); }
-void OSInitMutex(OSMutex *) { PS3_STUB("OSInitMutex"); }
-void OSLockMutex(OSMutex *) { PS3_STUB("OSLockMutex"); }
-void OSSignalCond(OSCond *) { PS3_STUB("OSSignalCond"); }
-void OSUnlockMutex(OSMutex *) { PS3_STUB("OSUnlockMutex"); }
-void OSWaitCond(OSCond *, OSMutex *) { PS3_STUB("OSWaitCond"); }
-
-// ---- Dolphin/OS/OSReset.h
-BOOL OSGetResetSwitchState(void) { PS3_STUB("OSGetResetSwitchState"); return {}; }
-void OSResetSystem(int, u32, BOOL) { PS3_STUB("OSResetSystem"); }
-
-// ---- Dolphin/OS/OSRtc.h
-u32 OSGetProgressiveMode(void) { PS3_STUB("OSGetProgressiveMode"); return {}; }
-u32 OSGetSoundMode(void) { PS3_STUB("OSGetSoundMode"); return {}; }
-void OSSetProgressiveMode(u32) { PS3_STUB("OSSetProgressiveMode"); }
-void OSSetSoundMode(u32) { PS3_STUB("OSSetSoundMode"); }
-
-// ---- Dolphin/OS/OSThread.h
-void OSCancelThread(OSThread *) { PS3_STUB("OSCancelThread"); }
-s32 OSCheckActiveThreads(void) { PS3_STUB("OSCheckActiveThreads"); return {}; }
-BOOL OSCreateThread(OSThread *, OSThreadStartFunction, void *, void *, u32, OSPriority, u16) { PS3_STUB("OSCreateThread"); return {}; }
-void OSExitThread(void *) { PS3_STUB("OSExitThread"); }
-OSThread * OSGetCurrentThread(void) { PS3_STUB("OSGetCurrentThread"); return {}; }
-OSPriority OSGetThreadPriority(OSThread *) { PS3_STUB("OSGetThreadPriority"); return {}; }
-void OSInitThreadQueue(OSThreadQueue *) { PS3_STUB("OSInitThreadQueue"); }
-BOOL OSJoinThread(OSThread *, void **) { PS3_STUB("OSJoinThread"); return {}; }
-s32 OSResumeThread(OSThread *) { PS3_STUB("OSResumeThread"); return {}; }
-void OSYieldThread(void) { PS3_STUB("OSYieldThread"); }
-
-// ---- Dolphin/OS/OSTime.h
-OSTick OSGetTick(void) { PS3_STUB("OSGetTick"); return {}; }
-OSTime OSGetTime(void) { PS3_STUB("OSGetTime"); return {}; }
-void OSTicksToCalendarTime(OSTime, OSCalendarTime *) { PS3_STUB("OSTicksToCalendarTime"); }
-
-// ---- Dolphin/PPCArch.h
-void PPCSync(void) { PS3_STUB("PPCSync"); }
-
 // ---- Dolphin/ai.h
 u32 AIGetStreamSampleCount(void) { PS3_STUB("AIGetStreamSampleCount"); return {}; }
 u32 AIGetStreamTrigger(void) { PS3_STUB("AIGetStreamTrigger"); return {}; }
@@ -202,55 +129,11 @@ void AISetStreamVolLeft(u8) { PS3_STUB("AISetStreamVolLeft"); }
 void AISetStreamVolRight(u8) { PS3_STUB("AISetStreamVolRight"); }
 void AIStartDMA(void) { PS3_STUB("AIStartDMA"); }
 
-// ---- Dolphin/ar.h
-u32 ARGetBaseAddress(void) { PS3_STUB("ARGetBaseAddress"); return {}; }
-u32 ARInit(u32 *, u32) { PS3_STUB("ARInit"); return {}; }
-void ARQInit(void) { PS3_STUB("ARQInit"); }
-void ARQPostRequest(ARQRequest *, u32, u32, u32, u32, u32, u32, ARQCallback) { PS3_STUB("ARQPostRequest"); }
-
-// ---- Dolphin/card.h
-s32 CARDCheck(s32) { PS3_STUB("CARDCheck"); return {}; }
-s32 CARDCheckAsync(s32, CARDCallback) { PS3_STUB("CARDCheckAsync"); return {}; }
-s32 CARDClose(CARDFileInfo *) { PS3_STUB("CARDClose"); return {}; }
-s32 CARDCreate(s32, const char *, u32, CARDFileInfo *) { PS3_STUB("CARDCreate"); return {}; }
-s32 CARDFastDelete(s32, s32) { PS3_STUB("CARDFastDelete"); return {}; }
-s32 CARDFastOpen(s32, s32, CARDFileInfo *) { PS3_STUB("CARDFastOpen"); return {}; }
-s32 CARDFormat(s32) { PS3_STUB("CARDFormat"); return {}; }
-s32 CARDFormatAsync(s32, CARDCallback) { PS3_STUB("CARDFormatAsync"); return {}; }
-s32 CARDFreeBlocks(s32, s32 *, s32 *) { PS3_STUB("CARDFreeBlocks"); return {}; }
-s32 CARDGetResultCode(s32) { PS3_STUB("CARDGetResultCode"); return {}; }
-s32 CARDGetSectorSize(s32, u32 *) { PS3_STUB("CARDGetSectorSize"); return {}; }
-s32 CARDGetStatus(s32, s32, CARDStat *) { PS3_STUB("CARDGetStatus"); return {}; }
-s32 CARDGetXferredBytes(s32) { PS3_STUB("CARDGetXferredBytes"); return {}; }
-void CARDInit(void) { PS3_STUB("CARDInit"); }
-s32 CARDMount(s32, CARDMemoryCard *, CARDCallback) { PS3_STUB("CARDMount"); return {}; }
-s32 CARDMountAsync(s32, CARDMemoryCard *, CARDCallback, CARDCallback) { PS3_STUB("CARDMountAsync"); return {}; }
-s32 CARDOpen(s32, const char *, CARDFileInfo *) { PS3_STUB("CARDOpen"); return {}; }
-BOOL CARDProbe(s32) { PS3_STUB("CARDProbe"); return {}; }
-s32 CARDRead(CARDFileInfo *, void *, s32, s32) { PS3_STUB("CARDRead"); return {}; }
-s32 CARDRename(s32, const char *, const char *) { PS3_STUB("CARDRename"); return {}; }
-s32 CARDSetStatus(s32, s32, CARDStat *) { PS3_STUB("CARDSetStatus"); return {}; }
-s32 CARDUnmount(s32) { PS3_STUB("CARDUnmount"); return {}; }
-s32 CARDWrite(CARDFileInfo *, void *, s32, s32) { PS3_STUB("CARDWrite"); return {}; }
-
 // ---- Dolphin/dsp.h
 u32 DSPCheckMailFromDSP(void) { PS3_STUB("DSPCheckMailFromDSP"); return {}; }
 u32 DSPCheckMailToDSP(void) { PS3_STUB("DSPCheckMailToDSP"); return {}; }
 u32 DSPReadMailFromDSP(void) { PS3_STUB("DSPReadMailFromDSP"); return {}; }
 void DSPSendMailToDSP(u32) { PS3_STUB("DSPSendMailToDSP"); }
-
-// ---- Dolphin/dvd.h
-BOOL DVDCancelStream(DVDCommandBlock *) { PS3_STUB("DVDCancelStream"); return {}; }
-BOOL DVDClose(DVDFileInfo *) { PS3_STUB("DVDClose"); return {}; }
-s32 DVDConvertPathToEntrynum(const char *) { PS3_STUB("DVDConvertPathToEntrynum"); return {}; }
-BOOL DVDFastOpen(s32, DVDFileInfo *) { PS3_STUB("DVDFastOpen"); return {}; }
-DVDDiskID * DVDGetCurrentDiskID(void) { PS3_STUB("DVDGetCurrentDiskID"); return {}; }
-s32 DVDGetDriveStatus(void) { PS3_STUB("DVDGetDriveStatus"); return {}; }
-void DVDInit(void) { PS3_STUB("DVDInit"); }
-BOOL DVDOpen(const char *, DVDFileInfo *) { PS3_STUB("DVDOpen"); return {}; }
-BOOL DVDPrepareStreamAsync(DVDFileInfo *, u32, u32, DVDCallback) { PS3_STUB("DVDPrepareStreamAsync"); return {}; }
-BOOL DVDReadAsyncPrio(DVDFileInfo *, void *, s32, s32, DVDCallback, s32) { PS3_STUB("DVDReadAsyncPrio"); return {}; }
-s32 DVDReadPrio(DVDFileInfo *, void *, s32, s32, s32) { PS3_STUB("DVDReadPrio"); return {}; }
 
 // ---- Dolphin/hio.h
 BOOL HIOEnumDevices(HIOEnumCallback) { PS3_STUB("HIOEnumDevices"); return {}; }
@@ -258,28 +141,5 @@ BOOL HIOInit(s32, HIOCallback) { PS3_STUB("HIOInit"); return {}; }
 BOOL HIOReadMailbox(u32 *) { PS3_STUB("HIOReadMailbox"); return {}; }
 BOOL HIOWrite(u32, void *, s32) { PS3_STUB("HIOWrite"); return {}; }
 BOOL HIOWriteMailbox(u32) { PS3_STUB("HIOWriteMailbox"); return {}; }
-
-// ---- Dolphin/os.h
-void OSInit(void) { PS3_STUB("OSInit"); }
-
-// ---- Dolphin/pad.h
-void PADClamp(PADStatus *) { PS3_STUB("PADClamp"); }
-void PADControlMotor(s32, u32) { PS3_STUB("PADControlMotor"); }
-BOOL PADInit(void) { PS3_STUB("PADInit"); return {}; }
-u32 PADRead(PADStatus *) { PS3_STUB("PADRead"); return {}; }
-BOOL PADRecalibrate(u32) { PS3_STUB("PADRecalibrate"); return {}; }
-BOOL PADReset(u32) { PS3_STUB("PADReset"); return {}; }
-void PADSetSpec(u32) { PS3_STUB("PADSetSpec"); }
-
-// ---- Dolphin/vi.h
-void VIConfigure(const GXRenderModeObj *) { PS3_STUB("VIConfigure"); }
-void VIFlush(void) { PS3_STUB("VIFlush"); }
-u32 VIGetDTVStatus(void) { PS3_STUB("VIGetDTVStatus"); return {}; }
-u32 VIGetRetraceCount(void) { PS3_STUB("VIGetRetraceCount"); return {}; }
-void VIInit(void) { PS3_STUB("VIInit"); }
-void VISetBlack(BOOL) { PS3_STUB("VISetBlack"); }
-void VISetNextFrameBuffer(void *) { PS3_STUB("VISetNextFrameBuffer"); }
-VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback) { PS3_STUB("VISetPostRetraceCallback"); return {}; }
-void VIWaitForRetrace(void) { PS3_STUB("VIWaitForRetrace"); }
 
 } // extern "C"
