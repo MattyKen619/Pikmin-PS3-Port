@@ -32,6 +32,18 @@ int ps3InInterrupt(void);
 
 // Diagnostics
 void ps3NoteActivity(const char* what); // remembers the last SDK call, for stall reports
+
+// Use at the top of SDK functions: logs "[trace] first call: NAME" once, then notes the activity.
+// The trace shows how far the game got if it stops without an error message.
+#define PS3_ACTIVITY(name)                                     \
+	do {                                                       \
+		static int ps3_seen_;                                  \
+		if (!ps3_seen_) {                                      \
+			ps3_seen_ = 1;                                     \
+			ps3Log("[trace] first call: %s\n", (name));        \
+		}                                                      \
+		ps3NoteActivity(name);                                 \
+	} while (0)
 unsigned int ps3FrameCounter(void);
 
 // ---- other subsystems

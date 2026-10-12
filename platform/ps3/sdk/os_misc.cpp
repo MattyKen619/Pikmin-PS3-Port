@@ -34,7 +34,7 @@ extern "C" void ps3OsMiscInit(void)
 
 void OSInit(void)
 {
-	ps3NoteActivity("OSInit");
+	PS3_ACTIVITY("OSInit");
 	ps3Log("[ps3] OSInit: arena %p-%p (%d MB), timebase %llu Hz\n", sArenaLo, sArenaHi, ARENA_SIZE >> 20, sTbFreq);
 }
 

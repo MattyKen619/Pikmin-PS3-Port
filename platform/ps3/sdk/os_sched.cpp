@@ -390,12 +390,14 @@ void OSInitThreadQueue(OSThreadQueue* queue)
 
 OSThread* OSGetCurrentThread(void)
 {
-	return sRunning ? sRunning->os : NULL;
+	// Before ps3SchedInit (static constructors run before main on the PS3, but after OSInit on the
+	// GameCube) the caller is the main thread: return the default thread object, set up later in place.
+	return sRunning ? sRunning->os : &sDefaultThread;
 }
 
 BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, void* stack, u32 stackSize, OSPriority priority, u16 attr)
 {
-	ps3NoteActivity("OSCreateThread");
+	PS3_ACTIVITY("OSCreateThread");
 	if (priority < OS_PRIORITY_MIN || priority > OS_PRIORITY_MAX) {
 		return FALSE;
 	}
@@ -433,7 +435,7 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 
 s32 OSResumeThread(OSThread* thread)
 {
-	ps3NoteActivity("OSResumeThread");
+	PS3_ACTIVITY("OSResumeThread");
 	lockS();
 	ThreadImpl* impl = findImpl(thread);
 	s32 prev         = thread->suspend;
@@ -492,7 +494,7 @@ void OSCancelThread(OSThread* thread)
 
 BOOL OSJoinThread(OSThread* thread, void** val)
 {
-	ps3NoteActivity("OSJoinThread");
+	PS3_ACTIVITY("OSJoinThread");
 	lockS();
 	ThreadImpl* impl = findImpl(thread);
 	if (!impl || (thread->attr & OS_THREAD_ATTR_DETACH)) {
@@ -558,7 +560,7 @@ void OSInitMessageQueue(OSMessageQueue* queue, OSMessage* msgArray, s32 msgCount
 
 BOOL OSSendMessage(OSMessageQueue* queue, OSMessage msg, s32 flags)
 {
-	ps3NoteActivity("OSSendMessage");
+	PS3_ACTIVITY("OSSendMessage");
 	ps3DeliverInterrupts();
 	lockS();
 	if (queue->msgCount <= 0) {
@@ -582,7 +584,7 @@ BOOL OSSendMessage(OSMessageQueue* queue, OSMessage msg, s32 flags)
 
 BOOL OSReceiveMessage(OSMessageQueue* queue, OSMessage* msgPtr, s32 flags)
 {
-	ps3NoteActivity("OSReceiveMessage");
+	PS3_ACTIVITY("OSReceiveMessage");
 	ps3DeliverInterrupts();
 	lockS();
 	if (queue->msgCount <= 0) {
@@ -618,7 +620,7 @@ void OSInitMutex(OSMutex* mutex)
 
 void OSLockMutex(OSMutex* mutex)
 {
-	ps3NoteActivity("OSLockMutex");
+	PS3_ACTIVITY("OSLockMutex");
 	lockS();
 	OSThread* me = sRunning->os;
 	while (mutex->thread && mutex->thread != me) {
@@ -648,7 +650,7 @@ void OSInitCond(OSCond* cond)
 
 void OSWaitCond(OSCond* cond, OSMutex* mutex)
 {
-	ps3NoteActivity("OSWaitCond");
+	PS3_ACTIVITY("OSWaitCond");
 	lockS();
 	OSThread* me = sRunning->os;
 	if (mutex->thread != me) {

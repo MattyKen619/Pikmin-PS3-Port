@@ -1,4 +1,7 @@
 // PS3 port: platform start-up, called from main() before the game's own initialisation.
+//
+// Every step is logged with a "[boot]" line before it runs. The log file is closed after every line,
+// so if the console freezes, the last [boot] line in pikmin_log.txt shows the step that failed.
 
 #include "sdk_internal.h"
 
@@ -7,6 +10,13 @@
 
 extern "C" void ps3OsMiscInit(void);
 extern "C" void ps3StartWatchdog(void);
+
+#define PS3_TEST_BUILD 2
+
+extern "C" void ps3BootStage(const char* what)
+{
+	ps3Log("[boot] %s\n", what);
+}
 
 extern "C" void ps3PlatformInit(void)
 {
@@ -17,24 +27,37 @@ extern "C" void ps3PlatformInit(void)
 	sDone = 1;
 
 	ps3b_init();
-	ps3b_console_init();
-	ps3SchedInit();
-	ps3Log("Pikmin PS3 port - Phase 3 boot test (graphics and sound are not implemented yet)\n");
+	// The first log line also chooses and creates the log file (before anything that could crash).
+	ps3Log("[boot] Pikmin PS3 port, test build %d (built %s %s)\n", PS3_TEST_BUILD, __DATE__, __TIME__);
+	const char* logPath = ps3b_log_path();
+	ps3Log("[boot] log file: %s\n", logPath ? logPath : "none (no USB drive found)");
+	ps3b_log_memory("start");
 
+	ps3b_console_init();
+
+	ps3BootStage("scheduler");
+	ps3SchedInit();
+
+	ps3BootStage("looking for the game data");
 	const char* root = ps3b_data_root();
 	if (!root) {
 		ps3Log("[ps3] FAILED: game data not found.\n");
 		ps3Log("[ps3] Copy the PIKMIN folder (containing fst.txt and files/) to the top level of a USB drive,\n");
-		ps3Log("[ps3] plug it in, and start the game again.\n");
+		ps3Log("[ps3] plug it in, and start the game again. Hold Start+Select to quit.\n");
 		for (;;) {
 			ps3b_sleep_us(1000 * 1000);
 		}
 	}
-	ps3Log("[ps3] game data: %s (log file: %s/pikmin_log.txt)\n", root, root);
+	ps3Log("[boot] game data: %s\n", root);
 
+	ps3BootStage("OS memory and clock");
 	ps3OsMiscInit();
+	ps3b_log_memory("after the OS arena");
+	ps3BootStage("disc file table");
 	ps3DvdInit();
+	ps3BootStage("video timer");
 	ps3ViStart();
+	ps3BootStage("watchdog");
 	ps3StartWatchdog();
-	ps3Log("[ps3] platform ready, starting the game\n");
+	ps3BootStage("platform ready, starting the game");
 }

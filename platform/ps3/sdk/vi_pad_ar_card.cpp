@@ -60,7 +60,7 @@ extern "C" void ps3ViStart(void)
 
 extern "C" unsigned int ps3FrameCounter(void) { return sRetraceCount; }
 
-void VIInit(void) { ps3NoteActivity("VIInit"); }
+void VIInit(void) { PS3_ACTIVITY("VIInit"); }
 void VIConfigure(const GXRenderModeObj* rm) { (void)rm; }
 void VIFlush(void) { }
 void VISetNextFrameBuffer(void* fb) { (void)fb; }
@@ -69,7 +69,7 @@ u32 VIGetDTVStatus(void) { return 0; } // no component cable: the game won't off
 
 void VIWaitForRetrace(void)
 {
-	ps3NoteActivity("VIWaitForRetrace");
+	PS3_ACTIVITY("VIWaitForRetrace");
 	ps3DeliverInterrupts();
 	u32 start = sRetraceCount;
 	while (sRetraceCount == start) {
@@ -118,7 +118,7 @@ BOOL PADInit(void)
 
 u32 PADRead(PADStatus* status)
 {
-	ps3NoteActivity("PADRead");
+	PS3_ACTIVITY("PADRead");
 	ps3DeliverInterrupts();
 	u32 mask = 0;
 	for (int ch = 0; ch < PAD_MAX_CONTROLLERS; ch++) {
@@ -246,7 +246,7 @@ void ARQInit(void) { }
 // these callbacks (System::copyWaitUntilDone), which would never end if they were deferred.
 void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 source, u32 dest, u32 length, ARQCallback callback)
 {
-	ps3NoteActivity("ARQPostRequest");
+	PS3_ACTIVITY("ARQPostRequest");
 	request->next     = NULL;
 	request->owner    = owner;
 	request->type     = type;

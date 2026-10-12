@@ -10,9 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <ppu-lv2.h>
 #include <lv2/syscalls.h>
 #include <io/pad.h>
-#include <lv2/sysfs.h>
+// File access uses the lv2 file-system system calls directly (sys/file.h), as PSL1GHT's own fopen does.
+// The cellFs library (the sysFs* calls, module "sys_fs") is not loaded at start-up; calling it without
+// sysModuleLoad(SYSMODULE_FS) jumps through an unresolved import. That crashed test build 1 at its first
+// log line, before anything reached the screen or the USB drive.
+#include <sys/file.h>
 #include <sys/mutex.h>
 #include <sys/cond.h>
 #include <sys/process.h>
@@ -48,7 +53,9 @@ extern "C" int ps3b_exit_requested(void)
 extern "C" void ps3b_exit(int code)
 {
 	ps3b_log_write("[ps3] exiting to XMB\n");
+	ps3b_console_shutdown();
 	sysProcessExit(code);
+	for (;;) { }
 }
 
 extern "C" void* ps3b_memalign(unsigned int align, unsigned int size)
@@ -151,13 +158,13 @@ extern "C" void ps3b_thread_exit(void)
 extern "C" int ps3b_file_exists(const char* path)
 {
 	sysFSStat st;
-	return sysFsStat(path, &st) == 0;
+	return sysLv2FsStat(path, &st) == 0;
 }
 
 extern "C" int ps3b_file_open(const char* path)
 {
 	s32 fd = -1;
-	if (sysFsOpen(path, SYS_O_RDONLY, &fd, NULL, 0) != 0) {
+	if (sysLv2FsOpen(path, SYS_O_RDONLY, &fd, 0, NULL, 0) != 0) {
 		return -1;
 	}
 	return fd;
@@ -166,7 +173,7 @@ extern "C" int ps3b_file_open(const char* path)
 extern "C" long long ps3b_file_size(int fd)
 {
 	sysFSStat st;
-	if (sysFsFstat(fd, &st) != 0) {
+	if (sysLv2FsFStat(fd, &st) != 0) {
 		return -1;
 	}
 	return (long long)st.st_size;
@@ -175,10 +182,10 @@ extern "C" long long ps3b_file_size(int fd)
 extern "C" int ps3b_file_pread(int fd, void* buf, unsigned long long offset, unsigned int len)
 {
 	u64 pos = 0, got = 0;
-	if (sysFsLseek(fd, (s64)offset, 0 /* SEEK_SET */, &pos) != 0) {
+	if (sysLv2FsLSeek64(fd, offset, 0 /* SEEK_SET */, &pos) != 0) {
 		return -1;
 	}
-	if (sysFsRead(fd, buf, len, &got) != 0) {
+	if (sysLv2FsRead(fd, buf, len, &got) != 0) {
 		return -1;
 	}
 	return (int)got;
@@ -186,7 +193,7 @@ extern "C" int ps3b_file_pread(int fd, void* buf, unsigned long long offset, uns
 
 extern "C" void ps3b_file_close(int fd)
 {
-	sysFsClose(fd);
+	sysLv2FsClose(fd);
 }
 
 extern "C" int ps3b_file_read_all(const char* path, char** out_data, unsigned int* out_size)
@@ -240,11 +247,78 @@ extern "C" const char* ps3b_data_root(void)
 }
 
 static unsigned int sLogMutex = 0;
-static int sLogFd             = -1;
-static int sLogFileTried      = 0;
+static char sLogPath[256];
+static int sLogState    = 0;          // 0 = not chosen yet, 1 = writing, -1 = no location / gave up
+static unsigned long long sLogBytes = 0;
+#define LOG_FILE_LIMIT (8ULL * 1024 * 1024)
 
 // The console keeps the most recent lines for the on-screen view (see ps3_console.cpp).
 extern "C" void ps3b_console_append(const char* text);
+
+static int createLogFile(const char* path)
+{
+	s32 fd = -1;
+	if (sysLv2FsOpen(path, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, 0666, NULL, 0) != 0) {
+		return 0;
+	}
+	sysLv2FsClose(fd);
+	sysLv2FsChmod(path, 0666);
+	snprintf(sLogPath, sizeof(sLogPath), "%s", path);
+	return 1;
+}
+
+static void chooseLogFile()
+{
+	char path[256];
+	const char* root = ps3b_data_root();
+	if (root) {
+		snprintf(path, sizeof(path), "%s/pikmin_log.txt", root);
+		if (createLogFile(path)) {
+			sLogState = 1;
+			return;
+		}
+	}
+	// No data folder: put the log at the top of the first USB drive that accepts it.
+	for (int i = 0; i < 8; i++) {
+		char dev[32];
+		snprintf(dev, sizeof(dev), "/dev_usb00%d", i);
+		if (!ps3b_file_exists(dev)) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "%s/pikmin_log.txt", dev);
+		if (createLogFile(path)) {
+			sLogState = 1;
+			return;
+		}
+	}
+	sLogState = -1;
+}
+
+// Open, append, close: slower than keeping the file open, but nothing is lost if the console
+// freezes and has to be switched off (the FAT directory entry is only updated on close).
+static void appendLogFile(const char* text, unsigned int len)
+{
+	if (sLogBytes + len > LOG_FILE_LIMIT) {
+		return;
+	}
+	s32 fd = -1;
+	if (sysLv2FsOpen(sLogPath, SYS_O_WRONLY, &fd, 0, NULL, 0) != 0) {
+		return;
+	}
+	u64 pos = 0, written = 0;
+	sysLv2FsLSeek64(fd, 0, 2 /* SEEK_END */, &pos);
+	sysLv2FsWrite(fd, text, len, &written);
+	sysLv2FsClose(fd);
+	sLogBytes += len;
+	if (sLogBytes + len > LOG_FILE_LIMIT) {
+		const char* note = "[ps3] log file limit reached; further lines only on screen\n";
+		if (sysLv2FsOpen(sLogPath, SYS_O_WRONLY, &fd, 0, NULL, 0) == 0) {
+			sysLv2FsLSeek64(fd, 0, 2, &pos);
+			sysLv2FsWrite(fd, note, strlen(note), &written);
+			sysLv2FsClose(fd);
+		}
+	}
+}
 
 extern "C" void ps3b_log_write(const char* text)
 {
@@ -253,47 +327,73 @@ extern "C" void ps3b_log_write(const char* text)
 	}
 	ps3b_mutex_lock(sLogMutex);
 	fputs(text, stdout); // lv2 TTY (visible in RPCS3's log and on debug consoles)
-	if (!sLogFileTried) {
-		const char* root = ps3b_data_root();
-		if (root) {
-			sLogFileTried = 1;
-			char path[256];
-			snprintf(path, sizeof(path), "%s/pikmin_log.txt", root);
-			s32 fd = -1;
-			if (sysFsOpen(path, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, NULL, 0) == 0) {
-				sLogFd = fd;
-			}
-		}
+	if (sLogState == 0) {
+		chooseLogFile();
 	}
-	if (sLogFd >= 0) {
-		u64 written = 0;
-		sysFsWrite(sLogFd, text, strlen(text), &written);
+	if (sLogState == 1) {
+		appendLogFile(text, strlen(text));
 	}
 	ps3b_console_append(text);
 	ps3b_mutex_unlock(sLogMutex);
+}
+
+extern "C" const char* ps3b_log_path(void)
+{
+	return sLogState == 1 ? sLogPath : NULL;
+}
+
+static inline s32 sysMemoryGetUserMemorySizeRaw(u32* info /* [0] = total, [1] = available */)
+{
+	lv2syscall1(SYSCALL_MEMORY_GET_USER_MEMORY_SIZE, (u64)info);
+	return_to_user_prog(s32);
+}
+
+extern "C" void ps3b_log_memory(const char* when)
+{
+	u32 info[2] = { 0, 0 };
+	char buf[160];
+	if (sysMemoryGetUserMemorySizeRaw(info) == 0) {
+		snprintf(buf, sizeof(buf), "[ps3] memory (%s): %u KB free of %u KB\n", when, info[1] >> 10, info[0] >> 10);
+	} else {
+		snprintf(buf, sizeof(buf), "[ps3] memory (%s): unknown\n", when);
+	}
+	ps3b_log_write(buf);
 }
 
 // ---------------------------------------------------------------- controllers
 
 static padData sPadLast[4];
 static int sPadValid[4]; // a report has arrived for this port
+static int sPadInitDone;
+static unsigned int sPadMutex;
 
+// Called early by the platform start-up (the console watches for the exit combination) and again by
+// the game's PADInit; only the first call does anything.
 extern "C" void ps3b_pad_init(void)
 {
-	ioPadInit(7);
+	if (sPadInitDone) {
+		return;
+	}
+	sPadInitDone = 1;
+	ps3b_mutex_create(&sPadMutex);
 	memset(sPadLast, 0, sizeof(sPadLast));
 	memset(sPadValid, 0, sizeof(sPadValid));
+	ioPadInit(7);
 }
 
 extern "C" void ps3b_pad_read(int port, Ps3bPad* out)
 {
 	memset(out, 0, sizeof(*out));
 	out->lx = out->ly = out->rx = out->ry = 128;
-	if (port < 0 || port >= 4) {
+	if (port < 0 || port >= 4 || !sPadInitDone) {
 		return;
 	}
+	// Both the game and the console thread read the pads; reads consume "changed" reports, so the last
+	// report is cached and shared.
+	ps3b_mutex_lock(sPadMutex);
 	padInfo info;
 	if (ioPadGetInfo(&info) != 0 || !info.status[port]) {
+		ps3b_mutex_unlock(sPadMutex);
 		return;
 	}
 	padData data;
@@ -301,7 +401,9 @@ extern "C" void ps3b_pad_read(int port, Ps3bPad* out)
 		sPadLast[port]  = data; // len == 0 means "no change since last read"
 		sPadValid[port] = 1;
 	}
-	const padData& d = sPadLast[port];
+	const padData d   = sPadLast[port];
+	const int valid   = sPadValid[port];
+	ps3b_mutex_unlock(sPadMutex);
 	out->connected   = 1;
 	unsigned int b   = 0;
 	if (d.BTN_LEFT) b |= PS3B_BTN_LEFT;
@@ -321,7 +423,7 @@ extern "C" void ps3b_pad_read(int port, Ps3bPad* out)
 	if (d.BTN_R2) b |= PS3B_BTN_R2;
 	if (d.BTN_L2) b |= PS3B_BTN_L2;
 	out->buttons = b;
-	if (sPadValid[port]) {
+	if (valid) {
 		out->lx = d.ANA_L_H;
 		out->ly = d.ANA_L_V;
 		out->rx = d.ANA_R_H;

@@ -220,7 +220,7 @@ static BOOL fillInfo(int idx, DVDFileInfo* info)
 
 void DVDInit(void)
 {
-	ps3NoteActivity("DVDInit");
+	PS3_ACTIVITY("DVDInit");
 	ps3DvdInit();
 }
 
@@ -231,19 +231,25 @@ s32 DVDConvertPathToEntrynum(const char* path)
 
 BOOL DVDOpen(const char* path, DVDFileInfo* info)
 {
-	ps3NoteActivity("DVDOpen");
+	PS3_ACTIVITY("DVDOpen");
 	int idx = findEntry(path);
 	if (!fillInfo(idx, info)) {
 		ps3Log("[ps3] DVDOpen: not found: %s\n", path);
 		return FALSE;
 	}
+	ps3Log("[dvd] open %s (%u bytes)\n", path, (unsigned)info->length); // progress trail for test builds
 	return TRUE;
 }
 
 BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* info)
 {
-	ps3NoteActivity("DVDFastOpen");
-	return fillInfo(entrynum, info);
+	PS3_ACTIVITY("DVDFastOpen");
+	if (!fillInfo(entrynum, info)) {
+		ps3Log("[ps3] DVDFastOpen: bad entry %d\n", (int)entrynum);
+		return FALSE;
+	}
+	ps3Log("[dvd] open #%d %s (%u bytes)\n", (int)entrynum, sEntries[entrynum].path, (unsigned)info->length);
+	return TRUE;
 }
 
 BOOL DVDClose(DVDFileInfo* info)
@@ -277,7 +283,7 @@ static s32 doRead(DVDFileInfo* info, void* addr, s32 length, s32 offset)
 s32 DVDReadPrio(DVDFileInfo* info, void* addr, s32 length, s32 offset, s32 prio)
 {
 	(void)prio;
-	ps3NoteActivity("DVDReadPrio");
+	PS3_ACTIVITY("DVDReadPrio");
 	ps3DeliverInterrupts();
 	return doRead(info, addr, length, offset);
 }
@@ -297,7 +303,7 @@ static void asyncDone(void* arg)
 BOOL DVDReadAsyncPrio(DVDFileInfo* info, void* addr, s32 length, s32 offset, DVDCallback callback, s32 prio)
 {
 	(void)prio;
-	ps3NoteActivity("DVDReadAsyncPrio");
+	PS3_ACTIVITY("DVDReadAsyncPrio");
 	info->callback               = callback;
 	info->cBlock.state           = DVD_STATE_BUSY;
 	info->cBlock.transferredSize = (u32)doRead(info, addr, length, offset);

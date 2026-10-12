@@ -49,7 +49,7 @@ GAME_CXXFLAGS    := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(G
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
 BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti $(LIBPSL1GHT_INC)
 
-LIBS    := -lrsx -lgcm_sys -lio -lsysutil -lsysfs -lrt -llv2 -lm
+LIBS    := -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
 LDFLAGS := $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map
 
 #---------------------------------------------------------------------------------
@@ -61,6 +61,7 @@ pkg: $(BUILD)/$(TARGET).pkg
 $(BUILD)/$(TARGET).elf: $(OBJECTS)
 	@echo linking ... $(notdir $@)
 	@$(CXX) $(LDFLAGS) $(OBJECTS) $(LIBPSL1GHT_LIB) $(LIBS) -o $@
+	@python3 tools/ps3/check_imports.py $@ || (rm -f $@; false)
 
 # game C++
 $(addprefix $(OBJDIR)/,$(addsuffix .o,$(GAME_CPP) $(PLATFORM_CPP))): $(OBJDIR)/%.o: %

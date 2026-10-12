@@ -28,7 +28,10 @@ void ps3b_file_close(int fd) { (void)fd; }
 int ps3b_file_read_all(const char* path, char** data, unsigned int* size) { (void)path; (void)data; (void)size; return 0; }
 const char* ps3b_data_root(void) { return 0; }
 void ps3b_log_write(const char* text) { (void)text; }
+const char* ps3b_log_path(void) { return 0; }
+void ps3b_log_memory(const char* when) { (void)when; }
 void ps3b_console_init(void) { }
+void ps3b_console_shutdown(void) { }
 void ps3b_pad_init(void) { }
 void ps3b_pad_read(int port, Ps3bPad* out) { (void)port; out->connected = 0; }
 }

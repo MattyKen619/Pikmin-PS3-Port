@@ -47,11 +47,17 @@ int ps3b_file_read_all(const char* path, char** out_data, unsigned int* out_size
 // ---- data location: the folder holding fst.txt and files/ (see tools/ps3/extract_disc.py)
 const char* ps3b_data_root(void); // NULL if not found
 
-// ---- logging: TTY, log file next to the game data, and the on-screen console
+// ---- logging: TTY, log file next to the game data, and the on-screen console.
+// Every line is written to the file and the file is closed again at once, so the log survives a crash
+// or a forced power-off. The file is pikmin_log.txt in the data folder, or at the top of the first USB
+// drive if the data folder is missing.
 void ps3b_log_write(const char* text);
+const char* ps3b_log_path(void);          // NULL if no writable location was found
+void ps3b_log_memory(const char* when);   // logs lv2's user-memory totals
 
 // ---- on-screen text console (shown while graphics are not implemented)
 void ps3b_console_init(void);
+void ps3b_console_shutdown(void);         // finish pending RSX work before the process exits
 
 // ---- controllers
 enum {

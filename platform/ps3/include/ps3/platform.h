@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void ps3PlatformInit(void);
+void ps3BootStage(const char* what); // writes a "[boot]" progress line to the log
 
 #ifdef __cplusplus
 }
