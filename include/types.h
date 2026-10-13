@@ -401,6 +401,14 @@ END_SCOPE_EXTERN_C
 #define PS3_SPIN_WAIT()
 #endif
 
+// Size of a fixed-size sub-heap (AyuHeap) that holds game objects. With 64-bit pointers those objects
+// are up to twice as big, so the PS3 port doubles these heaps (the PS3 has memory to spare).
+#if defined(TARGET_PS3)
+#define PS3_HEAP_SIZE(size) ((size) * 2)
+#else
+#define PS3_HEAP_SIZE(size) (size)
+#endif
+
 // Documenting MetroWerks intrinsic functions for PowerPC and placing them behind macros for portability.
 #if defined(__MWERKS__)
 #define __mwerks_eieio()                  /* void   */ __eieio()                  //

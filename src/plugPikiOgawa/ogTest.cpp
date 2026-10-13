@@ -560,7 +560,7 @@ OgTestSection::OgTestSection()
  */
 void OgTestSection::init()
 {
-	int msgHeapSize = 0x19800;
+	int msgHeapSize = PS3_HEAP_SIZE(0x19800);
 	gsys->mHeaps[SYSHEAP_Message].init("message", AYU_STACK_GROW_UP, new u8[msgHeapSize], msgHeapSize);
 	OgTestScreen* screen = new OgTestScreen();
 	add(screen);

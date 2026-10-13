@@ -62,14 +62,14 @@ class NewPikiGameSetupSection;
 
 #if defined(WIN32)
 /// Size of the "teki" heap to use for gameplay (and some cutscenes) - bigger in the DLL.
-#define TEKI_HEAP_SIZE (0xA00000)
+#define TEKI_HEAP_SIZE PS3_HEAP_SIZE(0xA00000)
 #else
 /// Size of the "teki" heap to use for gameplay (and some cutscenes).
-#define TEKI_HEAP_SIZE (0x280000)
+#define TEKI_HEAP_SIZE PS3_HEAP_SIZE(0x280000)
 #endif
 
 /// Size of the "movie" heap to use for gameplay, cutscenes, and some menus/windows.
-#define MOVIE_HEAP_SIZE (0x40000)
+#define MOVIE_HEAP_SIZE PS3_HEAP_SIZE(0x40000)
 
 //////////////////////////////////////////////////////
 ////////////////// STATIC INSTANCES //////////////////

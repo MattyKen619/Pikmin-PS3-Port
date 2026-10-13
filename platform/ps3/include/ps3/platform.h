@@ -9,6 +9,7 @@ extern "C" {
 
 void ps3PlatformInit(void);
 void ps3BootStage(const char* what); // writes a "[boot]" progress line to the log
+void ps3HeapExhausted(const char* heapName, int requested, int freeBytes); // logs and stops the game
 
 #ifdef __cplusplus
 }

@@ -25,7 +25,7 @@ struct IntroGameSetupSection;
 //////////////////////////////////////////////////////
 
 /// Size for the asteroid/crash landing intro cutscene heap, in bytes.
-#define INTRO_MOVIE_HEAP_SIZE (0x500000)
+#define INTRO_MOVIE_HEAP_SIZE PS3_HEAP_SIZE(0x500000)
 
 //////////////////////////////////////////////////////
 ////////////////// STATIC INSTANCES //////////////////

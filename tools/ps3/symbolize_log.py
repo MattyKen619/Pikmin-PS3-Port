@@ -10,7 +10,9 @@ the copy archived per test build).
 Usage: python3 tools/ps3/symbolize_log.py build/ps3/pikmin.elf pikmin_log.txt > pikmin_log.sym.txt
 """
 import bisect
+import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -56,6 +58,23 @@ def read_elf(path):
     return descr, code
 
 
+def addr2line(elf, addrs):
+    """file:line for code addresses (needs the build's -g1 line tables)."""
+    addrs = sorted(set(addrs))
+    if not addrs:
+        return {}
+    tool = None
+    for cand in [os.path.join(os.environ.get("PS3DEV", "/usr/local/ps3dev"), "ppu/bin/ppu-addr2line"), "ppu-addr2line",
+                 "powerpc64-ps3-elf-addr2line", "llvm-addr2line"]:
+        tool = shutil.which(cand) or (cand if os.path.isfile(cand) else None)
+        if tool:
+            break
+    if not tool:
+        return {}
+    out = subprocess.run([tool, "-e", elf] + [hex(a) for a in addrs], capture_output=True, text=True).stdout.splitlines()
+    return {a: l for a, l in zip(addrs, out) if l and not l.startswith("??")}
+
+
 def demangle(names):
     names = sorted(set(names))
     if not names:
@@ -85,12 +104,19 @@ def main():
         return code[i][1], a - code[i][0]
 
     out = []
+    pcs = []
     for line in lines:
         if not line.startswith("[stack]"):
             out.append(line)
             continue
         head, _, frames = line.partition(":")
-        parts = []
+        m = re.search(r" pc (0x[0-9a-f]+)", head)
+        pc = int(m.group(1), 16) if m else None
+        if pc:
+            pcs.append(pc)
+            s = site_name(pc)
+            used += [s[0]] if s else []
+        parts = [("PC", pc)] if pc else []
         for m in re.finditer(r"(0x[0-9a-f]+)<(0x[0-9a-f]+)", frames):
             fn, site = int(m.group(1), 16), int(m.group(2), 16)
             f = fn_name(fn)
@@ -99,6 +125,7 @@ def main():
             parts.append((f or hex(fn), s))
         out.append((head, parts))
     dm = demangle(used)
+    lines_of = addr2line(sys.argv[1], pcs)
     for item in out:
         if isinstance(item, str):
             print(item)
@@ -106,6 +133,11 @@ def main():
         head, parts = item
         print(head + ":")
         for f, s in parts:
+            if f == "PC":
+                where = site_name(s)
+                name = f"{dm.get(where[0], where[0])}+0x{where[1]:x}" if where else hex(s)
+                print(f"[stack]     last code run: {name}  {lines_of.get(s, '')}")
+                continue
             caller = f"  (called from {dm.get(s[0], s[0])}+0x{s[1]:x})" if s else ""
             print(f"[stack]       {dm.get(f, f)}{caller}")
 

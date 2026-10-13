@@ -577,7 +577,7 @@ void System::hardReset()
 	mToggleHeapAllocPrint = old;
 
 	mCacher  = new TextureCacher(0x96000);
-	int size = 0x20000;
+	int size = PS3_HEAP_SIZE(0x20000);
 	gsys->mHeaps[SYSHEAP_Lang].init("language", AYU_STACK_GROW_UP, alloc(size), size);
 	preloadLanguage();
 

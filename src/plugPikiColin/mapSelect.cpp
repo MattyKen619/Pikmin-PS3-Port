@@ -18,7 +18,7 @@
 #include "zen/DrawWorldMap.h"
 
 /// Size of the message heap (102 kb).
-#define MESSAGE_HEAP_SIZE (0x19800)
+#define MESSAGE_HEAP_SIZE PS3_HEAP_SIZE(0x19800)
 
 // Macros for packing and unpacking the section compression flag.
 // (this packing is a holdover from TitlesSection where there's also section transitions, not just OnePlayerSection).

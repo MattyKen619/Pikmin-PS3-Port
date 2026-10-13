@@ -20,6 +20,14 @@ extern "C" void ps3BootStage(const char* what)
 	ps3Log("[boot] %s\n", what);
 }
 
+// A game heap (AyuHeap) ran out of space. The GameCube build would crash writing to address 0.
+extern "C" void ps3HeapExhausted(const char* heapName, int requested, int freeBytes)
+{
+	ps3Log("[ps3] FAILED: game heap \"%s\" is full: %d bytes requested, %d bytes free\n", heapName ? heapName : "?", requested,
+	       freeBytes);
+	OSPanic(__FILE__, __LINE__, "out of memory in a game heap");
+}
+
 extern "C" void ps3PlatformInit(void)
 {
 	static int sDone;

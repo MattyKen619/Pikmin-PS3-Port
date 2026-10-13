@@ -43,6 +43,11 @@ struct ThreadImpl {
 	volatile int depth;
 	volatile u32 calls;
 	u32 reportedCalls;
+
+	// Basic-block trace (-fsanitize-coverage=trace-pc): the last game-code address this thread ran.
+	void* volatile lastPc;
+	volatile u32 blocks;
+	u32 reportedBlocks;
 };
 
 struct Interrupt {
@@ -337,6 +342,23 @@ extern "C" void __cyg_profile_func_exit(void* fn, void* site)
 	ThreadImpl* t = sRunning;
 	if (t && t->depth > 0) {
 		t->depth--;
+	}
+}
+
+// Called at the start of every basic block of game code (-fsanitize-coverage=trace-pc). Records where
+// the thread is, which pinpoints a hang or the last code a crashed thread ran (lv2 stops a thread that
+// faults while the rest of the game keeps going), and makes every loop a switch point.
+extern "C" void __sanitizer_cov_trace_pc(void) __attribute__((no_instrument_function));
+extern "C" void __sanitizer_cov_trace_pc(void)
+{
+	ThreadImpl* t = sRunning;
+	if (!t) {
+		return;
+	}
+	t->lastPc = __builtin_return_address(0);
+	t->blocks++;
+	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
+		ps3DeliverInterrupts();
 	}
 }
 
@@ -785,17 +807,20 @@ static void reportThreads(const char* title)
 		if (!t->os) {
 			continue;
 		}
-		u32 calls        = t->calls;
-		u32 recent       = calls - t->reportedCalls;
-		t->reportedCalls = calls;
-		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls\n", i, (int)t->os->priority, stateName(t->os->state),
-		       t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "", t == sRunning ? "  <- has the baton" : "",
-		       (unsigned)recent);
+		u32 calls         = t->calls;
+		u32 recent        = calls - t->reportedCalls;
+		t->reportedCalls  = calls;
+		u32 blocks        = t->blocks;
+		u32 recentBlocks  = blocks - t->reportedBlocks;
+		t->reportedBlocks = blocks;
+		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls, %u blocks since last report\n", i, (int)t->os->priority,
+		       stateName(t->os->state), t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "",
+		       t == sRunning ? "  <- has the baton" : "", (unsigned)recent, (unsigned)recentBlocks);
 		// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
 		int depth = t->depth;
 		if (depth > 0) {
 			char line[512];
-			int n = snprintf(line, sizeof(line), "[stack]   thread %d depth %d:", i, depth);
+			int n = snprintf(line, sizeof(line), "[stack]   thread %d pc %p depth %d:", i, t->lastPc, depth);
 			int shown = depth < SHADOW_DEPTH ? depth : SHADOW_DEPTH;
 			for (int f = shown - 1; f >= 0 && f >= shown - 10 && n < (int)sizeof(line) - 40; f--) {
 				n += snprintf(line + n, sizeof(line) - n, " %p<%p", t->stackFn[f], t->stackSite[f]);
@@ -812,6 +837,8 @@ static void watchdogThread(void*)
 	ThreadImpl* lastRunner = NULL;
 	int idleSdk      = 0;
 	int idleCalls    = 0;
+	int idleBlocks   = 0;
+	u32 lastBlocks   = 0;
 	int seconds      = 0;
 	for (;;) {
 		ps3b_sleep_us(1000 * 1000);
@@ -820,21 +847,31 @@ static void watchdogThread(void*)
 		idleSdk = (now == lastActivity) ? idleSdk + 1 : 0;
 		lastActivity = now;
 
-		// The baton holder is executing game code but has not called a function: a loop without calls.
+		// The baton holder is executing game code but has not called a function: a loop without calls,
+		// or (if not even a basic block ran) the thread has stopped: lv2 halts a thread that faults.
 		ThreadImpl* runner = sRunning;
 		u32 calls          = runner ? runner->calls : 0;
+		u32 blocks         = runner ? runner->blocks : 0;
 		int running        = runner && runner->os && runner->os->state == OS_THREAD_STATE_RUNNING;
-		idleCalls          = (running && runner == lastRunner && calls == lastCalls) ? idleCalls + 1 : 0;
+		int same           = running && runner == lastRunner;
+		idleCalls          = (same && calls == lastCalls) ? idleCalls + 1 : 0;
+		idleBlocks         = (same && blocks == lastBlocks) ? idleBlocks + 1 : 0;
 		lastRunner         = runner;
 		lastCalls          = calls;
+		lastBlocks         = blocks;
 
-		if (idleSdk == 5 || (idleSdk > 0 && idleSdk % 30 == 0)) {
-			char title[64];
-			snprintf(title, sizeof(title), "STALL: no SDK activity for %d s", idleSdk);
+		if (idleBlocks == 5 || (idleBlocks > 0 && idleBlocks % 30 == 0)) {
+			char title[112];
+			snprintf(title, sizeof(title), "STALL: thread %d stopped for %d s (crashed, or blocked outside game code)",
+			         runner->index, idleBlocks);
 			reportThreads(title);
 		} else if (idleCalls == 5 || (idleCalls > 0 && idleCalls % 30 == 0)) {
 			char title[80];
 			snprintf(title, sizeof(title), "STALL: thread %d looping without calls for %d s", runner->index, idleCalls);
+			reportThreads(title);
+		} else if (idleSdk == 5 || (idleSdk > 0 && idleSdk % 30 == 0)) {
+			char title[64];
+			snprintf(title, sizeof(title), "STALL: no SDK activity for %d s", idleSdk);
 			reportThreads(title);
 		} else if (seconds % 15 == 0) {
 			reportThreads("heartbeat");

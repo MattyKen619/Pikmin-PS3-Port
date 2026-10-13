@@ -6,6 +6,9 @@
 #if defined(WIN32)
 #include <windows.h>
 #endif
+#if defined(TARGET_PS3)
+#include "ps3/platform.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -51,6 +54,10 @@ void* System::alloc(size_t size)
 		result = heap.push(size);
 		if (!result) {
 			ERROR("new[] %d failed in heap '%s'", size, heap.mName);
+#if defined(TARGET_PS3)
+			// ERROR is empty in release builds, so this would go on to write to address 0.
+			ps3HeapExhausted(heap.mName, (int)size, heap.getFree());
+#endif
 		}
 
 		// This whole section is absent on Windows
@@ -94,6 +101,9 @@ void* System::alloc(size_t size)
 		}
 #else
 		ERROR("no heap specified\n");
+#if defined(TARGET_PS3)
+		ps3HeapExhausted("(no heap selected)", (int)size, 0);
+#endif
 #endif
 	}
 

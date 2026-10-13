@@ -43,14 +43,15 @@ OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(LIBS_C) $(PLATFORM_CPP) $(BA
 OPT       := -O2 -fno-strict-aliasing
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 3
+TEST_BUILD := 4
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
-# Game code (C++ and jaudio) is instrumented: every function entry is a thread-switch point and keeps a
-# shadow call stack for stall reports (see "preemption points" in platform/ps3/sdk/os_sched.cpp).
-# The SDK layer that implements the hooks is not.
-INSTRUMENT       := -finstrument-functions
+# Game code (C++ and jaudio) is instrumented: function entries keep a shadow call stack, basic blocks
+# record the last address each thread ran, and both are thread-switch points ("preemption points" in
+# platform/ps3/sdk/os_sched.cpp). -g1 adds line tables for tools/ps3/symbolize_log.py. The SDK layer
+# that implements the hooks is not instrumented.
+INSTRUMENT       := -finstrument-functions -fsanitize-coverage=trace-pc -g1
 PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(GAME_DEFS) $(GAME_INC)
 GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)

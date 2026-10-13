@@ -560,7 +560,7 @@ void GameFlow::hardReset(BaseApp* baseApp)
 	mParameters = new Parms();
 
 	// loading heap is 0x8000 bytes in size (32 kb)
-	int loadHeapSize = 0x8000;
+	int loadHeapSize = PS3_HEAP_SIZE(0x8000);
 
 	// set time-related factors
 	mWorldClock.reset(mParameters->mRealMinutesPerGameDay());
