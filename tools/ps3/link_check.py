@@ -49,7 +49,7 @@ PORT_SOURCES = [
 TOOLCHAIN_PROVIDED = {
     "acosf", "atan2", "atan2f", "atexit", "atof", "atoi", "cosf", "memcpy", "memmove", "memset", "printf", "rand",
     "sinf", "sprintf", "sqrt", "sscanf", "strcat", "strchr", "strcmp", "strcpy", "strlen", "strncmp", "strncpy",
-    "strtol", "strtoul", "tanf", "vsprintf", "snprintf", "vsnprintf",
+    "strtol", "strtoul", "tanf", "vsprintf", "snprintf", "vsnprintf", "strstr",
     "__cxa_pure_virtual",
 }
 

@@ -1,4 +1,4 @@
-// PS3 port: video timing (VI), controllers (PAD), ARAM (AR/ARQ) and memory card (CARD).
+// PS3 port: video timing (VI), controllers (PAD) and ARAM (AR/ARQ).
 
 #include "sdk_internal.h"
 
@@ -286,38 +286,5 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
 	}
 }
 
-// ================================================================== CARD: no memory card yet
-// Every call reports "no card", which the game handles (it offers to continue without saving).
-// Phase 3b replaces this with save files on the PS3.
+// CARD (memory card): see card.cpp.
 
-static int sCardLogged;
-
-static s32 noCard(const char* what)
-{
-	ps3LogOnce(&sCardLogged, "[ps3] memory card: not implemented yet, reporting \"no card\" (first call: %s)\n", what);
-	return CARD_RESULT_NOCARD;
-}
-
-void CARDInit(void) { }
-BOOL CARDProbe(s32 chan) { (void)chan; return FALSE; }
-s32 CARDMount(s32 chan, CARDMemoryCard* work, CARDCallback detach) { (void)chan; (void)work; (void)detach; return noCard("CARDMount"); }
-s32 CARDMountAsync(s32 chan, CARDMemoryCard* work, CARDCallback detach, CARDCallback attach) { (void)chan; (void)work; (void)detach; (void)attach; return noCard("CARDMountAsync"); }
-s32 CARDUnmount(s32 chan) { (void)chan; return CARD_RESULT_NOCARD; }
-s32 CARDCheck(s32 chan) { (void)chan; return noCard("CARDCheck"); }
-s32 CARDCheckAsync(s32 chan, CARDCallback cb) { (void)chan; (void)cb; return noCard("CARDCheckAsync"); }
-s32 CARDFormat(s32 chan) { (void)chan; return noCard("CARDFormat"); }
-s32 CARDFormatAsync(s32 chan, CARDCallback cb) { (void)chan; (void)cb; return noCard("CARDFormatAsync"); }
-s32 CARDGetResultCode(s32 chan) { (void)chan; return CARD_RESULT_NOCARD; }
-s32 CARDFreeBlocks(s32 chan, s32* bytes, s32* files) { (void)chan; if (bytes) *bytes = 0; if (files) *files = 0; return noCard("CARDFreeBlocks"); }
-s32 CARDGetSectorSize(s32 chan, u32* size) { (void)chan; if (size) *size = 0x2000; return noCard("CARDGetSectorSize"); }
-s32 CARDGetStatus(s32 chan, s32 fileNo, CARDStat* stat) { (void)chan; (void)fileNo; (void)stat; return noCard("CARDGetStatus"); }
-s32 CARDSetStatus(s32 chan, s32 fileNo, CARDStat* stat) { (void)chan; (void)fileNo; (void)stat; return noCard("CARDSetStatus"); }
-s32 CARDOpen(s32 chan, const char* name, CARDFileInfo* info) { (void)chan; (void)name; (void)info; return noCard("CARDOpen"); }
-s32 CARDFastOpen(s32 chan, s32 fileNo, CARDFileInfo* info) { (void)chan; (void)fileNo; (void)info; return noCard("CARDFastOpen"); }
-s32 CARDCreate(s32 chan, const char* name, u32 size, CARDFileInfo* info) { (void)chan; (void)name; (void)size; (void)info; return noCard("CARDCreate"); }
-s32 CARDClose(CARDFileInfo* info) { (void)info; return CARD_RESULT_NOCARD; }
-s32 CARDRead(CARDFileInfo* info, void* buf, s32 len, s32 offset) { (void)info; (void)buf; (void)len; (void)offset; return noCard("CARDRead"); }
-s32 CARDWrite(CARDFileInfo* info, void* buf, s32 len, s32 offset) { (void)info; (void)buf; (void)len; (void)offset; return noCard("CARDWrite"); }
-s32 CARDRename(s32 chan, const char* oldName, const char* newName) { (void)chan; (void)oldName; (void)newName; return noCard("CARDRename"); }
-s32 CARDFastDelete(s32 chan, s32 fileNo) { (void)chan; (void)fileNo; return noCard("CARDFastDelete"); }
-s32 CARDGetXferredBytes(s32 chan) { (void)chan; return 0; }

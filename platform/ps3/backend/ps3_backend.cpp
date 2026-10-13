@@ -63,6 +63,11 @@ extern "C" void* ps3b_memalign(unsigned int align, unsigned int size)
 	return memalign(align, size);
 }
 
+extern "C" void ps3b_free(void* p)
+{
+	free(p);
+}
+
 // ---------------------------------------------------------------- time
 
 extern "C" unsigned long long ps3b_timebase(void)
@@ -194,6 +199,30 @@ extern "C" int ps3b_file_pread(int fd, void* buf, unsigned long long offset, uns
 extern "C" void ps3b_file_close(int fd)
 {
 	sysLv2FsClose(fd);
+}
+
+extern "C" int ps3b_file_open_rw(const char* path, int create)
+{
+	s32 fd = -1;
+	if (sysLv2FsOpen(path, SYS_O_RDWR | (create ? SYS_O_CREAT : 0), &fd, 0666, NULL, 0) != 0) {
+		return -1;
+	}
+	if (create) {
+		sysLv2FsChmod(path, 0666);
+	}
+	return fd;
+}
+
+extern "C" int ps3b_file_pwrite(int fd, const void* buf, unsigned long long offset, unsigned int len)
+{
+	u64 pos = 0, written = 0;
+	if (sysLv2FsLSeek64(fd, offset, 0 /* SEEK_SET */, &pos) != 0) {
+		return -1;
+	}
+	if (sysLv2FsWrite(fd, buf, len, &written) != 0) {
+		return -1;
+	}
+	return (int)written;
 }
 
 extern "C" int ps3b_file_read_all(const char* path, char** out_data, unsigned int* out_size)

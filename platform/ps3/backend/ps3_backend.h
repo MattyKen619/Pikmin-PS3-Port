@@ -16,6 +16,7 @@ void ps3b_exit(int code) __attribute__((noreturn));
 
 // ---- memory (newlib heap)
 void* ps3b_memalign(unsigned int align, unsigned int size);
+void ps3b_free(void* p);
 
 // ---- time
 unsigned long long ps3b_timebase(void);       // PPU timebase counter
@@ -43,6 +44,8 @@ long long ps3b_file_size(int fd);
 int ps3b_file_pread(int fd, void* buf, unsigned long long offset, unsigned int len); // bytes read or -1
 void ps3b_file_close(int fd);
 int ps3b_file_read_all(const char* path, char** out_data, unsigned int* out_size); // malloc'd, NUL-terminated
+int ps3b_file_open_rw(const char* path, int create);     // read/write (memory card image); fd or -1
+int ps3b_file_pwrite(int fd, const void* buf, unsigned long long offset, unsigned int len); // bytes written or -1
 
 // ---- data location: the folder holding fst.txt and files/ (see tools/ps3/extract_disc.py)
 const char* ps3b_data_root(void); // NULL if not found
