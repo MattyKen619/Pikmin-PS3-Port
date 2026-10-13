@@ -253,6 +253,15 @@ u32 ARInit(u32* stack, u32 numEntries)
 }
 
 u32 ARGetBaseAddress(void) { return ARAM_BASE; }
+
+// For the DSP (dsp_hle.cpp): ARAM bytes [address, address + size), or NULL if out of range.
+extern "C" u8* ps3AramRange(u32 address, u32 size)
+{
+	if (!sAram || (u64)address + size > ARAM_SIZE) {
+		return NULL;
+	}
+	return sAram + address;
+}
 void ARQInit(void) { }
 
 // Transfers complete immediately and call back before returning: the game busy-waits for some of

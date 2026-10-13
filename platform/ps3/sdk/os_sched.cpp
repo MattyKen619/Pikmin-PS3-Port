@@ -797,7 +797,7 @@ extern "C" unsigned int ps3FramesDrawn(void);
 
 static void reportThreads(const char* title)
 {
-	char audio[96];
+	char audio[256];
 	ps3AudioStatus(audio, sizeof(audio));
 	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s\n",
 	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",

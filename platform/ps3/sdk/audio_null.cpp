@@ -9,10 +9,10 @@
 //   DSP     - the DSP finished one of the 7 sub-frames of a mixing frame: DspSync() lets the thread
 //             update voices for the next one.
 //
-// Here a timer thread raises the AI interrupt at the real rate, and a "null DSP" answers the
-// microcode's mailbox protocol (boot handshake, command acknowledgements, one sync interrupt per
-// released sub-frame) without mixing anything. The output buffers stay silent. Phase 5 replaces the
-// null DSP with an emulation of the microcode and sends the AI buffers to the PS3's audio output.
+// Here a timer thread raises the AI interrupt at the real rate. The DSP side answers the microcode's
+// mailbox protocol (boot handshake, command acknowledgements, one sync interrupt per released
+// sub-frame) and mixes each sub-frame with dsp_hle.cpp, which also keeps JAudio's voices advancing and
+// finishing. The mixed audio is not sent to the PS3's output yet (Phase 5).
 
 #include "sdk_internal.h"
 
@@ -23,6 +23,11 @@
 #include <stdio.h>
 
 extern "C" void ps3RaiseInterrupt(int interrupt);
+extern "C" void ps3DspSetup(u32 voiceCount, u32 voices, u32 tables, u32 afcCoeffs, u32 reverb);
+extern "C" void ps3DspStartFrame(u32 subframes, u32 outputVolume, u32 left, u32 right);
+extern "C" void ps3DspRenderSubframe(void);
+extern "C" void ps3DspStatus(char* buf, unsigned int size);
+extern "C" void ps3StreamState(u32* state, u32* id, u32* samplesLoaded, u32* totalSamples); // syncstream.c
 
 // ================================================================== AI: audio DMA timer
 
@@ -106,7 +111,7 @@ void AIStartDMA(void)
 void AISetDSPSampleRate(u32 rate) { sDspSampleRate = rate; }
 u32 AIGetDSPSampleRate(void) { return sDspSampleRate; }
 
-// ================================================================== DSP: null microcode
+// ================================================================== DSP: mailbox
 //
 // Mailbox protocol of JAudio's microcode (src/jaudio/dspboot.c, dspproc.c):
 //   boot:     DSP ROM sends 0x8071FEED; the CPU answers with 10 mails describing the microcode; the
@@ -167,9 +172,13 @@ static int commandLength(u32 id)
 static void runCommand()
 {
 	u32 id = sCmd[0] >> 24;
+	if (id == 0x81) {
+		ps3DspSetup(sCmd[0] & 0xFFFF, sCmd[1], sCmd[2], sCmd[3], sCmd[4]);
+	}
 	if (id == 0x82) {
 		sSubframesLeft = (sCmd[0] >> 16) & 0xFF;
 		sDspFrames++;
+		ps3DspStartFrame(sSubframesLeft, sCmd[0] & 0xFFFF, sCmd[1], sCmd[2]);
 	}
 	dspReply(0xF3550000 | (id << 8)); // acknowledgement
 }
@@ -189,7 +198,7 @@ u32 DSPCheckMailFromDSP(void)
 		return 1;
 	}
 	// Polling an empty mailbox: let interrupts in, and report if JAudio waits for a mail that the
-	// null DSP will never send. (DSPReleaseHalt polls once per sub-frame and finds nothing: normal.)
+	// DSP will never send. (DSPReleaseHalt polls once per sub-frame and finds nothing: normal.)
 	if (++sEmptyPolls == 10000000) {
 		ps3Log("[ps3] FAILED: audio code is waiting for a DSP mail that will not come\n");
 	}
@@ -227,6 +236,7 @@ void DSPSendMailToDSP(u32 mail)
 			if (sSubframesLeft > 0) {
 				sSubframesLeft--;
 				sDspSyncs++;
+				ps3DspRenderSubframe();
 				ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
 			}
 			return;
@@ -245,6 +255,20 @@ void DSPAssertInt(void) { }
 
 extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 {
-	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs", (unsigned)sAiBlocks, (unsigned)sDspFrames,
-	         (unsigned)sDspSyncs);
+	char voices[96];
+	ps3DspStatus(voices, sizeof(voices));
+
+	// The music/movie stream (jaudio/syncstream.c): what a cutscene waits for.
+	static const char* const kStates[] = { "starting", "playing", "ready", "stopping", "idle", "buffering", "paused" };
+	u32 state, id, loaded, total;
+	ps3StreamState(&state, &id, &loaded, &total);
+	char stream[64];
+	if (state == 4) {
+		snprintf(stream, sizeof(stream), "stream idle");
+	} else {
+		snprintf(stream, sizeof(stream), "stream %d %s (%u of %u samples)", (int)id, state < 7 ? kStates[state] : "?",
+		         (unsigned)loaded, (unsigned)total);
+	}
+	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s; %s", (unsigned)sAiBlocks, (unsigned)sDspFrames,
+	         (unsigned)sDspSyncs, voices, stream);
 }
