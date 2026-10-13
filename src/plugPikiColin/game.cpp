@@ -1,4 +1,7 @@
 #include "OnePlayerSection.h"
+#if defined(TARGET_PS3)
+#include "ps3/platform.h"
+#endif
 
 #include "CardSelectSection.h"
 #include "CmdStream.h"
@@ -271,6 +274,14 @@ void OnePlayerSection::init()
 
 		// process whatever section ID we have queued up
 		int nextSectionType = gameflow.mNextOnePlayerSectionID;
+#if defined(TARGET_PS3)
+		{
+			static immut char* sNames[] = { "game setup", "file select", "E3 tutorial", "E3 forest 1", "E3 forest 2", "intro",
+				                            "map select", "gameplay", "course clear", "stage clear", "credits", "exit" };
+			ps3Report("[game] one-player section: %s\n",
+			          (nextSectionType >= 0 && nextSectionType < 12) ? sNames[nextSectionType] : "?");
+		}
+#endif
 		switch (nextSectionType) {
 		case ONEPLAYER_GameSetup:
 		{

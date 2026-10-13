@@ -179,6 +179,16 @@ void Jaf_GetJamHandle(u32 rootTrackIndex)
  */
 seqp_* Jaf_HandleToSeq(u32 index)
 {
+#if defined(__LP64__)
+	// Callers pass handle -1 for "no track" (e.g. Jac_EasyCrossFade when no boss music is loaded). With
+	// 32-bit addresses &rootseq[0xFFFFFFFF] wraps to just before the array, so the GameCube reads and
+	// writes a little of the neighbouring static data; with 64-bit addresses it is 64 GB away and
+	// crashes (test build 4). Give such callers a scratch track instead.
+	if ((s32)index < 0 || index >= ROOTSEQ_SIZE) {
+		static seqp_ sNoTrack;
+		return &sNoTrack;
+	}
+#endif
 	return &rootseq[index];
 }
 

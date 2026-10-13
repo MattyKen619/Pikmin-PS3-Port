@@ -1,4 +1,7 @@
 #include "gameflow.h"
+#if defined(TARGET_PS3)
+#include "ps3/platform.h"
+#endif
 
 #include "BaseApp.h"
 #include "Controller.h"
@@ -639,6 +642,13 @@ void GameFlow::softReset()
 		app->useHeap(SYSHEAP_App);
 		gsys->getHeap(gsys->getHeapNum())->setAllocType(AYU_STACK_GROW_DOWN);
 
+#if defined(TARGET_PS3)
+		{
+			static immut char* sNames[] = { "Nintendo logo", "title screen", "movie (h4m)", "PaniTest", "one-player game", "OgTest" };
+			int id = mNextGameSectionID;
+			ps3Report("[game] section: %s\n", (id >= 0 && id < 6) ? sNames[id] : "?");
+		}
+#endif
 		switch (mNextGameSectionID) {
 		case SECTION_NinLogo:
 		{

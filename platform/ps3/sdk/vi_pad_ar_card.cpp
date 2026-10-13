@@ -154,6 +154,19 @@ u32 PADRead(PADStatus* status)
 		s->analogB      = (b & PAD_BUTTON_B) ? 255 : 0;
 		s->err          = PAD_ERR_NONE;
 		mask |= PAD_CHAN0_BIT >> ch;
+
+		// Log the first button changes so a test log shows the controller reaching the game.
+		static u16 sLastButtons[PAD_MAX_CONTROLLERS];
+		static int sLoggedChanges;
+		if (b != sLastButtons[ch] && sLoggedChanges < 40) {
+			sLoggedChanges++;
+			ps3Log("[pad] controller %d: %s%s%s%s%s%s%s%s%s%s%s%s%s\n", ch + 1, b ? "" : "(released)",
+			       (b & PAD_BUTTON_A) ? " A" : "", (b & PAD_BUTTON_B) ? " B" : "", (b & PAD_BUTTON_X) ? " X" : "",
+			       (b & PAD_BUTTON_Y) ? " Y" : "", (b & PAD_BUTTON_START) ? " START" : "", (b & PAD_TRIGGER_L) ? " L" : "",
+			       (b & PAD_TRIGGER_R) ? " R" : "", (b & PAD_TRIGGER_Z) ? " Z" : "", (b & PAD_BUTTON_UP) ? " UP" : "",
+			       (b & PAD_BUTTON_DOWN) ? " DOWN" : "", (b & PAD_BUTTON_LEFT) ? " LEFT" : "", (b & PAD_BUTTON_RIGHT) ? " RIGHT" : "");
+		}
+		sLastButtons[ch] = b;
 	}
 	return mask;
 }

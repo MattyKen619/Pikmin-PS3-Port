@@ -7,6 +7,8 @@
 
 #include "../backend/ps3_backend.h"
 #include "ps3/platform.h"
+#include <stdarg.h>
+#include <stdio.h>
 
 extern "C" void ps3OsMiscInit(void);
 extern "C" void ps3StartWatchdog(void);
@@ -18,6 +20,16 @@ extern "C" void ps3StartWatchdog(void);
 extern "C" void ps3BootStage(const char* what)
 {
 	ps3Log("[boot] %s\n", what);
+}
+
+extern "C" void ps3Report(const char* fmt, ...)
+{
+	char buf[512];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	ps3Log("%s", buf);
 }
 
 // A game heap (AyuHeap) ran out of space. The GameCube build would crash writing to address 0.
