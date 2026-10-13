@@ -84,6 +84,42 @@ static void normalize(const char* in, char* out, int outSize)
 		n--;
 	}
 	out[n] = 0;
+
+	// Resolve "." and ".." components, as the GameCube's DVD path lookup does
+	// (e.g. "/dataDir/SndData/../MovieData/cntA_S.h4m").
+	if (strstr(out, "./") || strcmp(out, ".") == 0 || (n >= 2 && strcmp(out + n - 2, "/.") == 0)
+	    || (n >= 3 && strcmp(out + n - 3, "/..") == 0) || strcmp(out, "..") == 0) {
+		char tmp[256];
+		int t = 0;
+		const char* q = out;
+		while (*q) {
+			const char* e = strchr(q, '/');
+			int len       = e ? (int)(e - q) : (int)strlen(q);
+			if (len == 1 && q[0] == '.') {
+				// stay
+			} else if (len == 2 && q[0] == '.' && q[1] == '.') {
+				while (t > 0 && tmp[t - 1] != '/') {
+					t--;
+				}
+				if (t > 0) {
+					t--; // drop the slash
+				}
+			} else if (len > 0 && t + len + 1 < (int)sizeof(tmp)) {
+				if (t > 0) {
+					tmp[t++] = '/';
+				}
+				memcpy(tmp + t, q, len);
+				t += len;
+			}
+			q += len;
+			if (*q == '/') {
+				q++;
+			}
+		}
+		tmp[t] = 0;
+		strncpy(out, tmp, outSize - 1);
+		out[outSize - 1] = 0;
+	}
 }
 
 extern "C" void ps3DvdInit(void)

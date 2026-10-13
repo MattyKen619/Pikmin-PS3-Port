@@ -13,7 +13,13 @@ typedef struct cmdqueue_ CmdQueue;
 struct cmdqueue_ {
 	Jac_MessageQueue msgQueue; // _00
 	OSMessage message;         // _20
+#if defined(__LP64__)
+	// Jal_AddCmdQueue gives msgQueue 16 messages starting at `message`. The GameCube layout reserves
+	// 16 * 4 bytes for them; with 8-byte messages the 9th and later overwrote `track` (test build 5).
+	OSMessage _moreMessages[15];
+#else
 	u8 _24[0x60 - 0x24];       // _24
+#endif
 	seqp_* track;              // _60
 	u8 mPortId;                // _64
 	CmdQueue* next;            // _68;

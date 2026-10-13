@@ -207,8 +207,15 @@ void Jaf_LoadStartFinish(u32 asyncContext)
 static void Jaf_LoadFinish(u32 asyncContext)
 {
 	// Why is a (known) u32 parameter suddenly a pointer?
+#if defined(__LP64__)
+	// The raw offsets below are as_struct's GameCube layout; with 64-bit pointers mBuffer is at 0x10.
+	as_struct* context                 = (as_struct*)(uptr)asyncContext;
+	seq_loadbuffer[context->mSeqIndex] = context->mBuffer;
+	context->mInUse                    = 0;
+#else
 	seq_loadbuffer[*(int*)(asyncContext + 4)] = *(u8**)(asyncContext + 12);
 	*(u8*)asyncContext                        = 0;
+#endif
 }
 
 /**

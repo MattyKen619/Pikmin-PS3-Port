@@ -9,7 +9,11 @@
 static char audio_root_path[32] = "";
 
 static OSMessageQueue mq;
+#if defined(__LP64__)
+static OSMessage msgbuf[0x80]; // used as 0x80 OSMessages, which are 8 bytes on the PS3
+#else
 static s32 msgbuf[0x80];
+#endif
 static u8 CALLSTACK[0x8000];
 
 static u32 mq_init;
