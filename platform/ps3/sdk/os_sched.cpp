@@ -799,6 +799,30 @@ static const char* stateName(int s)
 extern "C" void ps3AudioStatus(char* buf, unsigned int size);
 extern "C" unsigned int ps3FramesDrawn(void);
 
+static void logStack(int index, ThreadImpl* t)
+{
+	// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
+	int depth = t->depth;
+	if (depth > 0) {
+		char line[512];
+		int n     = snprintf(line, sizeof(line), "[stack]   thread %d pc %p depth %d:", index, t->lastPc, depth);
+		int shown = depth < SHADOW_DEPTH ? depth : SHADOW_DEPTH;
+		for (int f = shown - 1; f >= 0 && f >= shown - 10 && n < (int)sizeof(line) - 40; f--) {
+			n += snprintf(line + n, sizeof(line) - n, " %p<%p", t->stackFn[f], t->stackSite[f]);
+		}
+		ps3Log("%s\n", line);
+	}
+}
+
+extern "C" void ps3ReportStack(const char* what)
+{
+	ThreadImpl* t = sRunning;
+	ps3Log("[ps3] %s\n", what);
+	if (t) {
+		logStack((int)(t - sImpls), t);
+	}
+}
+
 static void reportThreads(const char* title)
 {
 	char audio[256];
@@ -820,17 +844,7 @@ static void reportThreads(const char* title)
 		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls, %u blocks since last report\n", i, (int)t->os->priority,
 		       stateName(t->os->state), t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "",
 		       t == sRunning ? "  <- has the baton" : "", (unsigned)recent, (unsigned)recentBlocks);
-		// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
-		int depth = t->depth;
-		if (depth > 0) {
-			char line[512];
-			int n = snprintf(line, sizeof(line), "[stack]   thread %d pc %p depth %d:", i, t->lastPc, depth);
-			int shown = depth < SHADOW_DEPTH ? depth : SHADOW_DEPTH;
-			for (int f = shown - 1; f >= 0 && f >= shown - 10 && n < (int)sizeof(line) - 40; f--) {
-				n += snprintf(line + n, sizeof(line) - n, " %p<%p", t->stackFn[f], t->stackSite[f]);
-			}
-			ps3Log("%s\n", line);
-		}
+		logStack(i, t);
 	}
 }
 

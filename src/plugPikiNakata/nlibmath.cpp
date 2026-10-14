@@ -1,5 +1,8 @@
 #include "DebugLog.h"
 #include "nlib/Math.h"
+#if defined(TARGET_PS3)
+#include "ps3/platform.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -104,7 +107,22 @@ u16 GetAtanTable(f32 x, f32 y)
 
 	// Calculate index: (ratio * 1024) rounded to nearest int.
 	// This maps ratio [0,1] to table indices [0, 1024].
+#if defined(TARGET_PS3)
+	// A NaN ratio converts to the index 0x80000000. On the GameCube, AtanTable[0x80000000] wraps around the
+	// 32-bit address space back to AtanTable[0], so a NaN angle quietly became 0. Here the same index would
+	// point 4 GB below the table and crash (test 9). Compute the address the GameCube way.
+	int index = int((x / y) * 1024.0f + 0.5f);
+	if ((u32)index > 1024) {
+		static int sReported;
+		if (sReported < 3) {
+			sReported++;
+			ps3ReportStack("note: angle lookup outside its table (NaN or infinite coordinates); using the GameCube result");
+		}
+	}
+	return *(u16*)(uptr)((u32)(uptr)AtanTable + (u32)index * 2u);
+#else
 	return AtanTable[int((x / y) * 1024.0f + 0.5f)];
+#endif
 }
 
 /*

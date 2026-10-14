@@ -20,6 +20,7 @@
 #include "Dolphin/ai.h"
 #include "Dolphin/dsp.h"
 #include "Dolphin/os.h"
+#include "jaudio/syncstream.h"
 #include <stdio.h>
 
 extern "C" void ps3RaiseInterrupt(int interrupt);
@@ -27,7 +28,7 @@ extern "C" void ps3DspSetup(u32 voiceCount, u32 voices, u32 tables, u32 afcCoeff
 extern "C" void ps3DspStartFrame(u32 subframes, u32 outputVolume, u32 left, u32 right);
 extern "C" void ps3DspRenderSubframe(void);
 extern "C" void ps3DspStatus(char* buf, unsigned int size);
-extern "C" void ps3StreamState(u32* state, u32* id, u32* samplesLoaded, u32* totalSamples); // syncstream.c
+extern "C" StreamCtrl_* const ps3StreamControl; // syncstream.c
 
 // ================================================================== AI: audio DMA timer
 
@@ -260,8 +261,11 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 
 	// The music/movie stream (jaudio/syncstream.c): what a cutscene waits for.
 	static const char* const kStates[] = { "starting", "playing", "ready", "stopping", "idle", "buffering", "paused" };
-	u32 state, id, loaded, total;
-	ps3StreamState(&state, &id, &loaded, &total);
+	const StreamCtrl_* sc = ps3StreamControl;
+	u32 state             = sc->playbackState;
+	u32 id                = sc->streamId;
+	u32 loaded            = sc->samplesLoaded;
+	u32 total             = sc->totalSamples;
 	char stream[64];
 	if (state == 4) {
 		snprintf(stream, sizeof(stream), "stream idle");

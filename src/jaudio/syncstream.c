@@ -1223,14 +1223,9 @@ void StreamCheckBufferRemainSize(void)
 
 #if defined(TARGET_PS3)
 /**
- * PS3 port: the stream's state for the port's progress reports (platform/ps3/sdk/audio_null.cpp).
+ * PS3 port: the stream's state, read by the port's progress reports (platform/ps3/sdk/audio_null.cpp).
+ * A pointer rather than a function: the reports run on a system thread, which must not run
+ * instrumented game code.
  */
-extern "C" void ps3StreamState(u32* state, u32* id, u32* samplesLoaded, u32* totalSamples)
-{
-	StreamCtrl_* ctrl = &SC[0];
-	*state            = ctrl->playbackState;
-	*id               = ctrl->streamId;
-	*samplesLoaded    = ctrl->samplesLoaded;
-	*totalSamples     = ctrl->totalSamples;
-}
+extern "C" StreamCtrl_* const ps3StreamControl = &SC[0];
 #endif
