@@ -961,6 +961,20 @@ void AnimData::makeAnimSRT(int boneId, immut Matrix4f* parent, Matrix4f* output,
 	bool check = true;
 	if ((info->mFlags & AnimDataFlags::AllComponentsStatic) != AnimDataFlags::AllComponentsStatic
 	    && mAnimInfoList[frameNum].mCachedMtxBlock) {
+#if defined(__LP64__)
+		// The cached block is a FrameCacher (AnimFrameCacher::cacheFrameSpace). The original reads it through
+		// AnimCacheInfo, whose fields only line up with FrameCacher's when pointers are 4 bytes. Its bone
+		// list holds 32-bit pointers to the matrices that follow it.
+		FrameCacher* cache    = static_cast<FrameCacher*>(mAnimInfoList[frameNum].mCachedMtxBlock);
+		Ptr32<Matrix4f>* list = reinterpret_cast<Ptr32<Matrix4f>*>(cache->mBoneMtxList.get());
+		Matrix4f* matrices    = reinterpret_cast<Matrix4f*>(cache->mBoneMatricesEnd.get());
+		if (list[boneId]) {
+			check = false;
+		} else {
+			list[boneId] = &matrices[boneId];
+		}
+		boneTransform = list[boneId];
+#else
 		AnimCacheInfo* cache = static_cast<AnimCacheInfo*>(mAnimInfoList[frameNum].mCachedMtxBlock);
 		if (cache->mBoneMtxList[boneId]) {
 			check = false;
@@ -968,6 +982,7 @@ void AnimData::makeAnimSRT(int boneId, immut Matrix4f* parent, Matrix4f* output,
 			cache->mBoneMtxList[boneId] = &cache->mBoneMatrices[boneId];
 		}
 		boneTransform = cache->mBoneMtxList[boneId];
+#endif
 	} else {
 		boneTransform = &mtx;
 	}
@@ -3235,10 +3250,18 @@ void AnimFrameCacher::updateInfo(AnimCacheInfo* info)
  */
 void AnimFrameCacher::removeOldest()
 {
+#if defined(__LP64__)
+	// The oldest block is a FrameCacher; clear the frame's pointer to it (see makeAnimSRT).
+	FrameCacher* oldest = static_cast<FrameCacher*>((CacheInfo*)mInfo.mPrev);
+	mInfo.mPrev->remove();
+	*oldest->mInfo.get() = nullptr;
+	mCache->cacheFree(oldest);
+#else
 	AnimCacheInfo* oldest = static_cast<AnimCacheInfo*>((CacheInfo*)mInfo.mPrev);
 	mInfo.mPrev->remove();
 	*oldest->_0C = nullptr;
 	mCache->cacheFree(oldest);
+#endif
 }
 
 /**
@@ -3247,6 +3270,9 @@ void AnimFrameCacher::removeOldest()
 void AnimFrameCacher::cacheFrameSpace(int numTextures, AnimCacheInfo* info)
 {
 	u32 texSize = OSRoundDown32B(59 + 4 * numTextures + 64 * numTextures);
+#if defined(__LP64__)
+	texSize += 16; // room to start the matrices on a 16-byte boundary (below)
+#endif
 
 	while (true) {
 		u32 freeSize = mCache->largestBlockFree();
@@ -3254,7 +3280,12 @@ void AnimFrameCacher::cacheFrameSpace(int numTextures, AnimCacheInfo* info)
 			FrameCacher* alloc       = static_cast<FrameCacher*>(mCache->mallocL(texSize)); // I hate you
 			FrameCacher* cacher      = alloc;
 			cacher->mBoneMtxList     = &alloc->mBoneMatrices[0];
+#if defined(__LP64__)
+			// 16-byte aligned matrices: GCC may copy them with doubleword or vector accesses.
+			cacher->mBoneMatricesEnd = (u32*)(((uptr)&alloc->mBoneMatrices[numTextures] + 15) & ~(uptr)15);
+#else
 			cacher->mBoneMatricesEnd = &alloc->mBoneMatrices[numTextures];
+#endif
 			cacher->mInfo            = &info->mCachedMtxBlock;
 
 			for (int i = 0; i < numTextures; i++) {

@@ -331,7 +331,9 @@ extern "C" void __cyg_profile_func_enter(void* fn, void* site)
 	t->depth = d + 1;
 	t->calls++;
 	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
+		void* pc = t->lastPc;
 		ps3DeliverInterrupts();
+		t->lastPc = pc; // interrupt handlers ran on this thread: point back at the interrupted code
 	}
 }
 
@@ -355,10 +357,12 @@ extern "C" void __sanitizer_cov_trace_pc(void)
 	if (!t) {
 		return;
 	}
-	t->lastPc = __builtin_return_address(0);
+	void* pc  = __builtin_return_address(0);
+	t->lastPc = pc;
 	t->blocks++;
 	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
 		ps3DeliverInterrupts();
+		t->lastPc = pc; // interrupt handlers ran on this thread: point back at the interrupted code
 	}
 }
 

@@ -43,7 +43,7 @@ OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(LIBS_C) $(PLATFORM_CPP) $(BA
 OPT       := -O2 -fno-strict-aliasing
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 8
+TEST_BUILD := 9
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
