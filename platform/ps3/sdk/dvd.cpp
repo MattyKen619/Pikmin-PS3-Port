@@ -22,6 +22,7 @@ struct DvdEntry {
 	int fd;
 	long long size;
 	u32 lastUse;
+	int busy; // reads queued on the I/O thread: the file must stay open
 };
 
 static DvdEntry* sEntries;
@@ -215,7 +216,7 @@ static int entryFd(int idx)
 	if (sOpenCount >= MAX_OPEN_FD) {
 		int oldest = -1;
 		for (int i = 0; i < sEntryCount; i++) {
-			if (sEntries[i].fd >= 0 && (oldest < 0 || sEntries[i].lastUse < sEntries[oldest].lastUse)) {
+			if (sEntries[i].fd >= 0 && !sEntries[i].busy && (oldest < 0 || sEntries[i].lastUse < sEntries[oldest].lastUse)) {
 				oldest = i;
 			}
 		}
@@ -294,35 +295,36 @@ BOOL DVDClose(DVDFileInfo* info)
 	return TRUE;
 }
 
-static s32 doRead(DVDFileInfo* info, void* addr, s32 length, s32 offset)
-{
-	int idx = (int)info->startAddr;
-	if (idx < 0 || idx >= sEntryCount || length < 0) {
-		return DVD_RESULT_FATAL_ERROR;
-	}
-	int fd = entryFd(idx);
-	if (fd < 0) {
-		return DVD_RESULT_FATAL_ERROR;
-	}
-	int got = ps3b_file_pread(fd, addr, (unsigned long long)offset, (unsigned int)length);
-	if (got < 0) {
-		ps3Log("[ps3] FAILED reading %s (offset %d, %d bytes)\n", sEntries[idx].path, (int)offset, (int)length);
-		return DVD_RESULT_FATAL_ERROR;
-	}
-	if (got < length) {
-		// The GameCube reads in 32-byte units past the end of a file; callers expect the full length.
-		memset((u8*)addr + got, 0, length - got);
-	}
-	return length;
-}
+// ---- reading
+//
+// On the GameCube a DVD read is a DMA: the thread that asked waits (or carries on, for an async read)
+// while the other threads run. Reading here, on the thread that holds the scheduler's baton, stopped every
+// other game thread for the length of the read. While the game loaded its data, the audio thread could
+// not mix, and the sound stuttered (test 13). Reads now go to an I/O thread outside the scheduler: a
+// synchronous read gives up the baton until its data is in; an asynchronous one returns at once and its
+// callback runs as an interrupt when the data is in, as on the GameCube.
 
-s32 DVDReadPrio(DVDFileInfo* info, void* addr, s32 length, s32 offset, s32 prio)
-{
-	(void)prio;
-	PS3_ACTIVITY("DVDReadPrio");
-	ps3DeliverInterrupts();
-	return doRead(info, addr, length, offset);
-}
+struct IoReq {
+	int entry;
+	int fd;
+	void* addr;
+	u32 length;
+	unsigned long long offset;
+	s32 result;
+	volatile int done;
+	DVDFileInfo* asyncInfo; // async request: finish with asyncDone(asyncInfo)
+	IoReq* next;
+};
+
+enum { IO_POOL = 32 };
+static unsigned int sIoLock, sIoCv;
+static IoReq* volatile sIoHead;
+static IoReq* sIoTail;
+static IoReq sIoPool[IO_POOL]; // async requests (game context only: the baton serialises access)
+static IoReq* sIoFree;
+static int sIoState; // 0 not started, 1 running, -1 unavailable
+
+extern "C" int ps3CanBlock(void); // os_sched.cpp: a game thread holds the baton, not in an interrupt
 
 static void asyncDone(void* arg)
 {
@@ -334,15 +336,155 @@ static void asyncDone(void* arg)
 	}
 }
 
-// The data is read straight away; the callback runs at the next scheduling point, like the
-// GameCube's DVD interrupt would.
+// The read itself. Runs on the I/O thread (or, as a fallback, on the caller); touches no shared state.
+static s32 readNow(int idx, int fd, void* addr, u32 length, unsigned long long offset)
+{
+	int got = ps3b_file_pread(fd, addr, offset, length);
+	if (got < 0) {
+		ps3Log("[ps3] FAILED reading %s (offset %d, %d bytes)\n", sEntries[idx].path, (int)offset, (int)length);
+		return DVD_RESULT_FATAL_ERROR;
+	}
+	if ((u32)got < length) {
+		// The GameCube reads in 32-byte units past the end of a file; callers expect the full length.
+		memset((u8*)addr + got, 0, length - got);
+	}
+	return (s32)length;
+}
+
+static void ioComplete(void* arg);
+
+static void ioThread(void*)
+{
+	for (;;) {
+		ps3b_mutex_lock(sIoLock);
+		while (!sIoHead) {
+			ps3b_cond_wait(sIoCv, 100 * 1000);
+		}
+		IoReq* r = sIoHead;
+		sIoHead  = r->next;
+		if (!sIoHead) {
+			sIoTail = NULL;
+		}
+		ps3b_mutex_unlock(sIoLock);
+		r->result = readNow(r->entry, r->fd, r->addr, r->length, r->offset);
+		ps3PostInterrupt(ioComplete, r);
+	}
+}
+
+// Interrupt: a read finished.
+static void ioComplete(void* arg)
+{
+	IoReq* r = (IoReq*)arg;
+	sEntries[r->entry].busy--;
+	if (r->asyncInfo) {
+		DVDFileInfo* info            = r->asyncInfo;
+		info->cBlock.transferredSize = (u32)r->result;
+		r->next                      = sIoFree;
+		sIoFree                      = r;
+		asyncDone(info);
+	} else {
+		r->done = 1;
+		ps3WakeAll(r);
+	}
+}
+
+static bool ioAvailable()
+{
+	if (sIoState == 0) {
+		sIoState = -1;
+		if (ps3b_mutex_create(&sIoLock) == 0 && ps3b_cond_create(&sIoCv, sIoLock) == 0) {
+			for (int i = 0; i < IO_POOL; i++) {
+				sIoPool[i].next = sIoFree;
+				sIoFree         = &sIoPool[i];
+			}
+			if (ps3b_thread_create(ioThread, NULL, 950, 0x8000, "pikmin_dvd_io") == 0) {
+				sIoState = 1;
+				ps3Log("[ps3] DVD reads run in the background\n");
+			}
+		}
+		if (sIoState < 0) {
+			ps3Log("[ps3] FAILED to start the DVD read thread; reading directly\n");
+		}
+	}
+	return sIoState > 0;
+}
+
+static void queueIo(IoReq* r)
+{
+	sEntries[r->entry].busy++;
+	r->next = NULL;
+	ps3b_mutex_lock(sIoLock);
+	if (sIoTail) {
+		sIoTail->next = r;
+	} else {
+		sIoHead = r;
+	}
+	sIoTail = r;
+	ps3b_cond_signal(sIoCv);
+	ps3b_mutex_unlock(sIoLock);
+}
+
+// Checks a read and opens its file. Returns the file's fd, or -1.
+static int prepareRead(DVDFileInfo* info, s32 length, int* idxOut)
+{
+	int idx = (int)info->startAddr;
+	if (idx < 0 || idx >= sEntryCount || length < 0) {
+		return -1;
+	}
+	*idxOut = idx;
+	return entryFd(idx);
+}
+
+s32 DVDReadPrio(DVDFileInfo* info, void* addr, s32 length, s32 offset, s32 prio)
+{
+	(void)prio;
+	PS3_ACTIVITY("DVDReadPrio");
+	ps3DeliverInterrupts();
+	int idx = 0;
+	int fd  = prepareRead(info, length, &idx);
+	if (fd < 0) {
+		return DVD_RESULT_FATAL_ERROR;
+	}
+	if (!ps3CanBlock() || !ioAvailable()) {
+		return readNow(idx, fd, addr, (u32)length, (unsigned long long)offset);
+	}
+	IoReq r;
+	memset(&r, 0, sizeof(r));
+	r.entry  = idx;
+	r.fd     = fd;
+	r.addr   = addr;
+	r.length = (u32)length;
+	r.offset = (unsigned long long)offset;
+	queueIo(&r);
+	while (!r.done) {
+		ps3WaitOn(&r, "DVD read");
+	}
+	return r.result;
+}
+
 BOOL DVDReadAsyncPrio(DVDFileInfo* info, void* addr, s32 length, s32 offset, DVDCallback callback, s32 prio)
 {
 	(void)prio;
 	PS3_ACTIVITY("DVDReadAsyncPrio");
-	info->callback               = callback;
-	info->cBlock.state           = DVD_STATE_BUSY;
-	info->cBlock.transferredSize = (u32)doRead(info, addr, length, offset);
+	info->callback     = callback;
+	info->cBlock.state = DVD_STATE_BUSY;
+	int idx            = 0;
+	int fd             = prepareRead(info, length, &idx);
+	if (fd >= 0 && ioAvailable() && sIoFree) {
+		IoReq* r = sIoFree;
+		sIoFree  = r->next;
+		memset(r, 0, sizeof(*r));
+		r->entry     = idx;
+		r->fd        = fd;
+		r->addr      = addr;
+		r->length    = (u32)length;
+		r->offset    = (unsigned long long)offset;
+		r->asyncInfo = info;
+		queueIo(r);
+		return TRUE;
+	}
+	// No I/O thread or no free request: read now; the callback still runs as an interrupt.
+	info->cBlock.transferredSize = (u32)(fd < 0 ? DVD_RESULT_FATAL_ERROR : readNow(idx, fd, addr, (u32)length, (unsigned long long)offset));
 	ps3PostInterrupt(asyncDone, info);
 	return TRUE;
 }

@@ -24,6 +24,7 @@
 #include "Dolphin/os.h"
 #include "jaudio/syncstream.h"
 #include <stdio.h>
+#include <string.h>
 
 extern "C" void ps3RaiseInterrupt(int interrupt);
 extern "C" void ps3DspSetup(u32 voiceCount, u32 voices, u32 tables, u32 afcCoeffs, u32 reverb);
@@ -56,7 +57,7 @@ static void aiDmaInterrupt(void*)
 
 enum {
 	RING_FRAMES  = 16384, // about 340 ms
-	TARGET_QUEUE = 2400,  // frames kept queued while sound output runs (50 ms)
+	TARGET_QUEUE = 4800,  // frames kept queued while sound output runs (100 ms)
 };
 
 static float sRing[RING_FRAMES * 2];
@@ -122,6 +123,105 @@ static unsigned int pullOutput(float* dst, unsigned int frames)
 	return n;
 }
 
+// ---- diagnostics: blocks played twice because the game had no new one ready, stream stalls, and a
+// recording of the first minutes of sound (PIKMIN/sound_capture.wav) for checking it off the console.
+
+static volatile u32 sRepeats;
+static volatile u32 sStreamStalls;
+static u32 sLastBlockAddr;
+static u32 sLastStreamState = 4;
+
+enum { CAPTURE_SECONDS = 150, CAPTURE_RATE = 32028 };
+static u8* sCapture;               // WAV data: little-endian 16-bit, left then right
+static volatile u32 sCaptureFrames; // frames recorded (timer thread)
+static u32 sCaptureMax;
+
+static void captureBlock(const s16* src, u32 frames)
+{
+	if (!sCapture) {
+		return;
+	}
+	u32 n = sCaptureFrames;
+	for (u32 i = 0; i < frames && n < sCaptureMax; i++, n++) {
+		u16 l   = (u16)src[2 * i + 1];
+		u16 r   = (u16)src[2 * i];
+		u8* out = sCapture + n * 4;
+		out[0]  = (u8)l;
+		out[1]  = (u8)(l >> 8);
+		out[2]  = (u8)r;
+		out[3]  = (u8)(r >> 8);
+	}
+	__sync_synchronize();
+	sCaptureFrames = n;
+}
+
+static void put32le(u8* p, u32 v)
+{
+	p[0] = (u8)v;
+	p[1] = (u8)(v >> 8);
+	p[2] = (u8)(v >> 16);
+	p[3] = (u8)(v >> 24);
+}
+
+static void captureWriterThread(void*)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/sound_capture.wav", ps3b_data_root());
+	int fd = ps3b_file_open_rw(path, 1);
+	if (fd < 0) {
+		ps3Log("[ps3] sound capture: could not create %s\n", path);
+		return;
+	}
+	ps3Log("[ps3] sound capture: recording the first %d seconds to %s\n", CAPTURE_SECONDS, path);
+	u32 written = 0;
+	for (;;) {
+		ps3b_sleep_us(500 * 1000);
+		u32 frames = sCaptureFrames;
+		if (frames == written) {
+			continue;
+		}
+		ps3b_file_pwrite(fd, sCapture + written * 4, 44 + (unsigned long long)written * 4, (frames - written) * 4);
+		written = frames;
+		u8 h[44];
+		memcpy(h, "RIFF", 4);
+		put32le(h + 4, 36 + written * 4);
+		memcpy(h + 8, "WAVEfmt ", 8);
+		put32le(h + 16, 16);
+		h[20] = 1; // PCM
+		h[21] = 0;
+		h[22] = 2; // channels
+		h[23] = 0;
+		put32le(h + 24, CAPTURE_RATE);
+		put32le(h + 28, CAPTURE_RATE * 4);
+		h[32] = 4; // bytes per frame
+		h[33] = 0;
+		h[34] = 16; // bits
+		h[35] = 0;
+		memcpy(h + 36, "data", 4);
+		put32le(h + 40, written * 4);
+		ps3b_file_pwrite(fd, h, 0, 44);
+		if (written >= sCaptureMax) {
+			ps3b_file_close(fd);
+			ps3Log("[ps3] sound capture: done (%d seconds)\n", CAPTURE_SECONDS);
+			return;
+		}
+	}
+}
+
+static void startCapture()
+{
+	if (!ps3b_data_root()) {
+		return;
+	}
+	sCaptureMax = CAPTURE_SECONDS * CAPTURE_RATE;
+	sCapture    = (u8*)ps3b_memalign(32, sCaptureMax * 4);
+	if (!sCapture) {
+		ps3Log("[ps3] sound capture: not enough memory\n");
+		return;
+	}
+	ps3b_thread_create(captureWriterThread, NULL, 1400, 0x8000, "pikmin_capture");
+}
+
 static bool outputRunning(unsigned long long now, unsigned long long freq)
 {
 	unsigned long long last = sLastPullTb;
@@ -158,12 +258,25 @@ static void aiTimerThread(void*)
 			}
 		}
 
-		// The block that starts playing now is the one the game queued last.
+		// The block that starts playing now is the one the game queued last. (The same one again means
+		// the game's audio thread did not get to run in time.)
 		u32 addr = sDmaAddr;
 		u32 len  = sDmaLength;
-		if (output && addr && len >= 4) {
-			pushDacBlock((const s16*)(uptr)addr, len / 4, rate48 ? 48000.0 : 32028.5);
+		if (addr && len >= 4) {
+			if (addr == sLastBlockAddr && sAiBlocks > 100) {
+				sRepeats++;
+			}
+			sLastBlockAddr = addr;
+			if (output) {
+				pushDacBlock((const s16*)(uptr)addr, len / 4, rate48 ? 48000.0 : 32028.5);
+			}
+			captureBlock((const s16*)(uptr)addr, len / 4);
 		}
+		u32 streamState = ps3StreamControl->playbackState;
+		if (streamState == 5 && sLastStreamState != 5) {
+			sStreamStalls++; // the stream ran out of data and paused
+		}
+		sLastStreamState = streamState;
 
 		if (sAiPending < 2) {
 			__sync_fetch_and_add(&sAiPending, 1);
@@ -199,6 +312,7 @@ void AIStartDMA(void)
 	PS3_ACTIVITY("AIStartDMA");
 	if (!sAiThreadStarted) {
 		sAiThreadStarted = 1;
+		startCapture();
 		ps3b_audio_start(pullOutput);
 		ps3b_thread_create(aiTimerThread, NULL, 900, 0x8000, "pikmin_ai");
 		ps3Log("[ps3] audio: interface timer started\n");
@@ -362,18 +476,19 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 	u32 id                = sc->streamId;
 	u32 loaded            = sc->samplesLoaded;
 	u32 total             = sc->totalSamples;
-	char stream[64];
+	char stream[96];
 	if (state == 4) {
-		snprintf(stream, sizeof(stream), "stream idle");
+		snprintf(stream, sizeof(stream), "stream idle (%u stalls)", (unsigned)sStreamStalls);
 	} else {
-		snprintf(stream, sizeof(stream), "stream %d %s (%u of %u samples)", (int)id, state < 7 ? kStates[state] : "?",
-		         (unsigned)loaded, (unsigned)total);
+		snprintf(stream, sizeof(stream), "stream %d %s (%u of %u samples, %u stalls)", (int)id, state < 7 ? kStates[state] : "?",
+		         (unsigned)loaded, (unsigned)total, (unsigned)sStreamStalls);
 	}
-	char output[64];
+	char output[96];
 	if (outputRunning(ps3b_timebase(), ps3b_timebase_freq())) {
-		snprintf(output, sizeof(output), "sound out: %u queued, %u gaps", (unsigned)(sRingWrite - sRingRead), (unsigned)sUnderruns);
+		snprintf(output, sizeof(output), "sound out: %u queued, %u gaps, %u repeats", (unsigned)(sRingWrite - sRingRead),
+		         (unsigned)sUnderruns, (unsigned)sRepeats);
 	} else {
-		snprintf(output, sizeof(output), "sound out: off");
+		snprintf(output, sizeof(output), "sound out: off, %u repeats", (unsigned)sRepeats);
 	}
 	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s; %s; %s", (unsigned)sAiBlocks, (unsigned)sDspFrames,
 	         (unsigned)sDspSyncs, voices, stream, output);

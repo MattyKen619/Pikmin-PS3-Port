@@ -144,6 +144,7 @@ struct State {
 	u32 playing;   // voices processed in the last sub-frame
 	u32 finished;  // voices that reached "done"
 	u32 badVoices; // voices stopped because their data was out of range
+	u32 loggedStarts;
 };
 
 static State S;
@@ -616,6 +617,14 @@ static void renderVoice(DSPchannel_* block)
 	DSPchannel_ v;
 	memcpy(&v, block, sizeof(v));
 	S.playing++;
+	if (v.resetVpb && S.loggedStarts < 24) {
+		// The first sounds of a session: shows whether music and effects start, and with what data.
+		S.loggedStarts++;
+		ps3Log("[sound] voice %d starts: source %u at 0x%08x, length %u, loop %s at %u, pitch 0x%04x, volume %d/%d\n",
+		       (int)(block - S.voices), (unsigned)v.samplesSourceType, (unsigned)v.baseAddress, (unsigned)v.loopStartPosition,
+		       v.isLooping ? "on" : "off", (unsigned)v.loopAddress, (unsigned)v.resamplingRatio, (int)(s16)v.mixChannels[0].targetVolume,
+		       (int)(s16)v.mixChannels[1].targetVolume);
+	}
 
 	s16 in[SUBFRAME];
 	loadInput(&v, in);
@@ -674,7 +683,7 @@ static void renderVoice(DSPchannel_* block)
 	if (v.done) {
 		S.finished++;
 		if (S.finished == 1) {
-			ps3Log("[ps3] audio: DSP voice engine working (first sound finished; no sound output yet)\n");
+			ps3Log("[ps3] audio: DSP voice engine working (first sound finished)\n");
 		}
 	}
 	memcpy(block, &v, VOICE_RW);

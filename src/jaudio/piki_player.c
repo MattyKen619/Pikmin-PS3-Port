@@ -8,6 +8,9 @@
 #include "jaudio/random.h"
 #include "jaudio/verysimple.h"
 #include <stddef.h>
+#if defined(TARGET_PS3)
+#include "ps3/platform.h"
+#endif
 
 static u32 gaya_timer;
 
@@ -122,6 +125,9 @@ void Jac_PlayOrimaSe(u32 id)
 	if (orima_seqp == NULL) {
 		orima_seqp = Jam_GetTrackHandle(0x1000a);
 		if (orima_seqp == NULL) {
+#if defined(TARGET_PS3)
+			ps3Report("[sound] Olimar sound 0x%x not played: its sequence track is not there yet\n", (unsigned)id);
+#endif
 			return;
 		}
 	}

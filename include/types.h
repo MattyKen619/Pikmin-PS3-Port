@@ -395,10 +395,20 @@ inline void padStack(void)
 #if defined(TARGET_PS3)
 BEGIN_SCOPE_EXTERN_C
 void ps3SpinWait(void);
+void ps3PreemptPoint(void);
 END_SCOPE_EXTERN_C
 #define PS3_SPIN_WAIT() ps3SpinWait()
 #else
 #define PS3_SPIN_WAIT()
+#endif
+
+// A place in long-running code that is not compiled with the port's switch points (the C libraries,
+// such as the movie decoder) where a pending interrupt may run and switch threads, as one could at any
+// instruction on the GameCube. Cheap when nothing is pending.
+#if defined(TARGET_PS3)
+#define PS3_PREEMPT_POINT() ps3PreemptPoint()
+#else
+#define PS3_PREEMPT_POINT()
 #endif
 
 // Size of a fixed-size sub-heap (AyuHeap) that holds game objects. With 64-bit pointers those objects

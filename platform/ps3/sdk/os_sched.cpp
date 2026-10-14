@@ -303,6 +303,7 @@ extern "C" void ps3DeliverInterrupts(void)
 }
 
 extern "C" int ps3InInterrupt(void) { return sInInterrupt; }
+extern "C" int ps3CanBlock(void) { return sRunning != NULL && !sInInterrupt; }
 
 // ------------------------------------------------------------------ preemption points
 //
@@ -446,6 +447,13 @@ extern "C" void ps3SpinWait(void)
 		ps3DeliverInterrupts();
 	} else {
 		ps3b_sleep_us(20);
+	}
+}
+
+extern "C" void ps3PreemptPoint(void)
+{
+	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
+		ps3DeliverInterrupts();
 	}
 }
 

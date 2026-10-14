@@ -1198,6 +1198,7 @@ static void IpicPlaneDec(VideoState* ws, int p, u8* outbuf)
 	for (j = ws->pln[p].nblocks_v - 2; j > 0; j--) {
 		IpicLineDec(ws, outbuf, imgWidth, &inter, h_block);
 		outbuf += downblock;
+		PS3_PREEMPT_POINT(); // a frame takes long enough on the PS3 to starve the audio thread
 	}
 	// last line
 	inter.low = inter.mid;
@@ -2014,6 +2015,7 @@ static void spread_PB_descMap(SeqObj* obj, MCHandler* mch)
 			setMCNextBlk(mch);
 		}
 		setMCDownBlk(mch);
+		PS3_PREEMPT_POINT();
 	}
 }
 
@@ -2070,6 +2072,7 @@ static void BpicPlaneDec(SeqObj* seqObj, u8* lin_top, u8* forw, u8* back)
 			setMCNextBlk(&mch);
 		}
 		setMCDownBlk(&mch);
+		PS3_PREEMPT_POINT();
 	}
 }
 
