@@ -62,6 +62,15 @@ void ps3b_log_memory(const char* when);   // logs lv2's user-memory totals
 void ps3b_console_init(void);
 void ps3b_console_shutdown(void);         // finish pending RSX work before the process exits
 
+// ---- system modules
+void ps3b_log_modules(void); // logs the names of the PRX modules loaded in this process (sound thread)
+
+// ---- sound output (ps3_audio.cpp): 48 kHz stereo, 32-bit float frames, interleaved left/right.
+// The pull function runs on the sound thread; it fills `frames` frames and returns how many it had.
+typedef unsigned int (*ps3b_audio_pull_fn)(float* dst, unsigned int frames);
+void ps3b_audio_start(ps3b_audio_pull_fn pull); // loads the audio module and starts playing (once)
+void ps3b_audio_shutdown(void);                 // stops the port before the process exits
+
 // ---- controllers
 enum {
 	PS3B_BTN_LEFT = 1 << 0,

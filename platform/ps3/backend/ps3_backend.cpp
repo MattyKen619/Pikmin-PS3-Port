@@ -53,6 +53,7 @@ extern "C" int ps3b_exit_requested(void)
 extern "C" void ps3b_exit(int code)
 {
 	ps3b_log_write("[ps3] exiting to XMB\n");
+	ps3b_audio_shutdown();
 	ps3b_console_shutdown();
 	sysProcessExit(code);
 	for (;;) { }

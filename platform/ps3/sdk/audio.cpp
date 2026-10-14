@@ -1,18 +1,20 @@
-// PS3 port: audio interface (AI) and audio DSP, without sound output yet.
+// PS3 port: audio interface (AI), audio DSP mailbox, and sound output.
 //
-// JAudio's audio thread must run even before there is sound: it creates the sequence tracks the rest
-// of the game waits for (System::Initialise spins until track 0x20000 exists), and it drives music and
-// cutscene timing. The audio thread is paced by two GameCube interrupts:
+// JAudio's audio thread is paced by two GameCube interrupts:
 //
-//   AI DMA  - the audio interface finished a block of samples (560 stereo frames at 32028.5 Hz,
+//   AI DMA  - the audio interface started playing a block of samples (560 stereo frames at 32028.5 Hz,
 //             17.5 ms): AudioSync() asks the thread to mix the next block.
 //   DSP     - the DSP finished one of the 7 sub-frames of a mixing frame: DspSync() lets the thread
 //             update voices for the next one.
 //
-// Here a timer thread raises the AI interrupt at the real rate. The DSP side answers the microcode's
-// mailbox protocol (boot handshake, command acknowledgements, one sync interrupt per released
-// sub-frame) and mixes each sub-frame with dsp_hle.cpp, which also keeps JAudio's voices advancing and
-// finishing. The mixed audio is not sent to the PS3's output yet (Phase 5).
+// A timer thread raises the AI interrupt. At each block it also takes the block the game has queued
+// with AIInitDMA (16-bit stereo, right channel first, as the GameCube's audio interface plays it),
+// resamples it to 48 kHz and puts it in a ring that the PS3 sound thread (backend/ps3_audio.cpp) plays.
+// While sound output runs, the ring's fill level paces the timer, so the game produces audio exactly as
+// fast as the PS3 plays it. Without sound output, the PS3 clock paces it.
+//
+// The DSP side answers the microcode's mailbox protocol (boot handshake, command acknowledgements, one
+// sync interrupt per released sub-frame) and mixes each sub-frame with dsp_hle.cpp.
 
 #include "sdk_internal.h"
 
@@ -50,6 +52,82 @@ static void aiDmaInterrupt(void*)
 	}
 }
 
+// ---- sound output ring: 48 kHz stereo floats, written by the timer thread, read by the sound thread
+
+enum {
+	RING_FRAMES  = 16384, // about 340 ms
+	TARGET_QUEUE = 2400,  // frames kept queued while sound output runs (50 ms)
+};
+
+static float sRing[RING_FRAMES * 2];
+static volatile u32 sRingWrite; // frames written (wraps)
+static volatile u32 sRingRead;  // frames read
+static volatile unsigned long long sLastPullTb;
+static volatile u32 sUnderruns, sOverruns;
+
+// Resampler state: position in source frames relative to the current block (-1 <= pos < 0 between
+// blocks: interpolate from the previous block's last frame).
+static double sSrcPos = -1.0;
+static float sPrevL, sPrevR;
+
+static void pushDacBlock(const s16* src, u32 frames, double srcRate)
+{
+	const double step = srcRate / 48000.0;
+	double pos        = sSrcPos;
+	u32 w             = sRingWrite;
+	u32 room          = RING_FRAMES - (w - sRingRead);
+	while (pos < (double)(frames - 1)) {
+		int i       = (int)(pos + 1.0) - 1; // floor, pos >= -1
+		float frac  = (float)(pos - i);
+		float aL    = i < 0 ? sPrevL : src[2 * i + 1];
+		float aR    = i < 0 ? sPrevR : src[2 * i];
+		float bL    = src[2 * (i + 1) + 1];
+		float bR    = src[2 * (i + 1)];
+		if (room) {
+			float* out = &sRing[(w % RING_FRAMES) * 2];
+			out[0]     = (aL + (bL - aL) * frac) * (1.0f / 32768.0f);
+			out[1]     = (aR + (bR - aR) * frac) * (1.0f / 32768.0f);
+			w++;
+			room--;
+		} else {
+			sOverruns++;
+		}
+		pos += step;
+	}
+	sSrcPos = pos - frames;
+	sPrevL  = src[2 * (frames - 1) + 1];
+	sPrevR  = src[2 * (frames - 1)];
+	__sync_synchronize(); // samples before the index
+	sRingWrite = w;
+}
+
+// Runs on the sound thread.
+static unsigned int pullOutput(float* dst, unsigned int frames)
+{
+	sLastPullTb = ps3b_timebase();
+	u32 r       = sRingRead;
+	u32 avail   = sRingWrite - r;
+	__sync_synchronize(); // index before the samples
+	u32 n = avail < frames ? avail : frames;
+	for (u32 i = 0; i < n; i++) {
+		const float* in = &sRing[((r + i) % RING_FRAMES) * 2];
+		dst[2 * i]      = in[0];
+		dst[2 * i + 1]  = in[1];
+	}
+	__sync_synchronize();
+	sRingRead = r + n;
+	if (n < frames && sAiBlocks > 100) {
+		sUnderruns++;
+	}
+	return n;
+}
+
+static bool outputRunning(unsigned long long now, unsigned long long freq)
+{
+	unsigned long long last = sLastPullTb;
+	return last != 0 && now - last < freq / 5; // the sound thread pulled within the last 200 ms
+}
+
 static void aiTimerThread(void*)
 {
 	const unsigned long long freq = ps3b_timebase_freq();
@@ -61,15 +139,32 @@ static void aiTimerThread(void*)
 		if (frames == 0) {
 			frames = 560;
 		}
-		unsigned long long period = (sDspSampleRate == AI_SAMPLERATE_48KHZ) ? freq * frames / 48000ULL
-		                                                                      : freq * frames * 2ULL / 64057ULL;
-		next += period;
-		unsigned long long now = ps3b_timebase();
-		if (now < next) {
-			ps3b_sleep_us((unsigned int)((next - now) * 1000000ULL / freq) + 1);
-		} else if (now > next + period * 8) {
-			next = now; // fell far behind: don't try to catch up
+		const bool rate48 = sDspSampleRate == AI_SAMPLERATE_48KHZ;
+		unsigned long long period = rate48 ? freq * frames / 48000ULL : freq * frames * 2ULL / 64057ULL;
+		unsigned long long now    = ps3b_timebase();
+		const bool output         = outputRunning(now, freq);
+		if (output) {
+			// The PS3's audio clock sets the pace: wait until the queue runs low.
+			while (sRingWrite - sRingRead > TARGET_QUEUE && outputRunning(ps3b_timebase(), freq)) {
+				ps3b_sleep_us(1000);
+			}
+			next = ps3b_timebase();
+		} else {
+			next += period;
+			if (now < next) {
+				ps3b_sleep_us((unsigned int)((next - now) * 1000000ULL / freq) + 1);
+			} else if (now > next + period * 8) {
+				next = now; // fell far behind: don't try to catch up
+			}
 		}
+
+		// The block that starts playing now is the one the game queued last.
+		u32 addr = sDmaAddr;
+		u32 len  = sDmaLength;
+		if (output && addr && len >= 4) {
+			pushDacBlock((const s16*)(uptr)addr, len / 4, rate48 ? 48000.0 : 32028.5);
+		}
+
 		if (sAiPending < 2) {
 			__sync_fetch_and_add(&sAiPending, 1);
 			ps3PostInterrupt(aiDmaInterrupt, NULL);
@@ -92,7 +187,7 @@ AIDCallback AIRegisterDMACallback(AIDCallback callback)
 	return old;
 }
 
-// The next block to play. (Phase 5: this is the audio to send to the PS3's output.)
+// The next block to play.
 void AIInitDMA(u32 address, u32 length)
 {
 	sDmaAddr   = address;
@@ -104,8 +199,9 @@ void AIStartDMA(void)
 	PS3_ACTIVITY("AIStartDMA");
 	if (!sAiThreadStarted) {
 		sAiThreadStarted = 1;
+		ps3b_audio_start(pullOutput);
 		ps3b_thread_create(aiTimerThread, NULL, 900, 0x8000, "pikmin_ai");
-		ps3Log("[ps3] audio: interface timer started (no sound output yet)\n");
+		ps3Log("[ps3] audio: interface timer started\n");
 	}
 }
 
@@ -273,6 +369,12 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 		snprintf(stream, sizeof(stream), "stream %d %s (%u of %u samples)", (int)id, state < 7 ? kStates[state] : "?",
 		         (unsigned)loaded, (unsigned)total);
 	}
-	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s; %s", (unsigned)sAiBlocks, (unsigned)sDspFrames,
-	         (unsigned)sDspSyncs, voices, stream);
+	char output[64];
+	if (outputRunning(ps3b_timebase(), ps3b_timebase_freq())) {
+		snprintf(output, sizeof(output), "sound out: %u queued, %u gaps", (unsigned)(sRingWrite - sRingRead), (unsigned)sUnderruns);
+	} else {
+		snprintf(output, sizeof(output), "sound out: off");
+	}
+	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s; %s; %s", (unsigned)sAiBlocks, (unsigned)sDspFrames,
+	         (unsigned)sDspSyncs, voices, stream, output);
 }

@@ -43,7 +43,7 @@ OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(LIBS_C) $(PLATFORM_CPP) $(BA
 OPT       := -O2 -fno-strict-aliasing
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 12
+TEST_BUILD := 13
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -57,7 +57,7 @@ GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
 BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUILD) $(LIBPSL1GHT_INC)
 
-LIBS    := -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
+LIBS    := -laudio -lsysmodule -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
 LDFLAGS := $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map
 
 #---------------------------------------------------------------------------------
@@ -69,7 +69,7 @@ pkg: $(BUILD)/$(TARGET).pkg
 $(BUILD)/$(TARGET).elf: $(OBJECTS)
 	@echo linking ... $(notdir $@)
 	@$(CXX) $(LDFLAGS) $(OBJECTS) $(LIBPSL1GHT_LIB) $(LIBS) -o $@
-	@python3 tools/ps3/check_imports.py $@ || (rm -f $@; false)
+	@python3 tools/ps3/check_imports.py $@ --allow cellSysmodule --allow cellAudio || (rm -f $@; false)
 	@mkdir -p $(BUILD)/archive/test$(TEST_BUILD) && cp $@ $(BUILD)/$(TARGET).map $(BUILD)/archive/test$(TEST_BUILD)/
 
 # game C++

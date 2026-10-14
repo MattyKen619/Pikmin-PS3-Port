@@ -899,7 +899,7 @@ extern "C" void ps3ReportStack(const char* what)
 
 static void reportThreads(const char* title)
 {
-	char audio[256];
+	char audio[384];
 	ps3AudioStatus(audio, sizeof(audio));
 	char nans[40] = "";
 	if (PS3_TRACE_NAN) {
