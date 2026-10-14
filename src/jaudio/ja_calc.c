@@ -54,5 +54,13 @@ void Jac_InitSinTable()
  */
 f32 sinf3(f32 x)
 {
+#if defined(TARGET_PS3)
+	// A NaN argument converts to the index 0x80000000. On the GameCube the 32-bit address arithmetic wraps
+	// SINTABLE[0x80000000] back to SINTABLE[0]; on the PS3 the same index points far outside the table and
+	// crashes (test 10). Compute the address the GameCube way.
+	int index = (int)(256.0f * x);
+	return *(f32*)(uptr)((u32)(uptr)SINTABLE + (u32)index * 4u);
+#else
 	return SINTABLE[(int)(256.0f * x)];
+#endif
 }

@@ -317,12 +317,71 @@ extern "C" int ps3InInterrupt(void) { return sInInterrupt; }
 extern "C" void __cyg_profile_func_enter(void* fn, void* site) __attribute__((no_instrument_function));
 extern "C" void __cyg_profile_func_exit(void* fn, void* site) __attribute__((no_instrument_function));
 
+// ---- Where NaNs come from
+// The PPU's FPSCR has sticky bits for the invalid operations that create a NaN: 0/0, inf-inf, inf*0,
+// inf/inf, square root of a negative number, and use of a signalling NaN. Arithmetic on an existing NaN
+// does not set them, so they mark the origin. The hooks check them at every game function entry and
+// exit; the first time a code location creates a NaN, it is logged with the thread's call stack
+// ("last code run" is the basic block that did it, or one shortly after it).
+// (FPSCR_VX* bit masks: Dolphin/PPCArch.h)
+#define FPSCR_NAN_CREATED (FPSCR_VXSNAN | FPSCR_VXISI | FPSCR_VXIDI | FPSCR_VXZDZ | FPSCR_VXIMZ | FPSCR_VXSQRT)
+enum { MAX_NAN_SITES = 24 };
+
+static volatile u32 sNanCount;
+static void* sNanSites[MAX_NAN_SITES];
+static int sNanSiteCount;
+
+static inline u32 readFpscr(void) __attribute__((always_inline, no_instrument_function));
+static inline u32 readFpscr(void)
+{
+	union {
+		double d;
+		unsigned long long u;
+	} v;
+	__asm__ volatile("mffs %0" : "=f"(v.d));
+	return (u32)v.u;
+}
+
+static void logStack(int index, ThreadImpl* t);
+static void noteNanOrigin(ThreadImpl* t, u32 fpscr) __attribute__((noinline, no_instrument_function));
+static void noteNanOrigin(ThreadImpl* t, u32 fpscr)
+{
+	// Clear the sticky bits (FX, the invalid-operation bits) so the next origin is seen too.
+	__asm__ volatile("mtfsb0 0\n\tmtfsb0 7\n\tmtfsb0 8\n\tmtfsb0 9\n\tmtfsb0 10\n\tmtfsb0 11\n\tmtfsb0 22");
+	sNanCount++;
+	void* pc = t->lastPc;
+	for (int i = 0; i < sNanSiteCount; i++) {
+		if (sNanSites[i] == pc) {
+			return;
+		}
+	}
+	if (sNanSiteCount >= MAX_NAN_SITES) {
+		return;
+	}
+	sNanSites[sNanSiteCount++] = pc;
+	ps3Log("[ps3] NaN created (%s%s%s%s%s%s) in thread %d:\n", (fpscr & FPSCR_VXZDZ) ? " 0/0" : "",
+	       (fpscr & FPSCR_VXISI) ? " inf-inf" : "", (fpscr & FPSCR_VXIMZ) ? " inf*0" : "", (fpscr & FPSCR_VXIDI) ? " inf/inf" : "",
+	       (fpscr & FPSCR_VXSQRT) ? " sqrt(negative)" : "", (fpscr & FPSCR_VXSNAN) ? " signalling NaN" : "", (int)(t - sImpls));
+	logStack((int)(t - sImpls), t);
+}
+
+#define CHECK_NAN_ORIGIN(t)                         \
+	do {                                            \
+		u32 fpscr_ = readFpscr();                   \
+		if (__builtin_expect(fpscr_ & FPSCR_NAN_CREATED, 0)) { \
+			noteNanOrigin((t), fpscr_);             \
+		}                                           \
+	} while (0)
+
+extern "C" unsigned int ps3NanCount(void) { return sNanCount; }
+
 extern "C" void __cyg_profile_func_enter(void* fn, void* site)
 {
 	ThreadImpl* t = sRunning;
 	if (!t) {
 		return; // static constructors, before the scheduler starts
 	}
+	CHECK_NAN_ORIGIN(t); // before pushing: the caller is the function that ran last
 	int d = t->depth;
 	if (d < SHADOW_DEPTH) {
 		t->stackFn[d]   = fn;
@@ -342,8 +401,11 @@ extern "C" void __cyg_profile_func_exit(void* fn, void* site)
 	(void)fn;
 	(void)site;
 	ThreadImpl* t = sRunning;
-	if (t && t->depth > 0) {
-		t->depth--;
+	if (t) {
+		CHECK_NAN_ORIGIN(t); // before popping: the returning function is still on top
+		if (t->depth > 0) {
+			t->depth--;
+		}
 	}
 }
 
@@ -827,9 +889,11 @@ static void reportThreads(const char* title)
 {
 	char audio[256];
 	ps3AudioStatus(audio, sizeof(audio));
-	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s\n",
+	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s; "
+	       "NaNs created: %u\n",
 	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",
-	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, audio);
+	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, audio,
+	       (unsigned)sNanCount);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];
 		if (!t->os) {
