@@ -22,7 +22,8 @@ struct DvdEntry {
 	int fd;
 	long long size;
 	u32 lastUse;
-	int busy; // reads queued on the I/O thread: the file must stay open
+	int busy;   // reads queued on the I/O thread: the file must stay open
+	int logged; // its first open is in the log (the movie player opens its file once a second)
 };
 
 static DvdEntry* sEntries;
@@ -285,7 +286,10 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* info)
 		ps3Log("[ps3] DVDFastOpen: bad entry %d\n", (int)entrynum);
 		return FALSE;
 	}
-	ps3Log("[dvd] open #%d %s (%u bytes)\n", (int)entrynum, sEntries[entrynum].path, (unsigned)info->length);
+	if (!sEntries[entrynum].logged) {
+		sEntries[entrynum].logged = 1;
+		ps3Log("[dvd] open #%d %s (%u bytes)\n", (int)entrynum, sEntries[entrynum].path, (unsigned)info->length);
+	}
 	return TRUE;
 }
 

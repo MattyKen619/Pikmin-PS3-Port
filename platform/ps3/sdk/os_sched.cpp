@@ -72,6 +72,16 @@ static volatile u32 sIntrDropped;
 static volatile u32 sActivity;
 static const char* volatile sLastActivity = "boot";
 
+// Interrupt latency (diagnostics): how long queued interrupts wait for the baton holder to run them.
+// The audio thread must run every 17.5 ms; a longer wait plays a block of sound twice. The heartbeat
+// shows the longest wait since the last report and what the game was doing at the time.
+static unsigned long long sIntrQueuedTb;    // when the queue last went from empty to non-empty
+static unsigned long long sWorstWaitTb;     // longest wait since the last report
+static const char* volatile sWorstWaitWhat; // last SDK call or wait reason when it ended
+static int sWorstWaitThread = -1;
+static volatile u32 sLongWaits;             // waits over 10 ms since the last report
+static unsigned long long sTbPer10ms;       // timebase ticks in 10 ms
+
 static void lockS() { ps3b_mutex_lock(sLock); }
 static void unlockS() { ps3b_mutex_unlock(sLock); }
 
@@ -188,6 +198,20 @@ static int deliverLocked(ThreadImpl* self, int force)
 	if (sInInterrupt || (!force && !sIntrEnabled)) {
 		return 0;
 	}
+	if (sIntrHead != sIntrTail) {
+		unsigned long long wait = ps3b_timebase() - sIntrQueuedTb;
+		if (!sTbPer10ms) {
+			sTbPer10ms = ps3b_timebase_freq() / 100;
+		}
+		if (wait > sTbPer10ms) {
+			sLongWaits++;
+		}
+		if (wait > sWorstWaitTb) {
+			sWorstWaitTb     = wait;
+			sWorstWaitWhat   = sLastActivity;
+			sWorstWaitThread = sRunning ? sRunning->index : -1;
+		}
+	}
 	int ran = 0;
 	while (sIntrHead != sIntrTail) {
 		Interrupt in = sIntr[sIntrHead % MAX_INTERRUPTS];
@@ -281,6 +305,9 @@ extern "C" void ps3PostInterrupt(Ps3InterruptFn fn, void* arg)
 	if (sIntrTail - sIntrHead >= MAX_INTERRUPTS) {
 		sIntrDropped++;
 	} else {
+		if (sIntrTail == sIntrHead) {
+			sIntrQueuedTb = ps3b_timebase();
+		}
 		sIntr[sIntrTail % MAX_INTERRUPTS].fn  = fn;
 		sIntr[sIntrTail % MAX_INTERRUPTS].arg = arg;
 		sIntrTail++;
@@ -907,15 +934,23 @@ extern "C" void ps3ReportStack(const char* what)
 
 static void reportThreads(const char* title)
 {
-	char audio[384];
+	char audio[512];
 	ps3AudioStatus(audio, sizeof(audio));
 	char nans[40] = "";
 	if (PS3_TRACE_NAN) {
 		snprintf(nans, sizeof(nans), "; NaNs created: %u", (unsigned)sNanCount);
 	}
-	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s%s\n",
+	char waits[160];
+	const char* what = sWorstWaitWhat;
+	snprintf(waits, sizeof(waits), "longest interrupt wait %u ms (thread %d, after \"%s\"), %u over 10 ms",
+	         (unsigned)(sWorstWaitTb * 1000 / ps3b_timebase_freq()), sWorstWaitThread, what ? what : "-", (unsigned)sLongWaits);
+	sWorstWaitTb     = 0;
+	sWorstWaitWhat   = NULL;
+	sWorstWaitThread = -1;
+	sLongWaits       = 0;
+	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped, %s; %s%s\n",
 	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",
-	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, audio, nans);
+	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, waits, audio, nans);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];
 		if (!t->os) {

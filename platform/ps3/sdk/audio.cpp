@@ -11,7 +11,8 @@
 // with AIInitDMA (16-bit stereo, right channel first, as the GameCube's audio interface plays it),
 // resamples it to 48 kHz and puts it in a ring that the PS3 sound thread (backend/ps3_audio.cpp) plays.
 // While sound output runs, the ring's fill level paces the timer, so the game produces audio exactly as
-// fast as the PS3 plays it. Without sound output, the PS3 clock paces it.
+// fast as the PS3 plays it, and the ring's 100 ms let the timer wait for a late block instead of playing
+// the previous one again. Without sound output, the PS3 clock paces it.
 //
 // The DSP side answers the microcode's mailbox protocol (boot handshake, command acknowledgements, one
 // sync interrupt per released sub-frame) and mixes each sub-frame with dsp_hle.cpp.
@@ -38,6 +39,7 @@ extern "C" StreamCtrl_* const ps3StreamControl; // syncstream.c
 static volatile AIDCallback sAIDCallback;
 static volatile u32 sDmaAddr;
 static volatile u32 sDmaLength = 2240; // bytes; JAudio uses 560 stereo 16-bit frames
+static volatile u32 sDmaSeq;           // AIInitDMA calls: tells the timer the game has queued a new block
 static volatile u32 sDspSampleRate = AI_SAMPLERATE_32KHZ;
 static volatile u32 sAiPending;
 static volatile u32 sAiBlocks;
@@ -58,6 +60,7 @@ static void aiDmaInterrupt(void*)
 enum {
 	RING_FRAMES  = 16384, // about 340 ms
 	TARGET_QUEUE = 4800,  // frames kept queued while sound output runs (100 ms)
+	LOW_QUEUE    = 1200,  // waiting for a late block stops here (25 ms left), and the old block plays again
 };
 
 static float sRing[RING_FRAMES * 2];
@@ -123,11 +126,29 @@ static unsigned int pullOutput(float* dst, unsigned int frames)
 	return n;
 }
 
-// ---- diagnostics: blocks played twice because the game had no new one ready, stream stalls, and a
-// recording of the first minutes of sound (PIKMIN/sound_capture.wav) for checking it off the console.
+// ---- diagnostics: blocks played twice because the game had no new one ready, stream stalls, JAudio's
+// DSP overload check, and a recording of the first minutes of sound (PIKMIN/sound_capture.wav) for
+// checking it off the console.
 
 static volatile u32 sRepeats;
 static volatile u32 sStreamStalls;
+static volatile u32 sDspOverloads;
+static volatile u32 sLateBlocks;  // blocks the timer waited for (the game's audio thread was late)
+static volatile u32 sLateMaxUs;   // longest such wait since the last heartbeat
+
+// jaudio/dspdriver.c: a sub-frame came about as long after the previous one as the gap between frames.
+// On the GameCube that means the DSP has too much to do, and JAudio stops a voice. Here it means the
+// audio thread was held up; only counted (and the first few logged). Times are in OSGetTick units
+// (40.5 MHz).
+extern "C" void ps3NoteDspOverload(unsigned int frameGap, unsigned int subframeTime)
+{
+	u32 n = ++sDspOverloads;
+	if (n <= 5) {
+		ps3Log("[sound] JAudio's DSP overload check fired (sub-frame %u us after the one before, frame gap %u us): "
+		       "on the GameCube it would stop a voice; not on the PS3\n",
+		       (unsigned)(subframeTime / 40.5), (unsigned)(frameGap / 40.5));
+	}
+}
 static u32 sLastBlockAddr;
 static u32 sLastStreamState = 4;
 
@@ -232,6 +253,8 @@ static void aiTimerThread(void*)
 {
 	const unsigned long long freq = ps3b_timebase_freq();
 	unsigned long long next       = ps3b_timebase();
+	unsigned long long lastTick   = 0;
+	u32 seqTaken                  = 0; // sDmaSeq when the last block was taken
 	for (;;) {
 		// One DMA block lasts length/4 stereo frames at the DSP sample rate (the GameCube's "32 kHz"
 		// is really 32028.5 Hz).
@@ -248,6 +271,30 @@ static void aiTimerThread(void*)
 			while (sRingWrite - sRingRead > TARGET_QUEUE && outputRunning(ps3b_timebase(), freq)) {
 				ps3b_sleep_us(1000);
 			}
+			// The game answers each AI interrupt by queuing its next block (AIInitDMA). If its audio thread
+			// was held up and has not answered yet, wait while the sound already queued for the PS3 lasts,
+			// instead of playing the previous block a second time (a stutter, and up to test build 14 the
+			// cause of JAudio stopping voices). The game then catches up: the queue is below its target, so
+			// blocks are taken as fast as the game makes them, but at least 6 ms apart, so that JAudio's
+			// mixer finishes each frame before the next is due (it has only one frame in reserve).
+			const unsigned long long waitStart = ps3b_timebase();
+			bool waited                        = false;
+			while (sDmaSeq == seqTaken && sRingWrite - sRingRead > LOW_QUEUE && outputRunning(ps3b_timebase(), freq)) {
+				ps3b_sleep_us(500);
+				waited = true;
+			}
+			if (waited) {
+				sLateBlocks++;
+				u32 us = (u32)((ps3b_timebase() - waitStart) * 1000000ULL / freq);
+				if (us > sLateMaxUs) {
+					sLateMaxUs = us;
+				}
+			}
+			const unsigned long long minGap = freq * 6 / 1000;
+			unsigned long long t            = ps3b_timebase();
+			if (lastTick && t - lastTick < minGap) {
+				ps3b_sleep_us((unsigned int)((minGap - (t - lastTick)) * 1000000ULL / freq) + 1);
+			}
 			next = ps3b_timebase();
 		} else {
 			next += period;
@@ -260,6 +307,9 @@ static void aiTimerThread(void*)
 
 		// The block that starts playing now is the one the game queued last. (The same one again means
 		// the game's audio thread did not get to run in time.)
+		seqTaken = sDmaSeq;
+		__sync_synchronize(); // the sequence number before the block it announces
+		lastTick = ps3b_timebase();
 		u32 addr = sDmaAddr;
 		u32 len  = sDmaLength;
 		if (addr && len >= 4) {
@@ -305,6 +355,8 @@ void AIInitDMA(u32 address, u32 length)
 {
 	sDmaAddr   = address;
 	sDmaLength = length;
+	__sync_synchronize(); // the block before its sequence number
+	sDmaSeq++;
 }
 
 void AIStartDMA(void)
@@ -483,13 +535,15 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 		snprintf(stream, sizeof(stream), "stream %d %s (%u of %u samples, %u stalls)", (int)id, state < 7 ? kStates[state] : "?",
 		         (unsigned)loaded, (unsigned)total, (unsigned)sStreamStalls);
 	}
-	char output[96];
+	char output[160];
 	if (outputRunning(ps3b_timebase(), ps3b_timebase_freq())) {
-		snprintf(output, sizeof(output), "sound out: %u queued, %u gaps, %u repeats", (unsigned)(sRingWrite - sRingRead),
-		         (unsigned)sUnderruns, (unsigned)sRepeats);
+		snprintf(output, sizeof(output), "sound out: %u queued, %u gaps, %u repeats, %u late blocks (longest wait %u ms)",
+		         (unsigned)(sRingWrite - sRingRead), (unsigned)sUnderruns, (unsigned)sRepeats, (unsigned)sLateBlocks,
+		         (unsigned)(sLateMaxUs / 1000));
+		sLateMaxUs = 0;
 	} else {
 		snprintf(output, sizeof(output), "sound out: off, %u repeats", (unsigned)sRepeats);
 	}
-	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s; %s; %s", (unsigned)sAiBlocks, (unsigned)sDspFrames,
-	         (unsigned)sDspSyncs, voices, stream, output);
+	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s, %u overload checks; %s; %s", (unsigned)sAiBlocks,
+	         (unsigned)sDspFrames, (unsigned)sDspSyncs, voices, (unsigned)sDspOverloads, stream, output);
 }

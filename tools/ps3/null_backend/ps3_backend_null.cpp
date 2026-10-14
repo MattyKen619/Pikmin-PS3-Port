@@ -28,6 +28,7 @@ void ps3b_file_close(int fd) { (void)fd; }
 int ps3b_file_read_all(const char* path, char** data, unsigned int* size) { (void)path; (void)data; (void)size; return 0; }
 const char* ps3b_data_root(void) { return 0; }
 void ps3b_log_write(const char* text) { (void)text; }
+void ps3b_log_flush(void) { }
 void ps3b_free(void* p) { (void)p; }
 int ps3b_file_open_rw(const char* path, int create) { (void)path; (void)create; return -1; }
 int ps3b_file_pwrite(int fd, const void* buf, unsigned long long offset, unsigned int len) { (void)fd; (void)buf; (void)offset; (void)len; return -1; }

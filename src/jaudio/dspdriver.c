@@ -8,6 +8,10 @@
 
 #include <stddef.h>
 
+#if defined(TARGET_PS3)
+#include "ps3/platform.h"
+#endif
+
 #define DSPCH_LENGTH (64)
 static dspch_ DSPCH[DSPCH_LENGTH] ATTRIBUTE_ALIGN(32);
 
@@ -311,7 +315,16 @@ void UpdateDSPchannelAll()
 
 	// Break lower priority DSP channels if timing variance is within tolerance
 	if (subframeIdx != 0 && (f32)history[0] / (f32)old < 1.1f) {
+#if defined(TARGET_PS3)
+		// A sub-frame that takes about as long as the gap between frames means the DSP is overloaded, and
+		// JAudio stops the lowest-priority voice to lighten its load. On the PS3 the DSP's work is done by
+		// the audio thread itself in a fraction of a millisecond: a slow sub-frame means the thread was
+		// held up, and stopping a voice does not help. (Test 14: most likely what cut off the boot "Pikmin!"
+		// voice right after it started.) Only counted.
+		ps3NoteDspOverload(history[0], old);
+#else
 		BreakLowerActiveDSPchannel(DSPCHAN_MAX_PRIO - 1);
+#endif
 	}
 
 	// Update all DSP channels

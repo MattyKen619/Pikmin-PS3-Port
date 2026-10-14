@@ -51,10 +51,12 @@ int ps3b_file_pwrite(int fd, const void* buf, unsigned long long offset, unsigne
 const char* ps3b_data_root(void); // NULL if not found
 
 // ---- logging: TTY, log file next to the game data, and the on-screen console.
-// Every line is written to the file and the file is closed again at once, so the log survives a crash
-// or a forced power-off. The file is pikmin_log.txt in the data folder, or at the top of the first USB
-// drive if the data folder is missing.
-void ps3b_log_write(const char* text);
+// Lines are queued in memory and written out by a background thread about ten times a second, each
+// batch with the file closed again at once, so the log survives a crash or a forced power-off (minus
+// the last fraction of a second). The file is pikmin_log.txt in the data folder, or at the top of the
+// first USB drive if the data folder is missing.
+void ps3b_log_write(const char* text);   // queued; a background thread writes it out
+void ps3b_log_flush(void);                // writes out everything queued, now
 const char* ps3b_log_path(void);          // NULL if no writable location was found
 void ps3b_log_memory(const char* when);   // logs lv2's user-memory totals
 

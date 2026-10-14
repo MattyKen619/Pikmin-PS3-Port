@@ -12,6 +12,7 @@
 
 extern "C" void ps3OsMiscInit(void);
 extern "C" void ps3StartWatchdog(void);
+extern "C" void ps3CardPreload(void);
 
 #ifndef PS3_TEST_BUILD
 #define PS3_TEST_BUILD 0
@@ -77,6 +78,8 @@ extern "C" void ps3PlatformInit(void)
 	ps3b_log_memory("after the OS arena");
 	ps3BootStage("disc file table");
 	ps3DvdInit();
+	ps3BootStage("memory card");
+	ps3CardPreload();
 	ps3BootStage("video timer");
 	ps3ViStart();
 	ps3BootStage("watchdog");

@@ -69,6 +69,7 @@ static_assert(sizeof(DSPchannel_) == 0x180, "voice block size");
 namespace {
 
 enum {
+	TRACKED_VOICES = 128,
 	SUBFRAME     = 0x50,  // samples per sub-frame
 	VOICE_RW     = 0x100, // the DSP writes back only the first 0x100 bytes of a voice block
 	MAX_RAW      = 4 + 0x500 + 0x10,
@@ -145,6 +146,12 @@ struct State {
 	u32 finished;  // voices that reached "done"
 	u32 badVoices; // voices stopped because their data was out of range
 	u32 loggedStarts;
+	u32 loggedStops;
+	// per voice, for the start/stop lines of the first sounds of a session
+	u8 active[TRACKED_VOICES];      // playing in the previous sub-frame
+	u8 fadeRequested[TRACKED_VOICES];
+	u8 endedHere[TRACKED_VOICES];   // this file set "done" (sound ended, or a requested fade finished)
+	u32 startedAt[TRACKED_VOICES];  // sub-frame count when it started
 };
 
 static State S;
@@ -617,6 +624,20 @@ static void renderVoice(DSPchannel_* block)
 	DSPchannel_ v;
 	memcpy(&v, block, sizeof(v));
 	S.playing++;
+	const u32 index = (u32)(block - S.voices);
+	const bool tracked = index < TRACKED_VOICES;
+	if (v.resetVpb && tracked) {
+		S.startedAt[index]     = S.subframes;
+		S.fadeRequested[index] = 0;
+		S.endedHere[index]     = 0;
+	}
+	if (v.endRequested && tracked && !S.fadeRequested[index]) {
+		S.fadeRequested[index] = 1;
+		if (S.loggedStops < 24) {
+			ps3Log("[sound] voice %d: the game asks it to stop, after %u ms\n", (int)index,
+			       (unsigned)((S.subframes - S.startedAt[index]) * 5 / 2));
+		}
+	}
 	if (v.resetVpb && S.loggedStarts < 24) {
 		// The first sounds of a session: shows whether music and effects start, and with what data.
 		S.loggedStarts++;
@@ -684,6 +705,9 @@ static void renderVoice(DSPchannel_* block)
 		S.finished++;
 		if (S.finished == 1) {
 			ps3Log("[ps3] audio: DSP voice engine working (first sound finished)\n");
+		}
+		if (tracked) {
+			S.endedHere[index] = 1;
 		}
 	}
 	memcpy(block, &v, VOICE_RW);
@@ -870,7 +894,20 @@ extern "C" void ps3DspRenderSubframe(void)
 	S.playing = 0;
 	prepareSubframe();
 	for (u32 i = 0; i < S.voiceCount; i++) {
-		renderVoice(&S.voices[i]);
+		DSPchannel_* block = &S.voices[i];
+		if (i < TRACKED_VOICES) {
+			// A voice that played in the last sub-frame and no longer does: say how it ended.
+			const bool active = block->enabled && !block->done;
+			if (S.active[i] && !active && S.loggedStops < 24) {
+				S.loggedStops++;
+				const char* how = S.endedHere[i] ? (S.fadeRequested[i] ? "faded out" : "sound ended")
+				                                 : (S.fadeRequested[i] ? "stopped by the game during its fade-out"
+				                                                       : "stopped by the game");
+				ps3Log("[sound] voice %d: %s, after %u ms\n", (int)i, how, (unsigned)((S.subframes - S.startedAt[i]) * 5 / 2));
+			}
+			S.active[i] = active;
+		}
+		renderVoice(block);
 	}
 	finishSubframe();
 }

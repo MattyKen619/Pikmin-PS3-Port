@@ -53,6 +53,7 @@ extern "C" int ps3b_exit_requested(void)
 extern "C" void ps3b_exit(int code)
 {
 	ps3b_log_write("[ps3] exiting to XMB\n");
+	ps3b_log_flush();
 	ps3b_audio_shutdown();
 	ps3b_console_shutdown();
 	sysProcessExit(code);
@@ -276,11 +277,31 @@ extern "C" const char* ps3b_data_root(void)
 	return sDataRoot;
 }
 
-static unsigned int sLogMutex = 0;
+// ---------------------------------------------------------------- log
+//
+// Log lines go to the on-screen console, the lv2 TTY and PIKMIN/pikmin_log.txt. Writing to the USB
+// drive takes milliseconds per line (more while something else writes to the drive), and up to test
+// build 14 it happened on the thread that logged, holding up every other game thread meanwhile. Lines
+// logged while the sound was being mixed made the audio thread miss its 17.5 ms deadlines: in test 14,
+// blocks of sound played twice, the demo movie's sound was choppy, and the boot "Pikmin!" voice was cut
+// off after 20 ms. Now a line is only copied into a queue in memory; a background thread writes the
+// queue out in batches, about ten times a second at most. ps3b_log_flush() writes what is queued right
+// away (on exit).
+
 static char sLogPath[256];
-static int sLogState    = 0;          // 0 = not chosen yet, 1 = writing, -1 = no location / gave up
+static int sLogState                = 0; // 0 = not chosen yet, 1 = writing, -1 = no location / gave up
 static unsigned long long sLogBytes = 0;
+static int sLogLimitNoted           = 0;
 #define LOG_FILE_LIMIT (8ULL * 1024 * 1024)
+
+enum { LOG_QUEUE = 256 * 1024, LOG_BATCH = 16 * 1024 };
+static char sLogQueue[LOG_QUEUE];
+static unsigned int sLogQueueHead, sLogQueueTail; // bytes taken / added (positions modulo LOG_QUEUE)
+static unsigned int sLogDropped;                  // lines that did not fit in the queue
+static unsigned int sLogQueueMutex, sLogQueueCond;
+static unsigned int sLogOutMutex;   // held while writing out, so that lines leave in order
+static int sLogThreadState = 0;     // 0 = not started, 1 = running, -1 = could not start (write directly)
+static volatile int sLogInitDone = 0;
 
 // The console keeps the most recent lines for the on-screen view (see ps3_console.cpp).
 extern "C" void ps3b_console_append(const char* text);
@@ -324,12 +345,21 @@ static void chooseLogFile()
 	sLogState = -1;
 }
 
-// Open, append, close: slower than keeping the file open, but nothing is lost if the console
-// freezes and has to be switched off (the FAT directory entry is only updated on close).
+// Open, append, close: nothing is lost if the console freezes and has to be switched off (the FAT
+// directory entry is only updated on close).
 static void appendLogFile(const char* text, unsigned int len)
 {
-	if (sLogBytes + len > LOG_FILE_LIMIT) {
+	if (sLogState != 1 || len == 0) {
 		return;
+	}
+	const char* note = "[ps3] log file limit reached; further lines only on screen\n";
+	if (sLogBytes + len > LOG_FILE_LIMIT) {
+		if (sLogLimitNoted) {
+			return;
+		}
+		sLogLimitNoted = 1;
+		text           = note;
+		len            = strlen(note);
 	}
 	s32 fd = -1;
 	if (sysLv2FsOpen(sLogPath, SYS_O_WRONLY, &fd, 0, NULL, 0) != 0) {
@@ -340,31 +370,109 @@ static void appendLogFile(const char* text, unsigned int len)
 	sysLv2FsWrite(fd, text, len, &written);
 	sysLv2FsClose(fd);
 	sLogBytes += len;
-	if (sLogBytes + len > LOG_FILE_LIMIT) {
-		const char* note = "[ps3] log file limit reached; further lines only on screen\n";
-		if (sysLv2FsOpen(sLogPath, SYS_O_WRONLY, &fd, 0, NULL, 0) == 0) {
-			sysLv2FsLSeek64(fd, 0, 2, &pos);
-			sysLv2FsWrite(fd, note, strlen(note), &written);
-			sysLv2FsClose(fd);
+}
+
+// Writes text (len bytes, NUL-terminated) to the TTY, the screen and the file. sLogOutMutex held.
+static void emitLog(const char* text, unsigned int len)
+{
+	fwrite(text, 1, len, stdout); // lv2 TTY (visible in RPCS3's log and on debug consoles)
+	ps3b_console_append(text);
+	appendLogFile(text, len);
+}
+
+// Takes everything queued (in LOG_BATCH pieces) and writes it out. sLogOutMutex held.
+static void drainLogQueue()
+{
+	static char batch[LOG_BATCH + 1];
+	for (;;) {
+		ps3b_mutex_lock(sLogQueueMutex);
+		unsigned int n = sLogQueueTail - sLogQueueHead;
+		if (n > LOG_BATCH) {
+			n = LOG_BATCH;
+		}
+		for (unsigned int i = 0; i < n; i++) {
+			batch[i] = sLogQueue[(sLogQueueHead + i) % LOG_QUEUE];
+		}
+		sLogQueueHead += n;
+		unsigned int dropped = sLogDropped;
+		sLogDropped          = 0;
+		ps3b_mutex_unlock(sLogQueueMutex);
+		if (n == 0 && dropped == 0) {
+			return;
+		}
+		batch[n] = 0;
+		emitLog(batch, n);
+		if (dropped) {
+			char note[96];
+			int len = snprintf(note, sizeof(note), "[ps3] %u log lines lost (written faster than the USB drive takes them)\n", dropped);
+			emitLog(note, (unsigned int)len);
 		}
 	}
 }
 
+static void logThread(void*)
+{
+	for (;;) {
+		ps3b_mutex_lock(sLogQueueMutex);
+		while (sLogQueueTail == sLogQueueHead && sLogDropped == 0) {
+			ps3b_cond_wait(sLogQueueCond, 500 * 1000);
+		}
+		ps3b_mutex_unlock(sLogQueueMutex);
+		ps3b_sleep_us(100 * 1000); // let a burst of lines collect: one file append for all of them
+		ps3b_mutex_lock(sLogOutMutex);
+		drainLogQueue();
+		ps3b_mutex_unlock(sLogOutMutex);
+	}
+}
+
+static void initLog()
+{
+	// The first line comes from the boot thread, before any other thread exists.
+	ps3b_mutex_create(&sLogQueueMutex);
+	ps3b_mutex_create(&sLogOutMutex);
+	chooseLogFile();
+	if (ps3b_cond_create(&sLogQueueCond, sLogQueueMutex) == 0
+	    && ps3b_thread_create(logThread, NULL, 1400, 0x8000, "pikmin_log") == 0) {
+		sLogThreadState = 1;
+	} else {
+		sLogThreadState = -1;
+	}
+	sLogInitDone = 1;
+}
+
 extern "C" void ps3b_log_write(const char* text)
 {
-	if (!sLogMutex) {
-		ps3b_mutex_create(&sLogMutex);
+	if (!sLogInitDone) {
+		initLog();
 	}
-	ps3b_mutex_lock(sLogMutex);
-	fputs(text, stdout); // lv2 TTY (visible in RPCS3's log and on debug consoles)
-	if (sLogState == 0) {
-		chooseLogFile();
+	unsigned int len = strlen(text);
+	if (sLogThreadState != 1) {
+		ps3b_mutex_lock(sLogOutMutex);
+		emitLog(text, len);
+		ps3b_mutex_unlock(sLogOutMutex);
+		return;
 	}
-	if (sLogState == 1) {
-		appendLogFile(text, strlen(text));
+	ps3b_mutex_lock(sLogQueueMutex);
+	if (len > LOG_QUEUE - (sLogQueueTail - sLogQueueHead)) {
+		sLogDropped++;
+	} else {
+		for (unsigned int i = 0; i < len; i++) {
+			sLogQueue[(sLogQueueTail + i) % LOG_QUEUE] = text[i];
+		}
+		sLogQueueTail += len;
 	}
-	ps3b_console_append(text);
-	ps3b_mutex_unlock(sLogMutex);
+	ps3b_cond_signal(sLogQueueCond);
+	ps3b_mutex_unlock(sLogQueueMutex);
+}
+
+extern "C" void ps3b_log_flush(void)
+{
+	if (!sLogInitDone) {
+		return;
+	}
+	ps3b_mutex_lock(sLogOutMutex);
+	drainLogQueue();
+	ps3b_mutex_unlock(sLogOutMutex);
 }
 
 extern "C" const char* ps3b_log_path(void)

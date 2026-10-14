@@ -12,6 +12,7 @@ void ps3BootStage(const char* what); // writes a "[boot]" progress line to the l
 void ps3HeapExhausted(const char* heapName, int requested, int freeBytes); // logs and stops the game
 void ps3Report(const char* fmt, ...); // a line in the PS3 log (and on screen)
 void ps3ReportStack(const char* what); // a line in the log plus the calling thread's call stack
+void ps3NoteDspOverload(unsigned int frameGap, unsigned int subframeTime); // jaudio/dspdriver.c (OSGetTick units)
 
 #ifdef __cplusplus
 }

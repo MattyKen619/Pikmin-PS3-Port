@@ -398,6 +398,13 @@ static void updateIconOffsets(CARDDir* ent, CARDStat* st)
 
 void CARDInit(void) { }
 
+// Called at boot, before the game starts: reading the 2 MB image when the title screen first mounts the
+// card held up the game (and its sound) for a moment.
+extern "C" void ps3CardPreload(void)
+{
+	loadCard();
+}
+
 BOOL CARDProbe(s32 chan)
 {
 	ps3DeliverInterrupts();
