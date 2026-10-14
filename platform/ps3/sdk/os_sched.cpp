@@ -317,12 +317,20 @@ extern "C" int ps3InInterrupt(void) { return sInInterrupt; }
 extern "C" void __cyg_profile_func_enter(void* fn, void* site) __attribute__((no_instrument_function));
 extern "C" void __cyg_profile_func_exit(void* fn, void* site) __attribute__((no_instrument_function));
 
-// ---- Where NaNs come from
+// ---- Where NaNs come from (debugging aid, off by default: build with -DPS3_TRACE_NAN=1)
 // The PPU's FPSCR has sticky bits for the invalid operations that create a NaN: 0/0, inf-inf, inf*0,
 // inf/inf, square root of a negative number, and use of a signalling NaN. Arithmetic on an existing NaN
 // does not set them, so they mark the origin. The hooks check them at every game function entry and
 // exit; the first time a code location creates a NaN, it is logged with the thread's call stack
 // ("last code run" is the basic block that did it, or one shortly after it).
+//
+// Test 11 showed that Pikmin makes NaNs in normal play, about 5000 a second in cutscenes (for example
+// MapMgr::getCurrTri divides by the y of a wall's normal, which is 0), and that reading the FPSCR in
+// every hook costs about a third of the frame rate. NaNs are harmless as long as they are handled as on
+// the GameCube (GC_INDEX in types.h).
+#if !defined(PS3_TRACE_NAN)
+#define PS3_TRACE_NAN 0
+#endif
 // (FPSCR_VX* bit masks: Dolphin/PPCArch.h)
 #define FPSCR_NAN_CREATED (FPSCR_VXSNAN | FPSCR_VXISI | FPSCR_VXIDI | FPSCR_VXZDZ | FPSCR_VXIMZ | FPSCR_VXSQRT)
 enum { MAX_NAN_SITES = 24 };
@@ -365,13 +373,17 @@ static void noteNanOrigin(ThreadImpl* t, u32 fpscr)
 	logStack((int)(t - sImpls), t);
 }
 
-#define CHECK_NAN_ORIGIN(t)                         \
-	do {                                            \
-		u32 fpscr_ = readFpscr();                   \
+#if PS3_TRACE_NAN
+#define CHECK_NAN_ORIGIN(t)                                    \
+	do {                                                       \
+		u32 fpscr_ = readFpscr();                              \
 		if (__builtin_expect(fpscr_ & FPSCR_NAN_CREATED, 0)) { \
-			noteNanOrigin((t), fpscr_);             \
-		}                                           \
+			noteNanOrigin((t), fpscr_);                        \
+		}                                                      \
 	} while (0)
+#else
+#define CHECK_NAN_ORIGIN(t) ((void)0)
+#endif
 
 extern "C" unsigned int ps3NanCount(void) { return sNanCount; }
 
@@ -889,11 +901,13 @@ static void reportThreads(const char* title)
 {
 	char audio[256];
 	ps3AudioStatus(audio, sizeof(audio));
-	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s; "
-	       "NaNs created: %u\n",
+	char nans[40] = "";
+	if (PS3_TRACE_NAN) {
+		snprintf(nans, sizeof(nans), "; NaNs created: %u", (unsigned)sNanCount);
+	}
+	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped; %s%s\n",
 	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",
-	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, audio,
-	       (unsigned)sNanCount);
+	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, audio, nans);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];
 		if (!t->os) {

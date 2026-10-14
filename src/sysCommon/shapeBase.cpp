@@ -901,7 +901,7 @@ void AnimData::extractSRT(SRT& srt, int, AnimDataInfo* info, f32 time)
 				AnimParam& param = info->mScale[i];
 
 				int offset = (int(time) < param.mEntryNum) ? param.mDataOffset + int(time) : param.mDataOffset + (param.mEntryNum - 1);
-				*scale++   = mScaleDataBlock->mData[offset]; // YOU HAVE THE LOOP VARIABLE.  WHY?
+				*scale++   = GC_INDEX(mScaleDataBlock->mData, offset); // YOU HAVE THE LOOP VARIABLE.  WHY?
 			}
 
 			if ((info->mFlags & AnimDataFlags::AllIndividualScaleStatic) == AnimDataFlags::AllIndividualScaleStatic) {
@@ -918,7 +918,7 @@ void AnimData::extractSRT(SRT& srt, int, AnimDataInfo* info, f32 time)
 				AnimParam& param = info->mRotation[i];
 
 				int offset  = (int(time) < param.mEntryNum) ? param.mDataOffset + int(time) : param.mDataOffset + (param.mEntryNum - 1);
-				*rotation++ = mRotateDataBlock->mData[offset]; // YOU HAVE THE LOOP VARIABLE.  WHY?
+				*rotation++ = GC_INDEX(mRotateDataBlock->mData, offset); // YOU HAVE THE LOOP VARIABLE.  WHY?
 			}
 
 			if ((info->mFlags & AnimDataFlags::AllIndividualRotationStatic) == AnimDataFlags::AllIndividualRotationStatic) {
@@ -935,7 +935,7 @@ void AnimData::extractSRT(SRT& srt, int, AnimDataInfo* info, f32 time)
 				AnimParam& param = info->mTranslation[i];
 
 				int offset     = (int(time) < param.mEntryNum) ? param.mDataOffset + int(time) : param.mDataOffset + (param.mEntryNum - 1);
-				*translation++ = mTranslationDataBlock->mData[offset]; // YOU HAVE THE LOOP VARIABLE.  WHY?
+				*translation++ = GC_INDEX(mTranslationDataBlock->mData, offset); // YOU HAVE THE LOOP VARIABLE.  WHY?
 			}
 
 			if ((info->mFlags & AnimDataFlags::AllIndividualTranslationStatic) == AnimDataFlags::AllIndividualTranslationStatic) {
@@ -960,12 +960,12 @@ void AnimData::makeAnimSRT(int boneId, immut Matrix4f* parent, Matrix4f* output,
 
 	bool check = true;
 	if ((info->mFlags & AnimDataFlags::AllComponentsStatic) != AnimDataFlags::AllComponentsStatic
-	    && mAnimInfoList[frameNum].mCachedMtxBlock) {
+	    && GC_INDEX(mAnimInfoList, frameNum).mCachedMtxBlock) {
 #if defined(__LP64__)
 		// The cached block is a FrameCacher (AnimFrameCacher::cacheFrameSpace). The original reads it through
 		// AnimCacheInfo, whose fields only line up with FrameCacher's when pointers are 4 bytes. Its bone
 		// list holds 32-bit pointers to the matrices that follow it.
-		FrameCacher* cache    = static_cast<FrameCacher*>(mAnimInfoList[frameNum].mCachedMtxBlock);
+		FrameCacher* cache    = static_cast<FrameCacher*>(GC_INDEX(mAnimInfoList, frameNum).mCachedMtxBlock);
 		Ptr32<Matrix4f>* list = reinterpret_cast<Ptr32<Matrix4f>*>(cache->mBoneMtxList.get());
 		Matrix4f* matrices    = reinterpret_cast<Matrix4f*>(cache->mBoneMatricesEnd.get());
 		if (list[boneId]) {
@@ -3327,10 +3327,10 @@ void BaseShape::updateAnim(Graphics& gfx, immut Matrix4f& mtx, f32* p3)
 				if (frameNum >= data->mTotalFrameCount) {
 					ERROR("updateAnim: too large a frame number : %d / %d, %f\n", frameNum, data->mTotalFrameCount, *frame);
 				}
-				if (!data->mAnimInfoList[frameNum].mCachedMtxBlock) {
-					mFrameCacher->cacheFrameSpace(data->mActiveJointCount, &data->mAnimInfoList[frameNum]);
+				if (!GC_INDEX(data->mAnimInfoList, frameNum).mCachedMtxBlock) {
+					mFrameCacher->cacheFrameSpace(data->mActiveJointCount, &GC_INDEX(data->mAnimInfoList, frameNum));
 				} else {
-					mFrameCacher->updateInfo(&data->mAnimInfoList[frameNum]);
+					mFrameCacher->updateInfo(&GC_INDEX(data->mAnimInfoList, frameNum));
 				}
 			}
 

@@ -409,6 +409,21 @@ END_SCOPE_EXTERN_C
 #define PS3_HEAP_SIZE(size) (size)
 #endif
 
+// Element `index` of an array, with the address computed in 32 bits as on the GameCube. For indexes that
+// come from a float that can be NaN: NaN converts to the index 0x80000000, and on the GameCube
+// table[0x80000000] wraps around the address space back to table[0] (for even element sizes), so the
+// game carries on. With 64-bit pointers the same index faults. See tools/ps3/float_index_scan.py.
+#if defined(TARGET_PS3) && defined(__cplusplus)
+template <typename T>
+static inline T& ps3GcIndex(T* base, int index)
+{
+	return *(T*)(uptr)((u32)(uptr)base + (u32)index * (u32)sizeof(T));
+}
+#define GC_INDEX(base, index) ps3GcIndex((base), (int)(index))
+#else
+#define GC_INDEX(base, index) ((base)[index])
+#endif
+
 // Documenting MetroWerks intrinsic functions for PowerPC and placing them behind macros for portability.
 #if defined(__MWERKS__)
 #define __mwerks_eieio()                  /* void   */ __eieio()                  //
