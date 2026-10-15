@@ -23,7 +23,8 @@ struct DvdEntry {
 	long long size;
 	u32 lastUse;
 	int busy;   // reads queued on the I/O thread: the file must stay open
-	int logged; // its first open is in the log (the movie player opens its file once a second)
+	int logged;  // its first open is in the log (the movie player opens its file once a second)
+	int opening; // the I/O thread is opening it for a game thread
 };
 
 static DvdEntry* sEntries;
@@ -207,13 +208,46 @@ static int findEntry(const char* path)
 	return -1;
 }
 
+// A request for the I/O thread (see "reading" below): a read, or opening a file.
+enum { IO_READ, IO_OPEN };
+
+struct IoReq {
+	int kind;
+	int entry;
+	int fd;
+	void* addr;
+	u32 length;
+	unsigned long long offset;
+	s32 result;
+	volatile int done;
+	DVDFileInfo* asyncInfo; // async request: finish with asyncDone(asyncInfo)
+	// IO_OPEN: close closeFd (if >= 0), then open path; the descriptor goes to fd, the file's size to size
+	const char* path;
+	int closeFd;
+	long long size;
+	IoReq* next;
+};
+
+extern "C" int ps3CanBlock(void); // os_sched.cpp: a game thread holds the baton, not in an interrupt
+extern "C" int ps3CanYield(void); // ... and interrupts are enabled
+static bool ioAvailable();
+static void queueIo(IoReq* r);
+
+// The file's descriptor, opening it if needed. Opening a file on the USB drive can take a tenth of a
+// second when reads are queued ahead of it (test 15: up to 180 ms while the game loaded its archives,
+// with the sound waiting all along), so a game thread hands the open to the I/O thread and gives up the
+// baton meanwhile, as for a read.
 static int entryFd(int idx)
 {
 	DvdEntry* e = &sEntries[idx];
 	e->lastUse  = ++sUseClock;
+	while (e->opening && ps3CanYield()) {
+		ps3WaitOn(e, "DVD open"); // another game thread is opening this file
+	}
 	if (e->fd >= 0) {
 		return e->fd;
 	}
+	int closeFd = -1;
 	if (sOpenCount >= MAX_OPEN_FD) {
 		int oldest = -1;
 		for (int i = 0; i < sEntryCount; i++) {
@@ -222,21 +256,52 @@ static int entryFd(int idx)
 			}
 		}
 		if (oldest >= 0) {
-			ps3b_file_close(sEntries[oldest].fd);
+			closeFd             = sEntries[oldest].fd;
 			sEntries[oldest].fd = -1;
 			sOpenCount--;
 		}
 	}
 	char full[512];
 	snprintf(full, sizeof(full), "%s/files%s", ps3b_data_root(), e->path);
-	e->fd = ps3b_file_open(full);
-	if (e->fd < 0) {
+	int fd         = -1;
+	long long size = -1;
+	if (!e->opening && ps3CanYield() && ioAvailable()) {
+		IoReq r;
+		memset(&r, 0, sizeof(r));
+		r.kind     = IO_OPEN;
+		r.entry    = idx;
+		r.path     = full;
+		r.closeFd  = closeFd;
+		e->opening = 1;
+		queueIo(&r);
+		while (!r.done) {
+			ps3WaitOn(&r, "DVD open");
+		}
+		e->opening = 0;
+		ps3WakeAll(e);
+		fd   = r.fd;
+		size = r.size;
+	} else {
+		// In an interrupt handler or with interrupts off (or without the I/O thread): open directly.
+		if (closeFd >= 0) {
+			ps3b_file_close(closeFd);
+		}
+		fd   = ps3b_file_open(full);
+		size = fd >= 0 ? ps3b_file_size(fd) : -1;
+	}
+	if (fd < 0) {
 		ps3Log("[ps3] FAILED to open %s\n", full);
 		return -1;
 	}
+	if (e->fd >= 0) {
+		// Opened meanwhile by code that could not wait: keep that one.
+		ps3b_file_close(fd);
+		return e->fd;
+	}
+	e->fd = fd;
 	sOpenCount++;
 	if (e->size < 0) {
-		e->size = ps3b_file_size(e->fd);
+		e->size = size;
 	}
 	return e->fd;
 }
@@ -304,21 +369,9 @@ BOOL DVDClose(DVDFileInfo* info)
 // On the GameCube a DVD read is a DMA: the thread that asked waits (or carries on, for an async read)
 // while the other threads run. Reading here, on the thread that holds the scheduler's baton, stopped every
 // other game thread for the length of the read. While the game loaded its data, the audio thread could
-// not mix, and the sound stuttered (test 13). Reads now go to an I/O thread outside the scheduler: a
-// synchronous read gives up the baton until its data is in; an asynchronous one returns at once and its
-// callback runs as an interrupt when the data is in, as on the GameCube.
-
-struct IoReq {
-	int entry;
-	int fd;
-	void* addr;
-	u32 length;
-	unsigned long long offset;
-	s32 result;
-	volatile int done;
-	DVDFileInfo* asyncInfo; // async request: finish with asyncDone(asyncInfo)
-	IoReq* next;
-};
+// not mix, and the sound stuttered (test 13). Reads (and file opens, see entryFd) now go to an I/O thread
+// outside the scheduler: a synchronous read gives up the baton until its data is in; an asynchronous one
+// returns at once and its callback runs as an interrupt when the data is in, as on the GameCube.
 
 enum { IO_POOL = 32 };
 static unsigned int sIoLock, sIoCv;
@@ -327,8 +380,6 @@ static IoReq* sIoTail;
 static IoReq sIoPool[IO_POOL]; // async requests (game context only: the baton serialises access)
 static IoReq* sIoFree;
 static int sIoState; // 0 not started, 1 running, -1 unavailable
-
-extern "C" int ps3CanBlock(void); // os_sched.cpp: a game thread holds the baton, not in an interrupt
 
 static void asyncDone(void* arg)
 {
@@ -370,7 +421,15 @@ static void ioThread(void*)
 			sIoTail = NULL;
 		}
 		ps3b_mutex_unlock(sIoLock);
-		r->result = readNow(r->entry, r->fd, r->addr, r->length, r->offset);
+		if (r->kind == IO_OPEN) {
+			if (r->closeFd >= 0) {
+				ps3b_file_close(r->closeFd);
+			}
+			r->fd   = ps3b_file_open(r->path);
+			r->size = r->fd >= 0 ? ps3b_file_size(r->fd) : -1;
+		} else {
+			r->result = readNow(r->entry, r->fd, r->addr, r->length, r->offset);
+		}
 		ps3PostInterrupt(ioComplete, r);
 	}
 }
@@ -379,7 +438,9 @@ static void ioThread(void*)
 static void ioComplete(void* arg)
 {
 	IoReq* r = (IoReq*)arg;
-	sEntries[r->entry].busy--;
+	if (r->kind == IO_READ) {
+		sEntries[r->entry].busy--;
+	}
 	if (r->asyncInfo) {
 		DVDFileInfo* info            = r->asyncInfo;
 		info->cBlock.transferredSize = (u32)r->result;
@@ -415,7 +476,9 @@ static bool ioAvailable()
 
 static void queueIo(IoReq* r)
 {
-	sEntries[r->entry].busy++;
+	if (r->kind == IO_READ) {
+		sEntries[r->entry].busy++;
+	}
 	r->next = NULL;
 	ps3b_mutex_lock(sIoLock);
 	if (sIoTail) {

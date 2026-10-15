@@ -331,6 +331,9 @@ extern "C" void ps3DeliverInterrupts(void)
 
 extern "C" int ps3InInterrupt(void) { return sInInterrupt; }
 extern "C" int ps3CanBlock(void) { return sRunning != NULL && !sInInterrupt; }
+// Can give up the baton without the game noticing: also not inside an OSDisableInterrupts section, where
+// the GameCube would not switch threads.
+extern "C" int ps3CanYield(void) { return sRunning != NULL && !sInInterrupt && sIntrEnabled; }
 
 // ------------------------------------------------------------------ preemption points
 //
