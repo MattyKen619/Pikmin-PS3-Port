@@ -42,9 +42,13 @@ OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(GXSDK_C) $(LIBS_C) $(PLATFOR
 #   The backend uses PSL1GHT/newlib headers. The two must not be mixed in one file.
 #---------------------------------------------------------------------------------
 OPT       := -O2 -fno-strict-aliasing
-COMMON    := -mcpu=cell $(MACHDEP) $(OPT) -fno-exceptions -funsigned-char -w
+# -MMD -MP: each object records the headers it was built from (build/ps3/obj/**/*.d, included below), so
+# changing a header rebuilds every file that uses it. (Test 17 ran game code built against an older
+# Dolphin/GX/GXFifo.h: its vertex writes never reached the graphics FIFO.)
+DEPFLAGS  := -MMD -MP
+COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 17
+TEST_BUILD := 18
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -112,3 +116,8 @@ $(call objs_of,$(BACKEND_CPP)): $(OBJDIR)/%.o: %
 
 clean:
 	@rm -rf $(BUILD)
+
+-include $(OBJECTS:.o=.d)
+
+# The build number is a command-line define: the two files that show it rebuild when it changes.
+$(OBJDIR)/platform/ps3/sdk/platform_init.cpp.o $(OBJDIR)/platform/ps3/backend/ps3_console.cpp.o: Makefile.ps3

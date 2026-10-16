@@ -84,8 +84,129 @@ static void quadDirect()
 	GXFlush(); // the port interprets commands in batches
 }
 
-int main()
+// The game's first loading-screen frame (System::Initialise -> startLoading -> loadFunc), call for call:
+// DGXGraphics' constructor, then one loop of loadFunc up to its GXDrawDone (test 17 hung there).
+static int loadingScreen()
 {
+	static Recorder rec;
+	sNext      = hostArena() + 0x100000;
+	void* fifo = arenaAlloc(0x60000);
+	GXInit(fifo, 0x60000);
+	ps3gx::setRenderer(&rec);
+	gpu::CommandProcessor& cp = ps3gx::commandProcessor();
+
+	// DGXGraphics::DGXGraphics (NTSC 480 interlaced, no anti-aliasing)
+	static u8 vfilter[7] = { 5, 6, 14, 14, 14, 6, 5 };
+	static u8 pattern[12][2];
+	for (int i = 0; i < 12; i++) {
+		pattern[i][0] = pattern[i][1] = 6;
+	}
+	GXSetDispCopySrc(0, 0, 640, 480);
+	GXSetDispCopyDst(640, 480);
+	GXSetDispCopyYScale(1.0f);
+	GXSetCopyFilter(GX_FALSE, pattern, GX_TRUE, vfilter);
+	GXSetPixelFmt(GX_PF_RGB8_Z24, GX_ZC_LINEAR);
+	void* xfb = arenaAlloc(640 * 480 * 2);
+
+	// loadFunc
+	GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+	GXCopyDisp(xfb, GX_TRUE);
+	// System::beginRender
+	GXInvalidateTexAll();
+	GXInvalidateVtxCache();
+	GXColor black = { 0, 0, 0, 0 };
+	GXSetCopyClear(black, 0xFFFFFF);
+	GXSetViewport(0.0f, 0.0f, 640.0f, 480.0f, 0.0f, 1.0f);
+	GXSetScissor(0, 0, 640, 480);
+	GXSetColorUpdate(GX_TRUE);
+	for (int pass = 0; pass < 2; pass++) { // useTexture(nullptr, 0) here and in initRender
+		GXSetNumTexGens(0);
+		GXSetNumTevStages(1);
+		GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+		GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+		if (pass == 0) { // DGXGraphics::initRender
+			GXSetCullMode(GX_CULL_BACK);
+			GXSetCoPlanar(GX_FALSE);
+			GXSetColorUpdate(GX_TRUE);
+			GXSetDither(GX_FALSE);
+			GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP);
+			GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+			GXSetZCompLoc(GX_FALSE);
+			GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+			GXSetLineWidth(6, GX_TO_ZERO);
+			GXSetPointSize(24, GX_TO_ZERO);
+		}
+	}
+	// DGXGraphics::setOrthogonal
+	Mtx44 ortho;
+	memset(ortho, 0, sizeof(ortho));
+	ortho[0][0] = 2.0f / 640.0f;
+	ortho[0][3] = -1.0f;
+	ortho[1][1] = -2.0f / 480.0f;
+	ortho[1][3] = 1.0f;
+	ortho[2][2] = 1.0f;
+	ortho[3][3] = 1.0f;
+	GXSetProjection(ortho, GX_ORTHOGRAPHIC);
+	Mtx ident;
+	memset(ident, 0, sizeof(ident));
+	ident[0][0] = ident[1][1] = ident[2][2] = 1.0f;
+	GXLoadPosMtxImm(ident, 0);
+	GXSetCurrentMtx(0);
+	GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_VTX, GX_SRC_VTX, 1, GX_DF_NONE, GX_AF_NONE);
+	GXSetNumChans(1);
+	GXSetZMode(GX_FALSE, GX_LEQUAL, GX_TRUE);
+	GXSetScissor(0, 0, 640, 480);
+	GXSetViewport(0.0f, 0.0f, 640.0f, 480.0f, 0.0f, 1.0f);
+	GXSetNumTexGens(1);
+	GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX3X4, GX_TG_TEX0, 0x3c, GX_FALSE, 0x7d);
+	GXSetNumTexGens(0);
+	GXSetNumTevStages(1);
+	GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+	GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+	GXSetFog(GX_FOG_NONE, 0.0f, 0.0f, 0.0f, 0.0f, black);
+	// setColour, fillRectangle
+	GXColor shade = { 0, 0, 0, 32 };
+	GXSetChanMatColor(GX_COLOR0A0, shade);
+	GXClearVtxDesc();
+	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+	GXSetNumTexGens(0);
+	GXSetNumTevStages(1);
+	GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+	GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+	GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+	GXPosition3f32(0.0f, 0.0f, 0.0f);
+	GXColor1u32(0x00000020);
+	GXPosition3f32(640.0f, 0.0f, 0.0f);
+	GXColor1u32(0x00000020);
+	GXPosition3f32(640.0f, 480.0f, 0.0f);
+	GXColor1u32(0x00000020);
+	GXPosition3f32(0.0f, 480.0f, 0.0f);
+	GXColor1u32(0x00000020);
+	GXEnd();
+	// DGXGraphics::doneRender
+	GXFlush();
+	GXDrawDone();
+
+	const gpu::Stats& st = cp.stats();
+	printf("loading screen: %llu commands, %llu draws, %llu draw dones, %llu bad commands, processor %s\n",
+	       (unsigned long long)st.commands, (unsigned long long)st.draws, (unsigned long long)st.drawDones,
+	       (unsigned long long)st.badCommands, cp.idle() ? "idle" : "waiting for the rest of a command");
+	CHECK(st.drawDones == 1);
+	CHECK(st.badCommands == 0);
+	CHECK(cp.idle());
+	CHECK(rec.xfbCopies == 1);
+	CHECK(rec.n >= 1);
+	return sFailures ? 1 : 0;
+}
+
+int main(int argc, char** argv)
+{
+	if (argc > 1 && strcmp(argv[1], "loadscreen") == 0) {
+		return loadingScreen();
+	}
 	static Recorder rec; // zero-initialized (and keeps its vtable)
 	sNext = hostArena() + 0x100000;
 
@@ -267,7 +388,7 @@ int main()
 	CHECK(st.drawDones >= 1);
 	CHECK(cp.idle());
 
-	char status[640];
+	char status[800];
 	ps3GxStatus(status, sizeof(status));
 	printf("%s\n", status);
 	printf("%llu commands, %llu draws, %llu vertices, %llu display lists (%llu bytes), %llu CP / %llu XF / %llu BP loads\n",

@@ -10,7 +10,7 @@ ROOT     := ../../..
 BUILD    := $(ROOT)/build/gx_host
 DEFS     := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1
 GAMEINC  := -nostdinc -isystem $(ROOT)/include/stl -I$(ROOT)/include -I$(ROOT)/platform/ps3/include
-CXXFLAGS := -std=gnu++14 -O1 -g -funsigned-char -fno-exceptions -fno-rtti -w $(DEFS)
+CXXFLAGS := -MMD -MP -std=gnu++14 -O1 -g -funsigned-char -fno-exceptions -fno-rtti -w $(DEFS)
 
 GX_SRC   := $(filter-out $(ROOT)/src/gx/GXPerf.c,$(wildcard $(ROOT)/src/gx/*.c))
 GPU_SRC  := $(wildcard $(ROOT)/platform/ps3/gpu/*.cpp)
@@ -18,6 +18,7 @@ OBJS     := $(patsubst $(ROOT)/%,$(BUILD)/%.o,$(GX_SRC) $(GPU_SRC)) $(BUILD)/hos
 
 all: $(BUILD)/gx_selftest $(BUILD)/gx_replay
 	$(BUILD)/gx_selftest
+	$(BUILD)/gx_selftest loadscreen
 
 # Replays frame traces recorded on the PS3 (needs only the command processor)
 $(BUILD)/gx_replay: gx_replay.cpp gx_trace_file.h $(ROOT)/platform/ps3/gpu/gpu_cp.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.h
@@ -42,5 +43,7 @@ $(BUILD)/%.o: %.cpp
 
 clean:
 	rm -rf $(BUILD)
+
+-include $(OBJS:.o=.d)
 
 .PHONY: all clean

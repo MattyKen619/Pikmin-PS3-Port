@@ -57,17 +57,19 @@ void ps3GxWrite8(unsigned int value);
 void ps3GxWrite16(unsigned int value);
 void ps3GxWrite32(unsigned int value);
 }
+// (Not instrumented: a write is too small to be worth a preemption point or a shadow-stack entry.)
+#define PS3_GX_PIPE_WRITE __attribute__((no_instrument_function, always_inline))
 struct Ps3GxPipe8 {
-	void operator=(unsigned int value) volatile { ps3GxWrite8(value); }
+	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxWrite8(value); }
 };
 struct Ps3GxPipe16 {
-	void operator=(unsigned int value) volatile { ps3GxWrite16(value); }
+	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxWrite16(value); }
 };
 struct Ps3GxPipe32 {
-	void operator=(unsigned int value) volatile { ps3GxWrite32(value); }
+	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxWrite32(value); }
 };
 struct Ps3GxPipeF32 {
-	void operator=(float value) volatile
+	PS3_GX_PIPE_WRITE void operator=(float value) volatile
 	{
 		union {
 			float f;

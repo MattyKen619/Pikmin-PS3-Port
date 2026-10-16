@@ -205,6 +205,9 @@ public:
 
 	// True between commands (no partial command buffered).
 	bool idle() const { return mPending == 0; }
+	// The incomplete command the processor is holding (waiting for the rest of its bytes), if any.
+	u32 pendingBytes() const { return mPending; }
+	u8 pendingOpcode() const { return mPending ? mPendingBuf[0] : 0; }
 
 	State& state() { return mState; }
 	const State& state() const { return mState; }

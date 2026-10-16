@@ -500,6 +500,13 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 	}
 	char trace[96];
 	ps3gx::traceStatus(trace, sizeof(trace));
+	char pending[96];
+	if (sCp.idle()) {
+		snprintf(pending, sizeof(pending), "processor idle");
+	} else {
+		snprintf(pending, sizeof(pending), "processor holds %u bytes of an unfinished command 0x%02x", (unsigned)sCp.pendingBytes(),
+		         (unsigned)sCp.pendingOpcode());
+	}
 	// Time spent interpreting commands, per frame, since the last report.
 	u32 frames = sFrames - sFramesReported;
 	unsigned long long ticks = sCpTime - sCpTimeReported;
@@ -509,9 +516,10 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 	snprintf(buf, size,
 	         "graphics: %u frames (last: %u draws, %u vertices, %u display lists; %u.%u ms per frame interpreting commands); "
 	         "%u TEV setups, %u vertex formats, textures %s (largest %u KB); %llu bad commands, %llu memory failures "
-	         "(%u textures), %u ambiguous addresses; %s",
+	         "(%u textures), %u ambiguous addresses; %llu draws, %llu draw-done signals; %s; %s",
 	         (unsigned)sFrames, sLastDraws, sLastVerts, sLastDls, (unsigned)(perFrameUs / 1000), (unsigned)(perFrameUs % 1000 / 100),
 	         sTevSetups.count, sVertexFormats.count,
 	         formats[0] ? formats : "none", sMaxTextureSize >> 10, (unsigned long long)st.badCommands,
-	         (unsigned long long)st.memoryFailures, sTextureFailures, sAmbiguous, trace);
+	         (unsigned long long)st.memoryFailures, sTextureFailures, sAmbiguous, (unsigned long long)st.draws,
+	         (unsigned long long)st.drawDones, pending, trace);
 }
