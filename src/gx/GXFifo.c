@@ -3,6 +3,9 @@
 #include "Dolphin/hw_regs.h"
 #include "Dolphin/os.h"
 #include <stddef.h>
+#if defined(TARGET_PS3)
+#include "ps3/gxport.h"
+#endif
 
 #if OS_BUILD_VERSION >= 20011002L
 static struct __GXFifoObj* CPUFifo;
@@ -182,6 +185,14 @@ void GXSetCPUFifo(GXFifoObj* fifo)
 {
 	struct __GXFifoObj* realFifo = (struct __GXFifoObj*)fifo;
 	BOOL enabled                 = OSDisableInterrupts();
+#if defined(TARGET_PS3)
+	// PS3 port: no processor-interface FIFO registers; the port's FIFO writer is told directly.
+	CPUFifo    = realFifo;
+	CPGPLinked = (CPUFifo == GPFifo) ? GX_TRUE : GX_FALSE;
+	ps3GxSetCpuFifo(realFifo, CPGPLinked);
+	OSRestoreInterrupts(enabled);
+	return;
+#endif
 
 	CPUFifo = realFifo;
 	if (CPUFifo == GPFifo) {
@@ -224,6 +235,17 @@ void GXSetGPFifo(GXFifoObj* fifo)
 {
 	struct __GXFifoObj* realFifo = (struct __GXFifoObj*)fifo;
 	BOOL enabled                 = OSDisableInterrupts();
+#if defined(TARGET_PS3)
+	// PS3 port: the graphics processor executes commands as the CPU FIFO receives them when the two
+	// FIFOs are the same (the only way Pikmin uses them).
+	GPFifo     = realFifo;
+	CPGPLinked = (CPUFifo == GPFifo) ? GX_TRUE : GX_FALSE;
+	if (CPUFifo) {
+		ps3GxSetCpuFifo(CPUFifo, CPGPLinked);
+	}
+	OSRestoreInterrupts(enabled);
+	return;
+#endif
 
 	__GXFifoReadDisable();
 	__GXWriteFifoIntEnable(0, 0);
@@ -292,6 +314,11 @@ void __GXSaveCPUFifoAux(struct __GXFifoObj* realFifo)
 	BOOL enabled = OSDisableInterrupts();
 
 	GXFlush();
+#if defined(TARGET_PS3)
+	ps3GxSaveCpuFifo(realFifo);
+	OSRestoreInterrupts(enabled);
+	return;
+#endif
 	realFifo->base  = OSPhysicalToCached(__piReg[PI_FIFO_START]);
 	realFifo->top   = OSPhysicalToCached(__piReg[PI_FIFO_END]);
 	realFifo->wrPtr = OSPhysicalToCached(__piReg[PI_FIFO_PTR] & 0xFBFFFFFF);
@@ -318,6 +345,9 @@ void GXSaveGPFifo(GXFifoObj* fifo)
 	unsigned long temp;
 
 	OSAssertMsgLine(0x36A, realFifo == GPFifo, "GXSaveGPFifo: fifo is not attached to GP");
+#if defined(TARGET_PS3)
+	return; // the graphics processor is always idle between commands on the PS3
+#endif
 	cpStatus = __cpReg[CP_STATUS];
 	readIdle = GET_REG_FIELD(cpStatus, 1, 2);
 	OSAssertMsgLine(0x371, readIdle, "GXSaveGPFifo: GP is not idle");
@@ -352,6 +382,15 @@ void GXGetFifoStatus(GXFifoObj* fifo, GXBool* overhi, GXBool* underflow, u32* fi
 	*overhi    = GX_FALSE;
 	*fifoCount = 0;
 	*fifowrap  = GX_FALSE;
+#if defined(TARGET_PS3)
+	if (realFifo == CPUFifo) {
+		ps3GxSaveCpuFifo(realFifo);
+		*fifoCount = realFifo->count;
+	}
+	*cpuWrite = (CPUFifo == realFifo);
+	*gpRead   = (GPFifo == realFifo);
+	return;
+#endif
 	if (realFifo == GPFifo) {
 		SOME_MACRO1(realFifo);
 		SOME_MACRO2(realFifo);
@@ -376,6 +415,14 @@ void GXGetFifoPtrs(GXFifoObj* fifo, void** readPtr, void** writePtr)
 	struct __GXFifoObj* realFifo = (struct __GXFifoObj*)fifo;
 
 	OSAssertMsgLine(0x3F2, realFifo == CPUFifo || realFifo == GPFifo, "GXGetFifoPtrs: fifo is not CPU or GP fifo");
+#if defined(TARGET_PS3)
+	if (realFifo == CPUFifo) {
+		ps3GxSaveCpuFifo(realFifo);
+	}
+	*readPtr  = realFifo->rdPtr;
+	*writePtr = realFifo->wrPtr;
+	return;
+#endif
 	if (realFifo == CPUFifo) {
 		realFifo->wrPtr = OSPhysicalToCached(__piReg[PI_FIFO_PTR] & 0xFBFFFFFF);
 	}
@@ -440,7 +487,9 @@ GXBreakPtCallback GXSetBreakPtCallback(GXBreakPtCallback cb)
 	return oldcb;
 }
 
+#if !defined(TARGET_PS3) // a second (tentative) definition is fine in C, not in C++
 void* __GXCurrentBP;
+#endif
 
 /**
  * @TODO: Documentation

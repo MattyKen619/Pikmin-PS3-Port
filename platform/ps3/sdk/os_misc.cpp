@@ -187,6 +187,12 @@ void DCStoreRange(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
 void DCStoreRangeNoSync(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
 void DCZeroRange(void* addr, u32 nBytes) { memset(addr, 0, nBytes); }
 void PPCSync(void) { __sync_synchronize(); }
+// The write-gather pipe's hardware registers (only in GX library functions Pikmin never calls; the PS3's
+// GXWGFifo is not a hardware address, see Dolphin/GX/GXFifo.h).
+u32 PPCMfwpar(void) { return 0; }
+void PPCMtwpar(u32 value) { (void)value; }
+u32 PPCMfhid2(void) { return 0; }
+void PPCMthid2(u32 value) { (void)value; }
 
 // Used by the game's error screen (System::showError).
 u32 OSGetStackPointer()

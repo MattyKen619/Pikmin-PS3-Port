@@ -18,99 +18,8 @@
 
 extern "C" {
 
-// ---- Dolphin/GX/GXAttr.h
-void GXClearVtxDesc(void) { PS3_STUB("GXClearVtxDesc"); }
-void GXInvalidateVtxCache(void) { PS3_STUB("GXInvalidateVtxCache"); }
-void GXSetArray(GXAttr, void *, u8) { PS3_STUB("GXSetArray"); }
-void GXSetNumTexGens(u8) { PS3_STUB("GXSetNumTexGens"); }
-void GXSetTexCoordGen2(GXTexCoordID, GXTexGenType, GXTexGenSrc, u32, GXBool, u32) { PS3_STUB("GXSetTexCoordGen2"); }
-void GXSetVtxAttrFmt(GXVtxFmt, GXAttr, GXCompCnt, GXCompType, u8) { PS3_STUB("GXSetVtxAttrFmt"); }
-void GXSetVtxAttrFmtv(GXVtxFmt, GXVtxAttrFmtList *) { PS3_STUB("GXSetVtxAttrFmtv"); }
-void GXSetVtxDesc(GXAttr, GXAttrType) { PS3_STUB("GXSetVtxDesc"); }
-void GXSetVtxDescv(GXVtxDescList *) { PS3_STUB("GXSetVtxDescv"); }
-
-// ---- Dolphin/GX/GXFifo.h
-void GXBeginDisplayList(void *, u32) { PS3_STUB("GXBeginDisplayList"); }
-void GXCallDisplayList(void *, u32) { PS3_STUB("GXCallDisplayList"); }
-u32 GXEndDisplayList(void) { PS3_STUB("GXEndDisplayList"); return {}; }
-
-// ---- Dolphin/GX/GXFrameBuffer.h
-void GXCopyTex(void *, GXBool) { PS3_STUB("GXCopyTex"); }
-void GXSetCopyClear(GXColor, u32) { PS3_STUB("GXSetCopyClear"); }
-void GXSetCopyFilter(GXBool, const u8[12][2], GXBool, const u8[7]) { PS3_STUB("GXSetCopyFilter"); }
-void GXSetDispCopyDst(u16, u16) { PS3_STUB("GXSetDispCopyDst"); }
-void GXSetDispCopySrc(u16, u16, u16, u16) { PS3_STUB("GXSetDispCopySrc"); }
-u32 GXSetDispCopyYScale(f32) { PS3_STUB("GXSetDispCopyYScale"); return {}; }
-void GXSetTexCopyDst(u16, u16, GXTexFmt, GXBool) { PS3_STUB("GXSetTexCopyDst"); }
-void GXSetTexCopySrc(u16, u16, u16, u16) { PS3_STUB("GXSetTexCopySrc"); }
-
-// ---- Dolphin/GX/GXGeometry.h
-void GXBegin(GXPrimitive, GXVtxFmt, u16) { PS3_STUB("GXBegin"); }
-void GXSetCoPlanar(GXBool) { PS3_STUB("GXSetCoPlanar"); }
-void GXSetCullMode(GXCullMode) { PS3_STUB("GXSetCullMode"); }
-void GXSetLineWidth(u8, GXTexOffset) { PS3_STUB("GXSetLineWidth"); }
-void GXSetPointSize(u8, GXTexOffset) { PS3_STUB("GXSetPointSize"); }
-
-// ---- Dolphin/GX/GXLight.h
-void GXInitLightAttn(GXLightObj *, f32, f32, f32, f32, f32, f32) { PS3_STUB("GXInitLightAttn"); }
-void GXInitLightColor(GXLightObj *, GXColor) { PS3_STUB("GXInitLightColor"); }
-void GXInitLightDir(GXLightObj *, f32, f32, f32) { PS3_STUB("GXInitLightDir"); }
-void GXInitLightPos(GXLightObj *, f32, f32, f32) { PS3_STUB("GXInitLightPos"); }
-void GXInitSpecularDir(GXLightObj *, f32, f32, f32) { PS3_STUB("GXInitSpecularDir"); }
-void GXLoadLightObjImm(GXLightObj *, GXLightID) { PS3_STUB("GXLoadLightObjImm"); }
-void GXSetChanAmbColor(GXChannelID, GXColor) { PS3_STUB("GXSetChanAmbColor"); }
-void GXSetChanCtrl(GXChannelID, GXBool, GXColorSrc, GXColorSrc, u32, GXDiffuseFn, GXAttnFn) { PS3_STUB("GXSetChanCtrl"); }
-void GXSetChanMatColor(GXChannelID, GXColor) { PS3_STUB("GXSetChanMatColor"); }
-void GXSetNumChans(u8) { PS3_STUB("GXSetNumChans"); }
-
-// ---- Dolphin/GX/GXMisc.h
-GXFifoObj * GXInit(void *, u32) { PS3_STUB("GXInit"); return {}; }
-void GXPixModeSync(void) { PS3_STUB("GXPixModeSync"); }
-struct OSThread * GXSetCurrentGXThread(void) { PS3_STUB("GXSetCurrentGXThread"); return {}; }
-
-// ---- Dolphin/GX/GXPixel.h
-void GXSetAlphaUpdate(GXBool) { PS3_STUB("GXSetAlphaUpdate"); }
-void GXSetBlendMode(GXBlendMode, GXBlendFactor, GXBlendFactor, GXLogicOp) { PS3_STUB("GXSetBlendMode"); }
-void GXSetColorUpdate(GXBool) { PS3_STUB("GXSetColorUpdate"); }
-void GXSetDither(GXBool) { PS3_STUB("GXSetDither"); }
-void GXSetFog(GXFogType, f32, f32, f32, f32, GXColor) { PS3_STUB("GXSetFog"); }
-void GXSetFogRangeAdj(GXBool, u16, GXFogAdjTable *) { PS3_STUB("GXSetFogRangeAdj"); }
-void GXSetPixelFmt(GXPixelFmt, GXZFmt16) { PS3_STUB("GXSetPixelFmt"); }
-void GXSetZCompLoc(GXBool) { PS3_STUB("GXSetZCompLoc"); }
-void GXSetZMode(GXBool, GXCompare, GXBool) { PS3_STUB("GXSetZMode"); }
-
-// ---- Dolphin/GX/GXTev.h
-void GXSetAlphaCompare(GXCompare, u8, GXAlphaOp, GXCompare, u8) { PS3_STUB("GXSetAlphaCompare"); }
-void GXSetNumTevStages(u8) { PS3_STUB("GXSetNumTevStages"); }
-void GXSetTevAlphaIn(GXTevStageID, GXTevAlphaArg, GXTevAlphaArg, GXTevAlphaArg, GXTevAlphaArg) { PS3_STUB("GXSetTevAlphaIn"); }
-void GXSetTevAlphaOp(GXTevStageID, GXTevOp, GXTevBias, GXTevScale, GXBool, GXTevRegID) { PS3_STUB("GXSetTevAlphaOp"); }
-void GXSetTevColor(GXTevRegID, GXColor) { PS3_STUB("GXSetTevColor"); }
-void GXSetTevColorIn(GXTevStageID, GXTevColorArg, GXTevColorArg, GXTevColorArg, GXTevColorArg) { PS3_STUB("GXSetTevColorIn"); }
-void GXSetTevColorOp(GXTevStageID, GXTevOp, GXTevBias, GXTevScale, GXBool, GXTevRegID) { PS3_STUB("GXSetTevColorOp"); }
-void GXSetTevColorS10(GXTevRegID, GXColorS10) { PS3_STUB("GXSetTevColorS10"); }
-void GXSetTevKAlphaSel(GXTevStageID, GXTevKAlphaSel) { PS3_STUB("GXSetTevKAlphaSel"); }
-void GXSetTevKColor(GXTevKColorID, GXColor) { PS3_STUB("GXSetTevKColor"); }
-void GXSetTevKColorSel(GXTevStageID, GXTevKColorSel) { PS3_STUB("GXSetTevKColorSel"); }
-void GXSetTevOp(GXTevStageID, GXTevMode) { PS3_STUB("GXSetTevOp"); }
-void GXSetTevOrder(GXTevStageID, GXTexCoordID, GXTexMapID, GXChannelID) { PS3_STUB("GXSetTevOrder"); }
-void GXSetTevSwapMode(GXTevStageID, GXTevSwapSel, GXTevSwapSel) { PS3_STUB("GXSetTevSwapMode"); }
-void GXSetTevSwapModeTable(GXTevSwapSel, GXTevColorChan, GXTevColorChan, GXTevColorChan, GXTevColorChan) { PS3_STUB("GXSetTevSwapModeTable"); }
-
-// ---- Dolphin/GX/GXTexture.h
-void GXInitTexObj(GXTexObj *, void *, u16, u16, GXTexFmt, GXTexWrapMode, GXTexWrapMode, GXBool) { PS3_STUB("GXInitTexObj"); }
-void GXInitTexObjLOD(GXTexObj *, GXTexFilter, GXTexFilter, f32, f32, f32, GXBool, GXBool, GXAnisotropy) { PS3_STUB("GXInitTexObjLOD"); }
-void GXInvalidateTexAll(void) { PS3_STUB("GXInvalidateTexAll"); }
-void GXLoadTexObj(GXTexObj *, GXTexMapID) { PS3_STUB("GXLoadTexObj"); }
-
-// ---- Dolphin/GX/GXTransform.h
-void GXLoadNrmMtxImm(const Mtx, u32) { PS3_STUB("GXLoadNrmMtxImm"); }
-void GXLoadPosMtxImm(const Mtx, u32) { PS3_STUB("GXLoadPosMtxImm"); }
-void GXLoadTexMtxImm(const Mtx, u32, GXTexMtxType) { PS3_STUB("GXLoadTexMtxImm"); }
-void GXSetCurrentMtx(u32) { PS3_STUB("GXSetCurrentMtx"); }
-void GXSetProjection(const Mtx44, GXProjectionType) { PS3_STUB("GXSetProjection"); }
-void GXSetScissor(u32, u32, u32, u32) { PS3_STUB("GXSetScissor"); }
-void GXSetScissorBoxOffset(s32, s32) { PS3_STUB("GXSetScissorBoxOffset"); }
-void GXSetViewport(f32, f32, f32, f32, f32, f32) { PS3_STUB("GXSetViewport"); }
+// ---- Dolphin/OS/OSThread.h
+s32 OSSuspendThread(OSThread *) { PS3_STUB("OSSuspendThread"); return {}; }
 
 // ---- Dolphin/ai.h
 u32 AIGetStreamSampleCount(void) { PS3_STUB("AIGetStreamSampleCount"); return {}; }
@@ -127,5 +36,8 @@ BOOL HIOInit(s32, HIOCallback) { PS3_STUB("HIOInit"); return {}; }
 BOOL HIOReadMailbox(u32 *) { PS3_STUB("HIOReadMailbox"); return {}; }
 BOOL HIOWrite(u32, void *, s32) { PS3_STUB("HIOWrite"); return {}; }
 BOOL HIOWriteMailbox(u32) { PS3_STUB("HIOWriteMailbox"); return {}; }
+
+// ---- Dolphin/vi.h
+u32 VIGetTvFormat(void) { PS3_STUB("VIGetTvFormat"); return {}; }
 
 } // extern "C"

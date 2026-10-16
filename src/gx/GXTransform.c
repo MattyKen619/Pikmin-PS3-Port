@@ -120,6 +120,49 @@ void GXGetProjectionv(f32* ptr)
 	ptr[6] = gx->projMtx[5];
 }
 
+#if defined(TARGET_PS3) && defined(__cplusplus)
+// PS3 port: the GameCube writes matrices to the write-gather pipe with paired-single stores; here each
+// element goes through GX_WRITE_F32 (dest is always &GXWGFifo.f32).
+static void WriteMTXPS4x3(const Mtx mtx, volatile Ps3GxPipeF32* dest)
+{
+	(void)dest;
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 4; c++) {
+			GX_WRITE_F32(mtx[r][c]);
+		}
+	}
+}
+
+static void WriteMTXPS3x3from3x4(const Mtx mtx, volatile Ps3GxPipeF32* dest)
+{
+	(void)dest;
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
+			GX_WRITE_F32(mtx[r][c]);
+		}
+	}
+}
+
+static void WriteMTXPS3x3(const Mtx33 mtx, volatile Ps3GxPipeF32* dest)
+{
+	(void)dest;
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
+			GX_WRITE_F32(mtx[r][c]);
+		}
+	}
+}
+
+static void WriteMTXPS4x2(const Mtx mtx, volatile Ps3GxPipeF32* dest)
+{
+	(void)dest;
+	for (int r = 0; r < 2; r++) {
+		for (int c = 0; c < 4; c++) {
+			GX_WRITE_F32(mtx[r][c]);
+		}
+	}
+}
+#else
 /**
  * @TODO: Documentation
  */
@@ -194,6 +237,8 @@ ASM void WriteMTXPS4x2(register const Mtx mtx, register volatile f32* dest) {
     psq_st  f3, 0 (dest), 0, 0
 	#endif // clang-format on
 }
+
+#endif
 
 #define GX_WRITE_MTX_ELEM(addr, value)          \
 	do {                                        \

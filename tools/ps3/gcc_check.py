@@ -28,6 +28,9 @@ KEEP_GROUPS = {
              "plugPikiOgawa", "plugPikiYamashita", "sysCommon", "sysDolphin", "sysBootup.cpp"],
     "jaudio": ["jaudio"],
     "libs": ["mtx", "hvqm4dec"],
+    # Nintendo's GX library, compiled for the PS3 too: it produces the GameCube graphics command stream
+    # that platform/ps3/gpu interprets (Phase 4).
+    "gxsdk": ["gx"],
 }
 
 DEFINES = [
@@ -82,10 +85,11 @@ def main():
 
     def run(item):
         name, src, group = item
-        # jaudio's .c files are compiled as C++ by the matching build ("-lang c++" in cflags_jaudio).
-        is_c = src.endswith(".c") and group != "jaudio"
+        # jaudio's .c files are compiled as C++ by the matching build ("-lang c++" in cflags_jaudio); the
+        # PS3 port also compiles the GX library as C++ (its write-gather pipe is a C++ object there).
+        is_c = src.endswith(".c") and group not in ("jaudio", "gxsdk")
         if src.endswith(".c") and not is_c:
-            cmd_lang = ["-x", "c++"]
+            cmd_lang = ["-x", "c++"] + (["-fpermissive"] if group == "gxsdk" else [])
         else:
             cmd_lang = []
         cmd = [args.cc if is_c else args.cxx] + (["-std=gnu99"] if is_c else ["-std=gnu++14"]) + common + cmd_lang + [src]

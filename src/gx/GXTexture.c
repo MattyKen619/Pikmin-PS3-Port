@@ -1,5 +1,8 @@
 #include "Dolphin/gx.h"
 #include <string.h>
+#if defined(TARGET_PS3)
+#include "ps3/gxport.h"
+#endif
 
 u8 GXTexMode0Ids[8]  = { 0x80, 0x81, 0x82, 0x83, 0xA0, 0xA1, 0xA2, 0xA3 };
 u8 GXTexMode1Ids[8]  = { 0x84, 0x85, 0x86, 0x87, 0xA4, 0xA5, 0xA6, 0xA7 };
@@ -143,6 +146,9 @@ void __GetImageTileCount(enum _GXTexFmt fmt, u16 wd, u16 ht, u32* rowTiles, u32*
 void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXTexFmt format, GXTexWrapMode wrap_s, GXTexWrapMode wrap_t,
                   u8 mipmap)
 {
+#if defined(TARGET_PS3)
+	ps3GxNoteAddress(image_ptr);
+#endif
 	u32 imageBase;
 	u32 maxLOD;
 	u16 rowT;
@@ -267,7 +273,11 @@ void GXInitTexObjCI(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXCIT
 
 	OSAssertMsgLine(0x29B, obj, "Texture Object Pointer is null");
 	CHECK_GXBEGIN(0x29D, "GXInitTexObjCI");
+#if defined(TARGET_PS3)
+	GXInitTexObj(obj, image_ptr, width, height, (GXTexFmt)format, wrap_s, wrap_t, mipmap);
+#else
 	GXInitTexObj(obj, image_ptr, width, height, format, wrap_s, wrap_t, mipmap);
+#endif
 	t->flags &= 0xFFFFFFFD;
 	t->tlutName = tlut_name;
 }
@@ -323,6 +333,9 @@ void GXInitTexObjLOD(GXTexObj* obj, GXTexFilter min_filt, GXTexFilter mag_filt, 
  */
 void GXInitTexObjData(GXTexObj* obj, void* image_ptr)
 {
+#if defined(TARGET_PS3)
+	ps3GxNoteAddress(image_ptr);
+#endif
 	u32 imageBase;
 	GXTexObjPriv* t = (GXTexObjPriv*)obj;
 
@@ -370,7 +383,11 @@ void GXInitTexObjUserData(GXTexObj* obj, void* user_data)
 
 	OSAssertMsgLine(0x33E, obj, "Texture Object Pointer is null");
 	CHECK_GXBEGIN(0x33F, "GXInitTexObjUserData");
+#if defined(TARGET_PS3)
+	t->userData = (u32)(uptr)user_data;
+#else
 	t->userData = user_data;
+#endif
 }
 
 /**
@@ -382,7 +399,11 @@ void* GXGetTexObjUserData(const GXTexObj* obj)
 	GXTexObjPriv* t = (GXTexObjPriv*)obj;
 
 	OSAssertMsgLine(0x345, obj, "Texture Object Pointer is null");
+#if defined(TARGET_PS3)
+	return (void*)(uptr)t->userData;
+#else
 	return t->userData;
+#endif
 }
 
 /**
@@ -692,6 +713,9 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id)
  */
 void GXInitTlutObj(GXTlutObj* tlut_obj, void* lut, GXTlutFmt fmt, u16 n_entries)
 {
+#if defined(TARGET_PS3)
+	ps3GxNoteAddress(lut);
+#endif
 	GXTlutObjPriv* t = (GXTlutObjPriv*)tlut_obj;
 
 	OSAssertMsgLine(0x452, tlut_obj, "TLut Object Pointer is null");

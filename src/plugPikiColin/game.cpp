@@ -280,6 +280,7 @@ void OnePlayerSection::init()
 				                            "map select", "gameplay", "course clear", "stage clear", "credits", "exit" };
 			ps3Report("[game] one-player section: %s\n",
 			          (nextSectionType >= 0 && nextSectionType < 12) ? sNames[nextSectionType] : "?");
+			ps3GxNoteSection((nextSectionType >= 0 && nextSectionType < 12) ? sNames[nextSectionType] : "?");
 		}
 #endif
 		switch (nextSectionType) {

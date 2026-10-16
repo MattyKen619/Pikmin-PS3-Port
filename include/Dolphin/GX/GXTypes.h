@@ -47,7 +47,11 @@ typedef struct _GXTexObjPriv {
 	u32 mode1;       // _04
 	u32 image0;      // _08
 	u32 image3;      // _0C
+#if defined(TARGET_PS3)
+	u32 userData; // _10 (PS3 port: a pointer would make the object 8 bytes larger than GXTexObj)
+#else
 	void* userData;  // _10
+#endif
 	GXTexFmt format; // _14
 	u32 tlutName;    // _18
 	u16 loadCount;   // _1C

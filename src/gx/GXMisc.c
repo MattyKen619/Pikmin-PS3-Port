@@ -2,6 +2,9 @@
 #include "Dolphin/gx.h"
 #include "Dolphin/hw_regs.h"
 #include <stddef.h>
+#if defined(TARGET_PS3)
+#include "ps3/gxport.h"
+#endif
 
 static GXDrawSyncCallback TokenCB;
 static GXDrawDoneCallback DrawDoneCB;
@@ -67,6 +70,9 @@ void GXFlush(void)
 	}
 #endif
 	PPCSync();
+#if defined(TARGET_PS3)
+	ps3GxFlush(); // the port interprets the commands written so far
+#endif
 }
 
 /**

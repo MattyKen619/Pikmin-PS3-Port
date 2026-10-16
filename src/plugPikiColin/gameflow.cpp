@@ -647,6 +647,7 @@ void GameFlow::softReset()
 			static immut char* sNames[] = { "Nintendo logo", "title screen", "movie (h4m)", "PaniTest", "one-player game", "OgTest" };
 			int id = mNextGameSectionID;
 			ps3Report("[game] section: %s\n", (id >= 0 && id < 6) ? sNames[id] : "?");
+			ps3GxNoteSection((id >= 0 && id < 6) ? sNames[id] : "?");
 		}
 #endif
 		switch (mNextGameSectionID) {

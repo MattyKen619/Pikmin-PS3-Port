@@ -415,7 +415,11 @@ void GXGetVtxDescv(GXVtxDescList* vcd)
 
 	CHECK_GXBEGIN(0x1BA, "GXGetVtxDescv");
 	CHECK_ATTRPTR(0x1BC, vcd);
+#if defined(TARGET_PS3)
+	for (attr = (GXAttr)0; attr < GX_VA_MAX_ATTR; attr = (GXAttr)(attr + 1)) {
+#else
 	for (attr = 0; attr < GX_VA_MAX_ATTR; attr++) {
+#endif
 		vcd[attr].attr = attr;
 		GXGetVtxDesc(attr, &vcd[attr].type);
 	}
@@ -718,7 +722,11 @@ void GXGetVtxAttrFmtv(GXVtxFmt fmt, GXVtxAttrFmtList* vat)
 	CHECK_GXBEGIN(0x330, "GXGetVtxAttrFmtv");
 	CHECK_LISTPTR(0x331, vat);
 	CHECK_VTXFMT(0x332, fmt);
+#if defined(TARGET_PS3)
+	for (attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr = (GXAttr)(attr + 1)) {
+#else
 	for (attr = GX_VA_POS; attr < GX_VA_MAX_ATTR; attr++) {
+#endif
 		vat->attr = attr;
 		GXGetVtxAttrFmt(fmt, attr, &vat->count, &vat->type, &vat->frac);
 		vat++;

@@ -2,6 +2,9 @@
 #include "Dolphin/gx.h"
 #include "Dolphin/hw_regs.h"
 #include <stddef.h>
+#if defined(TARGET_PS3)
+#include "ps3/gxport.h"
+#endif
 
 static struct __GXData_struct gxData;
 struct __GXData_struct* gx = &gxData;
@@ -104,16 +107,26 @@ GXFifoObj* GXInit(void* base, u32 size)
 	gx->tevTcEnab = GX_FALSE;
 #endif
 	gx->vNum = 0;
+#if defined(TARGET_PS3)
+	// The hardware registers are arrays in platform/ps3/gpu/gx_fifo.cpp.
+	__piReg  = ps3GxPiRegs();
+	__cpReg  = ps3GxCpRegs();
+	__peReg  = ps3GxPeRegs();
+	__memReg = ps3GxMemRegs();
+#else
 	__piReg  = OSPhysicalToUncached(0xC003000);
 	__cpReg  = OSPhysicalToUncached(0xC000000);
 	__peReg  = OSPhysicalToUncached(0xC001000);
 	__memReg = OSPhysicalToUncached(0xC004000);
+#endif
 	__GXFifoInit();
 	GXInitFifoBase(&FifoObj, base, size);
 	GXSetCPUFifo(&FifoObj);
 	GXSetGPFifo(&FifoObj);
 	__GXPEInit();
+#if !defined(TARGET_PS3) // GXWGFifo is not a hardware address on the PS3
 	EnableWriteGatherPipe();
+#endif
 
 	gx->genMode = 0;
 	SET_REG_FIELD(0, gx->genMode, 8, 24, 0);

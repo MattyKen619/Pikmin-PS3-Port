@@ -37,6 +37,7 @@ CXXFLAGS = ["-std=gnu++14", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cx
 PORT_SOURCES = [
     # The platform SDK layer (real implementations) + generated stubs for what is not implemented yet.
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform/ps3/sdk").glob("*.cpp")),
+    *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform/ps3/gpu").glob("*.cpp")),
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform/ps3/stubs").glob("*.cpp")),
     "src/MSL_C/PPCEABI/bare/H/float.c",       # MSL float constants (__float_nan etc.); not in newlib
     # The real backend needs PSL1GHT headers; the link check uses a do-nothing stand-in.
@@ -125,7 +126,9 @@ def main():
     def build(item):
         name, src, group = item
         o = out / "obj" / (name.replace("/", "__") + ".o")
-        is_c = src.endswith(".c") and group not in ("jaudio",)
+        # (The GX library is C++ in the PS3 build only for its write-gather pipe object; Clang rejects its
+        # C idioms in C++ mode, and as C it defines the same symbols.)
+        is_c = src.endswith(".c") and group != "jaudio"
         if src.endswith((".cpp", ".cc")) or not is_c:
             cmd = [cxx, *cflags, *CXXFLAGS] + (["-x", "c++"] if src.endswith(".c") else []) + [src, "-o", str(o)]
         else:

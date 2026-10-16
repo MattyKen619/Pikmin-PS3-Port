@@ -37,7 +37,7 @@ void GXBeginDisplayList(void* list, u32 size)
 /**
  * @TODO: Documentation
  */
-unsigned long GXEndDisplayList(void)
+u32 GXEndDisplayList(void)
 {
 	u32 ov;
 	u32 reg;

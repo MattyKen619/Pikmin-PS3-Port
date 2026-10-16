@@ -152,6 +152,11 @@ extern "C" void ps3NoteDspOverload(unsigned int frameGap, unsigned int subframeT
 static u32 sLastBlockAddr;
 static u32 sLastStreamState = 4;
 
+// The recording was for checking the sound in test builds 14-16; build with -DPS3_SOUND_CAPTURE=1 to
+// turn it back on.
+#ifndef PS3_SOUND_CAPTURE
+#define PS3_SOUND_CAPTURE 0
+#endif
 enum { CAPTURE_SECONDS = 150, CAPTURE_RATE = 32028 };
 static u8* sCapture;               // WAV data: little-endian 16-bit, left then right
 static volatile u32 sCaptureFrames; // frames recorded (timer thread)
@@ -364,7 +369,9 @@ void AIStartDMA(void)
 	PS3_ACTIVITY("AIStartDMA");
 	if (!sAiThreadStarted) {
 		sAiThreadStarted = 1;
-		startCapture();
+		if (PS3_SOUND_CAPTURE) {
+			startCapture();
+		}
 		ps3b_audio_start(pullOutput);
 		ps3b_thread_create(aiTimerThread, NULL, 900, 0x8000, "pikmin_ai");
 		ps3Log("[ps3] audio: interface timer started\n");

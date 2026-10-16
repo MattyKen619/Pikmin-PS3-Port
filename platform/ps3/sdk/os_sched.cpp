@@ -740,6 +740,28 @@ void OSYieldThread(void)
 	unlockS();
 }
 
+// Thread queues (the GX library waits for "draw done" this way): a sleeping thread waits on the queue
+// object until OSWakeupThread wakes every thread on it.
+void OSSleepThread(OSThreadQueue* queue)
+{
+	lockS();
+	if (sInInterrupt) {
+		unlockS();
+		ps3Log("[ps3] FAILED: OSSleepThread inside an interrupt\n");
+		return;
+	}
+	blockLocked(sRunning, queue, "OSSleepThread");
+	unlockS();
+}
+
+void OSWakeupThread(OSThreadQueue* queue)
+{
+	lockS();
+	wakeAllLocked(queue);
+	preemptCheck(sRunning);
+	unlockS();
+}
+
 OSPriority OSGetThreadPriority(OSThread* thread)
 {
 	return thread->priority;
@@ -909,6 +931,7 @@ static const char* stateName(int s)
 }
 
 extern "C" void ps3AudioStatus(char* buf, unsigned int size);
+extern "C" void ps3GxStatus(char* buf, unsigned int size);
 extern "C" unsigned int ps3FramesDrawn(void);
 
 static void logStack(int index, ThreadImpl* t)
@@ -954,6 +977,9 @@ static void reportThreads(const char* title)
 	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped, %s; %s%s\n",
 	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",
 	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, waits, audio, nans);
+	char gfx[640];
+	ps3GxStatus(gfx, sizeof(gfx));
+	ps3Log("[ps3]   %s\n", gfx);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];
 		if (!t->os) {

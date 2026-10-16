@@ -1,5 +1,8 @@
 #include "Dolphin/gx.h"
 #include "Dolphin/hw_regs.h"
+#if defined(TARGET_PS3)
+#include "ps3/gxport.h"
+#endif
 
 GXRenderModeObj GXNtsc240Ds = {
 	1,
@@ -806,6 +809,9 @@ static void __GXVerifCopy(void* dest, u8 clear)
  */
 void GXCopyDisp(void* dest, GXBool clear)
 {
+#if defined(TARGET_PS3)
+	ps3GxNoteAddress(dest);
+#endif
 	u32 reg;
 	u32 tempPeCtrl;
 	u32 phyAddr;
@@ -868,6 +874,9 @@ void GXCopyDisp(void* dest, GXBool clear)
  */
 void GXCopyTex(void* dest, GXBool clear)
 {
+#if defined(TARGET_PS3)
+	ps3GxNoteAddress(dest);
+#endif
 	u32 reg;
 	u32 tempPeCtrl;
 	u32 phyAddr;

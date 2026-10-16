@@ -47,6 +47,47 @@ typedef struct _GXFifoObjPriv {
 
 typedef void (*GXBreakPtCallback)(void);
 
+#if defined(TARGET_PS3) && defined(__cplusplus)
+// PS3 port: the GameCube's write-gather pipe is a hardware address; every store to it appends to the
+// graphics FIFO. Here each member of GXWGFifo is an object whose assignment hands the value to the
+// port's FIFO (platform/ps3/gpu/gx_fifo.cpp), in the same big-endian byte order the hardware uses.
+END_SCOPE_EXTERN_C
+extern "C" {
+void ps3GxWrite8(unsigned int value);
+void ps3GxWrite16(unsigned int value);
+void ps3GxWrite32(unsigned int value);
+}
+struct Ps3GxPipe8 {
+	void operator=(unsigned int value) volatile { ps3GxWrite8(value); }
+};
+struct Ps3GxPipe16 {
+	void operator=(unsigned int value) volatile { ps3GxWrite16(value); }
+};
+struct Ps3GxPipe32 {
+	void operator=(unsigned int value) volatile { ps3GxWrite32(value); }
+};
+struct Ps3GxPipeF32 {
+	void operator=(float value) volatile
+	{
+		union {
+			float f;
+			unsigned int u;
+		} bits;
+		bits.f = value;
+		ps3GxWrite32(bits.u);
+	}
+};
+struct PPCWGPipe {
+	Ps3GxPipe8 u8;
+	Ps3GxPipe8 s8;
+	Ps3GxPipe16 u16;
+	Ps3GxPipe16 s16;
+	Ps3GxPipe32 u32;
+	Ps3GxPipe32 s32;
+	Ps3GxPipeF32 f32;
+};
+BEGIN_SCOPE_EXTERN_C
+#else
 // PPC Write Gather Pipe
 typedef union {
 	u8 u8;
@@ -60,6 +101,7 @@ typedef union {
 	f32 f32;
 	f64 f64;
 } PPCWGPipe;
+#endif
 
 extern volatile PPCWGPipe GXWGFifo AT_ADDRESS(GXFIFO_ADDR);
 
