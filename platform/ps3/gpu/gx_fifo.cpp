@@ -2,16 +2,19 @@
 //
 // The library writes its commands to the write-gather pipe (GXWGFifo, a C++ object on the PS3, see
 // Dolphin/GX/GXFifo.h): ps3GxWrite8/16/32 below. When the CPU FIFO is the graphics processor's FIFO
-// (always, except while a display list is recorded), the bytes go straight to the command processor
-// (gpu_cp.cpp), which executes them as they arrive. While a display list is recorded, they are stored in
-// the list's buffer, exactly as the hardware would, and the processor reads the list when it is called.
+// (always, except while a display list is recorded), the bytes go into a ring buffer, and the command
+// processor (gpu_cp.cpp) executes them on its own thread ("the graphics thread"), on the PPU's second
+// hardware thread, as the GameCube's graphics chip ran beside its CPU. While a display list is recorded,
+// the bytes are stored in the list's buffer, exactly as the hardware would, and the processor reads the
+// list when it is called.
 //
 // The registers the library touches directly (__piReg, __cpReg, __peReg, __memReg) are arrays here. The
 // processor raises the pixel engine's interrupts (draw done, tokens), so GXDrawDone and GXReadDrawSync
 // work as on the GameCube.
 //
-// Nothing is drawn yet (Phase 4 step 1): the processor checks and counts every command, and records
-// selected frames to the USB drive (gx_trace.cpp) for checking off the console.
+// Nothing is drawn yet: the processor checks and counts every command, and records selected frames to
+// the USB drive (gx_trace.cpp) for checking off the console. If PIKMIN/gx_sync.txt exists on the USB
+// drive, commands are interpreted on the game's thread instead (as in test builds 17 and 18).
 
 #include "../sdk/sdk_internal.h"
 
@@ -45,29 +48,53 @@ extern "C" vu16* ps3GxCpRegs(void)
 extern "C" vu16* ps3GxPeRegs(void) { return sPeRegs; }
 extern "C" vu16* ps3GxMemRegs(void) { return sMemRegs; }
 
+// ================================================================== locks between the game and the graphics thread
+
+void ps3gx::spinLock(volatile int* lock)
+{
+	int spins = 0;
+	while (__sync_lock_test_and_set(lock, 1)) {
+		while (*lock) {
+			if (++spins > 2000) {
+				ps3b_sleep_us(1); // (the holder may have been preempted)
+				spins = 0;
+			}
+		}
+	}
+}
+
+void ps3gx::spinUnlock(volatile int* lock) { __sync_lock_release(lock); }
+
 // ================================================================== game memory as the GPU sees it
 //
 // Commands carry addresses with only some of their bits: display list calls keep all 32, the vertex
 // array registers 30, texture, TLUT and copy addresses 26 (21 bits of address >> 5). The game's memory is
-// the OS arena (96 MB, above 1 GB on the PS3) plus the executable's data. 30 bits identify an arena
-// address uniquely; 26 bits do not (the arena is larger than 64 MB), so the GX library tells the port
-// every texture and copy address it is given (ps3GxNoteAddress), and that table resolves them.
+// the OS arena (96 MB, above 1 GB on the PS3) plus the executable (code and data below 512 MB). 30 bits
+// identify an arena address uniquely; 26 bits do not (the arena is larger than 64 MB), so the GX library
+// tells the port every texture and copy address it is given (ps3GxNoteAddress), and that table resolves
+// them.
 
 static uptr sArenaLo, sArenaHi;
-static const uptr kLowLo = 0x10000, kLowHi = 0x10000000; // executable and static data
+// The executable: code and descriptors from 0x10000, read-only data from 0x10000000, data and bss
+// after it (test 18: a vertex array in .data at 0x100b5100).
+static const uptr kLowLo = 0x10000, kLowHi = 0x20000000;
 
-enum { BOOK_SIZE = 1 << 14 };
+enum { BOOK_SIZE = 1 << 16 };
 static u32 sBookKey[BOOK_SIZE]; // (address >> 5) & 0x1FFFFF, + 1 (0 = empty)
 static u32 sBookPtr[BOOK_SIZE];
 static u32 sBookCount;
+static u32 sBookResets;
+static volatile int sBookLock;
 
 extern "C" void ps3GxNoteAddress(const void* ptr)
 {
 	u32 p   = (u32)(uptr)ptr;
 	u32 key = ((p >> 5) & 0x1FFFFF) + 1;
+	ps3gx::spinLock(&sBookLock);
 	if (sBookCount >= BOOK_SIZE * 3 / 4) {
 		memset(sBookKey, 0, sizeof(sBookKey)); // full: start over (old entries are rarely still in use)
 		sBookCount = 0;
+		sBookResets++;
 	}
 	u32 h = (key * 2654435761u) & (BOOK_SIZE - 1);
 	while (sBookKey[h] && sBookKey[h] != key) {
@@ -78,19 +105,24 @@ extern "C" void ps3GxNoteAddress(const void* ptr)
 		sBookCount++;
 	}
 	sBookPtr[h] = p;
+	ps3gx::spinUnlock(&sBookLock);
 }
 
 static u32 bookLookup(u32 address26)
 {
 	u32 key = ((address26 >> 5) & 0x1FFFFF) + 1;
 	u32 h   = (key * 2654435761u) & (BOOK_SIZE - 1);
+	u32 found = 0;
+	ps3gx::spinLock(&sBookLock);
 	while (sBookKey[h]) {
 		if (sBookKey[h] == key) {
-			return sBookPtr[h];
+			found = sBookPtr[h];
+			break;
 		}
 		h = (h + 1) & (BOOK_SIZE - 1);
 	}
-	return 0;
+	ps3gx::spinUnlock(&sBookLock);
+	return found;
 }
 
 static const gpu::u8* inRegion(uptr p, u32 size)
@@ -104,7 +136,8 @@ static const gpu::u8* inRegion(uptr p, u32 size)
 	return NULL;
 }
 
-static u32 sAmbiguous;
+static u32 sAmbiguous; // texture addresses not in the book that could be either of two arena addresses
+static u32 sUnnoted;   // texture addresses not in the book
 
 static const gpu::u8* translate(u32 address, u32 size, MemKind kind)
 {
@@ -131,6 +164,15 @@ static const gpu::u8* translate(u32 address, u32 size, MemKind kind)
 			if (p) {
 				return p;
 			}
+		}
+		if (a26 == 0) {
+			return NULL; // a texture map that was never loaded
+		}
+		sUnnoted++;
+		if (sUnnoted <= 5) {
+			static const char* const kKinds[] = { "display list", "vertex array", "texture", "TLUT" };
+			ps3Log("[gpu] %s address 0x%07x (%u bytes) was not given to GXInitTexObj/GXInitTlutObj/GXCopyTex%s\n",
+			       kKinds[kind < 4 ? kind : 0], (unsigned)a26, (unsigned)size, sBookResets ? " (or the address table was reset)" : "");
 		}
 		if (sArenaLo) {
 			uptr c = (sArenaLo & ~(uptr)0x3FFFFFF) | a26;
@@ -209,6 +251,11 @@ inline gpu::u64 fnv(gpu::u64 h, u32 v)
 
 } // namespace
 
+// The detailed checks (vertex arrays and textures in game memory, distinct TEV setups and vertex
+// formats) cost time on every draw, so they run on one frame in CHECK_EVERY, and on recorded frames.
+enum { CHECK_EVERY = 30 };
+static bool sCheckFrame = true;
+
 static HashSet sTevSetups;
 static HashSet sVertexFormats;
 static u32 sTextureFormats;   // bit per texture format used
@@ -220,13 +267,32 @@ static u32 sLastDraws, sLastVerts, sLastDls;
 static u32 sTextureReads, sTextureFailures;
 static unsigned long long sCpTime;        // timebase ticks spent interpreting commands
 static unsigned long long sCpTimeReported;
+static unsigned long long sReportedAt;
 static u32 sFramesReported;
 
 extern "C" unsigned int ps3FramesDrawn(void) { return sFrames; }
 
 class Events : public gpu::Listener {
 public:
+	gpu::VertexDetail vertexDetail() override
+	{
+		if (sRenderer) {
+			return gpu::VERTICES_DECODED;
+		}
+		return (sCheckFrame || ps3gx::traceRecording()) ? gpu::VERTICES_ARRAYS : gpu::VERTICES_NONE;
+	}
+
 	void draw(const gpu::DrawCall& call) override
+	{
+		if (sCheckFrame || ps3gx::traceRecording()) {
+			check(call);
+		}
+		if (sRenderer) {
+			sRenderer->draw(call);
+		}
+	}
+
+	void check(const gpu::DrawCall& call)
 	{
 		const gpu::State& S = sCp.state();
 		if (call.count > sMaxDrawVertices) {
@@ -284,9 +350,6 @@ public:
 				memoryFailed(address, size, gpu::MEM_TEXTURE);
 			}
 		}
-		if (sRenderer) {
-			sRenderer->draw(call);
-		}
 	}
 
 	void copy(const gpu::CopyInfo& info) override
@@ -309,7 +372,7 @@ public:
 		if (sFrames == 1) {
 			ps3Log("[gpu] first frame: %u draws, %u vertices, %u display lists\n", sLastDraws, sLastVerts, sLastDls);
 		}
-		ps3NoteActivity("GX frame");
+		sCheckFrame = (sFrames % CHECK_EVERY) == 0;
 		ps3gx::traceFrameEnd(sFrames, sCp);
 	}
 
@@ -351,6 +414,166 @@ public:
 
 static Events sEvents;
 
+// ================================================================== the ring buffer and the graphics thread
+//
+// The game thread appends to the ring (sWritten) and publishes what it wrote (sPublished) every
+// PUBLISH_CHUNK bytes and at GXFlush. The graphics thread interprets published bytes (sConsumed).
+// Counters run freely (mod 2^32); the ring index is counter & RING_MASK.
+
+enum {
+	RING_SIZE     = 1 << 20,
+	RING_MASK     = RING_SIZE - 1,
+	PUBLISH_CHUNK = 16 * 1024, // also the most the graphics thread interprets in one go
+};
+
+static gpu::u8* sRing;
+static u32 sWritten;               // game thread only
+static volatile u32 sPublished;    // written by the game thread
+static volatile u32 sConsumed;     // written by the graphics thread
+static volatile int sConsumerWaiting;
+static volatile int sProducerWaiting;
+static unsigned int sMutex, sWorkCond, sSpaceCond;
+static bool sThreaded;
+static bool sForceSync;             // host tests
+static u32 sProducerWaits;          // times the game waited for the graphics thread to make room
+
+// The batch being interpreted (for a trace that starts in the middle of it).
+static const gpu::u8* sBatch;
+static u32 sBatchLen;
+static gpu::u64 sBatchBase;
+
+bool ps3gx::currentBatch(const gpu::u8** data, gpu::u32* size, gpu::u64* base)
+{
+	if (!sBatch) {
+		return false;
+	}
+	*data = sBatch;
+	*size = sBatchLen;
+	*base = sBatchBase;
+	return true;
+}
+
+static void interpret(const gpu::u8* p, u32 n)
+{
+	if (ps3gx::traceRecording()) {
+		ps3gx::traceFifo(p, n);
+	}
+	unsigned long long t0 = ps3b_timebase();
+	sBatch                = p;
+	sBatchLen             = n;
+	sBatchBase            = sCp.received();
+	sCp.write(p, n);
+	sBatch = NULL;
+	sCpTime += ps3b_timebase() - t0;
+}
+
+// Interprets the published bytes up to `end` (graphics thread, or the game thread when not threaded).
+static void drain(u32 end)
+{
+	while (sConsumed != end) {
+		u32 at = sConsumed & RING_MASK;
+		u32 n  = end - sConsumed;
+		if (n > RING_SIZE - at) {
+			n = RING_SIZE - at;
+		}
+		if (n > PUBLISH_CHUNK) {
+			n = PUBLISH_CHUNK;
+		}
+		interpret(sRing + at, n);
+		__sync_synchronize(); // done reading those bytes before the game may overwrite them
+		sConsumed = sConsumed + n;
+		__sync_synchronize();
+		if (sProducerWaiting) {
+			ps3b_mutex_lock(sMutex);
+			ps3b_cond_signal(sSpaceCond);
+			ps3b_mutex_unlock(sMutex);
+		}
+	}
+}
+
+static void graphicsThread(void*)
+{
+	for (;;) {
+		ps3b_mutex_lock(sMutex);
+		sConsumerWaiting = 1;
+		__sync_synchronize();
+		while (sPublished == sConsumed) {
+			ps3b_cond_wait(sWorkCond, 5000);
+		}
+		sConsumerWaiting = 0;
+		ps3b_mutex_unlock(sMutex);
+		__sync_synchronize();
+		drain(sPublished);
+	}
+}
+
+static void publish()
+{
+	if (!sRing || sPublished == sWritten) {
+		return;
+	}
+	__sync_synchronize(); // the bytes before the counter
+	sPublished = sWritten;
+	if (!sThreaded) {
+		drain(sWritten);
+		return;
+	}
+	__sync_synchronize();
+	if (sConsumerWaiting) {
+		ps3b_mutex_lock(sMutex);
+		ps3b_cond_signal(sWorkCond);
+		ps3b_mutex_unlock(sMutex);
+	}
+}
+
+static void makeRoom(u32 n)
+{
+	publish();
+	if (!sThreaded) {
+		return; // (publish interpreted everything)
+	}
+	sProducerWaits++;
+	ps3b_mutex_lock(sMutex);
+	sProducerWaiting = 1;
+	__sync_synchronize();
+	while (sWritten - sConsumed + n > RING_SIZE) {
+		ps3b_cond_wait(sSpaceCond, 5000);
+	}
+	sProducerWaiting = 0;
+	ps3b_mutex_unlock(sMutex);
+}
+
+static inline void put(const gpu::u8* b, u32 n)
+{
+	if (sWritten - sConsumed + n > RING_SIZE) {
+		makeRoom(n);
+	}
+	u32 at = sWritten & RING_MASK;
+	if (at + n <= RING_SIZE) {
+		for (u32 i = 0; i < n; i++) {
+			sRing[at + i] = b[i];
+		}
+	} else {
+		for (u32 i = 0; i < n; i++) {
+			sRing[(sWritten + i) & RING_MASK] = b[i];
+		}
+	}
+	sWritten += n;
+	if (sWritten - sPublished >= PUBLISH_CHUNK) {
+		publish();
+	}
+}
+
+void ps3gx::finish()
+{
+	publish();
+	while (sConsumed != sWritten) {
+		ps3b_sleep_us(100);
+	}
+}
+
+void ps3gx::forceSynchronous() { sForceSync = true; }
+
 // ================================================================== the CPU FIFO
 
 static __GXFifoObj* sCpuFifo;
@@ -364,21 +587,35 @@ static void start()
 	sArenaHi = (uptr)OSGetArenaHi();
 	sCp.setMemory(&sMemory);
 	sCp.setListener(&sEvents);
-	ps3Log("[gpu] graphics commands are interpreted (not drawn yet); game memory 0x%08x-0x%08x\n", (unsigned)sArenaLo,
-	       (unsigned)sArenaHi);
+	sRing = (gpu::u8*)ps3b_memalign(128, RING_SIZE);
+	if (!sRing) {
+		ps3Log("[gpu] FAILED: no memory for the graphics command buffer\n");
+		return;
+	}
+	bool sync = sForceSync;
+	if (!sync && ps3b_data_root()) {
+		char path[256];
+		snprintf(path, sizeof(path), "%s/gx_sync.txt", ps3b_data_root());
+		sync = ps3b_file_exists(path) != 0;
+	}
+	if (!sync && ps3b_mutex_create(&sMutex) == 0 && ps3b_cond_create(&sWorkCond, sMutex) == 0
+	    && ps3b_cond_create(&sSpaceCond, sMutex) == 0
+	    && ps3b_thread_create(graphicsThread, NULL, 1500, 0x10000, "pikmin_gpu") == 0) {
+		sThreaded = true;
+	}
+	ps3Log("[gpu] graphics commands are interpreted (not drawn yet) %s; game memory 0x%08x-0x%08x\n",
+	       sThreaded ? "on the graphics thread" : "on the game's thread", (unsigned)sArenaLo, (unsigned)sArenaHi);
 }
-
-static void flushStage();
 
 extern "C" void ps3GxSetCpuFifo(__GXFifoObj* fifo, int linkedToGp)
 {
 	if (!sStarted) {
 		start();
 	}
-	flushStage(); // what was written so far goes to the graphics processor first
-	sCpuFifo              = fifo;
-	sLinked               = linkedToGp != 0;
-	sPiRegs[PI_FIFO_PTR]  = 0; // clears the overflow (wrap) bit GXEndDisplayList checks
+	publish(); // what was written so far goes to the graphics processor first
+	sCpuFifo             = fifo;
+	sLinked              = linkedToGp != 0 && sRing;
+	sPiRegs[PI_FIFO_PTR] = 0; // clears the overflow (wrap) bit GXEndDisplayList checks
 }
 
 extern "C" void ps3GxSaveCpuFifo(__GXFifoObj* fifo)
@@ -416,48 +653,14 @@ static void store(const u8* bytes, u32 n)
 	sCpuFifo->wrPtr = w + n;
 }
 
-// Commands written while the FIFOs are linked are collected here and interpreted in batches: when the
-// buffer is full, at GXFlush (which the library calls before it waits for the graphics processor, e.g. in
-// GXDrawDone), and before the CPU FIFO changes. The GameCube's graphics processor also runs behind the
-// CPU, so the game never relies on a command taking effect sooner.
-enum { STAGE_SIZE = 16 * 1024 }; // small enough that interpreting a batch does not hold up the audio thread
-static u8 sStage[STAGE_SIZE];
-static u32 sStageLen;
-
-static void flushStage()
-{
-	if (sStageLen == 0) {
-		return;
-	}
-	ps3gx::traceAtFlush(sCp);
-	if (ps3gx::traceRecording()) {
-		ps3gx::traceFifo(sStage, sStageLen);
-	}
-	unsigned long long t0 = ps3b_timebase();
-	u32 len               = sStageLen;
-	sStageLen             = 0; // (interpreting can end a frame, which may start a trace)
-	sCp.write(sStage, len);
-	sCpTime += ps3b_timebase() - t0;
-}
-
-extern "C" void ps3GxFlush(void) { flushStage(); }
-
-static inline void stage(const u8* b, u32 n)
-{
-	if (sStageLen + n > STAGE_SIZE) {
-		flushStage();
-	}
-	for (u32 i = 0; i < n; i++) {
-		sStage[sStageLen + i] = b[i];
-	}
-	sStageLen += n;
-}
+// GXFlush (which the library calls before it waits for the graphics processor, e.g. in GXDrawDone).
+extern "C" void ps3GxFlush(void) { publish(); }
 
 extern "C" void ps3GxWrite8(unsigned int value)
 {
 	u8 b = (u8)value;
 	if (sLinked) {
-		stage(&b, 1);
+		put(&b, 1);
 	} else {
 		store(&b, 1);
 	}
@@ -467,7 +670,7 @@ extern "C" void ps3GxWrite16(unsigned int value)
 {
 	u8 b[2] = { (u8)(value >> 8), (u8)value };
 	if (sLinked) {
-		stage(b, 2);
+		put(b, 2);
 	} else {
 		store(b, 2);
 	}
@@ -477,7 +680,7 @@ extern "C" void ps3GxWrite32(unsigned int value)
 {
 	u8 b[4] = { (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value };
 	if (sLinked) {
-		stage(b, 4);
+		put(b, 4);
 	} else {
 		store(b, 4);
 	}
@@ -500,26 +703,32 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 	}
 	char trace[96];
 	ps3gx::traceStatus(trace, sizeof(trace));
-	char pending[96];
+	char pending[128];
+	u32 queued = sWritten - sConsumed;
 	if (sCp.idle()) {
-		snprintf(pending, sizeof(pending), "processor idle");
+		snprintf(pending, sizeof(pending), "processor idle, %u KB queued", (unsigned)(queued >> 10));
 	} else {
-		snprintf(pending, sizeof(pending), "processor holds %u bytes of an unfinished command 0x%02x", (unsigned)sCp.pendingBytes(),
-		         (unsigned)sCp.pendingOpcode());
+		snprintf(pending, sizeof(pending), "processor holds %u bytes of an unfinished command 0x%02x, %u KB queued",
+		         (unsigned)sCp.pendingBytes(), (unsigned)sCp.pendingOpcode(), (unsigned)(queued >> 10));
 	}
-	// Time spent interpreting commands, per frame, since the last report.
-	u32 frames = sFrames - sFramesReported;
+	// Time spent interpreting commands, per frame and as a share of the time, since the last report.
+	unsigned long long now   = ps3b_timebase();
+	u32 frames               = sFrames - sFramesReported;
 	unsigned long long ticks = sCpTime - sCpTimeReported;
+	unsigned long long span  = sReportedAt ? now - sReportedAt : 0;
 	sFramesReported          = sFrames;
 	sCpTimeReported          = sCpTime;
+	sReportedAt              = now;
 	unsigned long long perFrameUs = frames ? ticks * 1000000ULL / ps3b_timebase_freq() / frames : 0;
+	unsigned busy                 = span ? (unsigned)(ticks * 100 / span) : 0;
 	snprintf(buf, size,
-	         "graphics: %u frames (last: %u draws, %u vertices, %u display lists; %u.%u ms per frame interpreting commands); "
-	         "%u TEV setups, %u vertex formats, textures %s (largest %u KB); %llu bad commands, %llu memory failures "
-	         "(%u textures), %u ambiguous addresses; %llu draws, %llu draw-done signals; %s; %s",
+	         "graphics: %u frames (last: %u draws, %u vertices, %u display lists; %u.%u ms per frame interpreting commands, "
+	         "%s %u%% busy); %u TEV setups, %u vertex formats, textures %s (largest %u KB); %llu bad commands, %llu memory "
+	         "failures (%u textures; checked 1 frame in %d), %u unnoted and %u ambiguous texture addresses; %llu draws, "
+	         "%llu draw-done signals; %s, game waited for room %u times; %s",
 	         (unsigned)sFrames, sLastDraws, sLastVerts, sLastDls, (unsigned)(perFrameUs / 1000), (unsigned)(perFrameUs % 1000 / 100),
-	         sTevSetups.count, sVertexFormats.count,
+	         sThreaded ? "graphics thread" : "game thread", busy, sTevSetups.count, sVertexFormats.count,
 	         formats[0] ? formats : "none", sMaxTextureSize >> 10, (unsigned long long)st.badCommands,
-	         (unsigned long long)st.memoryFailures, sTextureFailures, sAmbiguous, (unsigned long long)st.draws,
-	         (unsigned long long)st.drawDones, pending, trace);
+	         (unsigned long long)st.memoryFailures, sTextureFailures, (int)CHECK_EVERY, sUnnoted, sAmbiguous,
+	         (unsigned long long)st.draws, (unsigned long long)st.drawDones, pending, sProducerWaits, trace);
 }

@@ -131,7 +131,15 @@ struct DrawCall {
 	u16 count;      // vertices
 	u8 inDisplayList;
 	const VertexLayout* layout;
-	const Vertex* vertices; // decoded, count entries
+	const Vertex* vertices; // decoded, count entries; NULL unless the listener asked for VERTICES_DECODED
+	const u8* data;         // the vertices as in the command stream (count * layout->size bytes)
+};
+
+// How much of a draw's vertex data the processor works out (Listener::vertexDetail).
+enum VertexDetail {
+	VERTICES_NONE,    // only the draw itself: cheapest
+	VERTICES_ARRAYS,  // also resolve the vertex arrays the draw indexes (checks memory; traces record it)
+	VERTICES_DECODED, // also decode every vertex (DrawCall::vertices)
 };
 
 struct CopyInfo {
@@ -156,6 +164,7 @@ public:
 class Listener {
 public:
 	virtual ~Listener() { }
+	virtual VertexDetail vertexDetail() { return VERTICES_DECODED; } // asked at every draw
 	virtual void draw(const DrawCall& call) { (void)call; }
 	virtual void copy(const CopyInfo& info) { (void)info; }
 	virtual void drawDone() { }                         // BP 0x45: raise the PE finish interrupt
@@ -209,12 +218,36 @@ public:
 	u32 pendingBytes() const { return mPending; }
 	u8 pendingOpcode() const { return mPending ? mPendingBuf[0] : 0; }
 
-	State& state() { return mState; }
+	// Position in the FIFO stream: bytes written so far, and (while a command runs, e.g. inside a listener
+	// call) the offset just past the FIFO command being executed (for a command inside a display list: the
+	// display list call).
+	u64 received() const { return mReceived; }
+	u64 commandEnd() const { return mCmdEnd; }
+
+	// The register state. (Changing it through the non-const accessor is allowed: cached vertex layouts
+	// are recomputed.)
+	State& state()
+	{
+		mLayoutValid = 0;
+		return mState;
+	}
 	const State& state() const { return mState; }
 	Stats& stats() { return mStats; }
 
 	// Vertex layout for a vertex format, from the current CP registers.
 	void layoutFor(u32 vat, VertexLayout& out) const;
+	const VertexLayout& layout(u32 vat)
+	{
+		vat &= 7;
+		if (!(mLayoutValid & (1u << vat))) {
+			layoutFor(vat, mLayouts[vat]);
+			mLayoutValid |= (u8)(1u << vat);
+		}
+		return mLayouts[vat];
+	}
+
+	// Length of the command at p (avail bytes there), or 0 if more bytes are needed to tell.
+	u32 commandLength(const u8* p, u32 avail);
 
 	// Helpers for the platform and listeners.
 	static u32 textureSize(u32 format, u32 width, u32 height, u32 levels);
@@ -222,17 +255,19 @@ public:
 	void textureInfo(u32 map, u32& address, u32& width, u32& height, u32& format, u32& levels) const;
 
 private:
-	// Executes complete commands from data[0..size). Returns the bytes used; stops early (returning
-	// less) if the last command is incomplete and !inDisplayList.
-	u32 run(const u8* data, u32 size, bool inDisplayList);
-	u32 drawCommand(const u8* data, u32 size, bool inDisplayList);
+	// Executes complete commands from data[0..size) (at stream offset `base` when !inDisplayList).
+	// Returns the bytes used; stops early (returning less) if the last command is incomplete and
+	// !inDisplayList.
+	u32 run(const u8* data, u32 size, bool inDisplayList, u64 base);
+	void execute(const u8* p, u32 length, bool inDisplayList);
+	void drawCommand(const u8* data, bool inDisplayList);
 	void loadCp(u32 reg, u32 value);
 	void loadXf(u32 address, u32 count, const u8* values);
 	void loadIndexed(u32 op, u32 word);
 	void loadBp(u32 word);
 	void callDisplayList(u32 address, u32 size);
-	void decodeVertices(const VertexLayout& layout, const u8* data, u32 count);
-	void push(const u8* bytes, u32 n);
+	void decodeVertices(const VertexLayout& layout, const u8* data, u32 count, bool decode);
+	void hold(const u8* bytes, u32 n);
 
 	Memory* mMemory;
 	Listener* mListener;
@@ -245,6 +280,12 @@ private:
 	u8* mPendingBuf;
 	u32 mPending;
 	u32 mPendingCap;
+	u64 mReceived;
+	u64 mCmdEnd;
+
+	// vertex layouts by format, computed when first needed after the CP registers change
+	VertexLayout mLayouts[8];
+	u8 mLayoutValid;
 
 	// decoded vertices of the current draw
 	Vertex* mVerts;

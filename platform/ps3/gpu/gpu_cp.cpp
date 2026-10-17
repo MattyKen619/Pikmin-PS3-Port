@@ -25,11 +25,15 @@ CommandProcessor::CommandProcessor()
     , mPendingBuf(NULL)
     , mPending(0)
     , mPendingCap(0)
+    , mReceived(0)
+    , mCmdEnd(0)
+    , mLayoutValid(0)
     , mVerts(NULL)
     , mVertCap(0)
 {
 	memset(&mState, 0, sizeof(mState));
 	memset(&mStats, 0, sizeof(mStats));
+	memset(mLayouts, 0, sizeof(mLayouts));
 }
 
 CommandProcessor::~CommandProcessor()
@@ -40,15 +44,54 @@ CommandProcessor::~CommandProcessor()
 
 // ---------------------------------------------------------------- FIFO input
 
-void CommandProcessor::push(const u8* bytes, u32 n)
+static inline bool knownOpcode(u8 op)
 {
-	if (mPending == 0) {
-		// Fast path: a whole command in this write (NOPs from GXFlush, for example).
-		if (n == 1 && bytes[0] == OP_NOP) {
-			mStats.commands++;
-			return;
-		}
+	switch (op) {
+	case OP_NOP:
+	case OP_INVAL_VCACHE:
+	case OP_LOAD_CP:
+	case OP_LOAD_XF:
+	case OP_LOAD_INDX_A:
+	case OP_LOAD_INDX_B:
+	case OP_LOAD_INDX_C:
+	case OP_LOAD_INDX_D:
+	case OP_LOAD_BP:
+	case OP_CALL_DL:
+		return true;
+	default:
+		return op >= OP_DRAW_FIRST && op < 0xC0;
 	}
+}
+
+u32 CommandProcessor::commandLength(const u8* p, u32 avail)
+{
+	switch (p[0]) {
+	case OP_NOP:
+	case OP_INVAL_VCACHE:
+		return 1;
+	case OP_LOAD_CP:
+		return 6;
+	case OP_LOAD_XF:
+		return avail < 5 ? 0 : 5 + (((be32(p + 1) >> 16) & 0xF) + 1) * 4;
+	case OP_LOAD_INDX_A:
+	case OP_LOAD_INDX_B:
+	case OP_LOAD_INDX_C:
+	case OP_LOAD_INDX_D:
+	case OP_LOAD_BP:
+		return 5;
+	case OP_CALL_DL:
+		return 9;
+	default:
+		if (p[0] >= OP_DRAW_FIRST && p[0] < 0xC0) {
+			return avail < 3 ? 0 : 3 + be16(p + 1) * layout(p[0] & 7).size;
+		}
+		return 1; // unknown: reported, and skipped a byte at a time
+	}
+}
+
+// Keeps bytes of an incomplete command until the rest arrives.
+void CommandProcessor::hold(const u8* bytes, u32 n)
+{
 	if (mPending + n > mPendingCap) {
 		u32 cap = mPendingCap ? mPendingCap * 2 : 4096;
 		while (cap < mPending + n) {
@@ -56,151 +99,170 @@ void CommandProcessor::push(const u8* bytes, u32 n)
 		}
 		u8* buf = (u8*)realloc(mPendingBuf, cap);
 		if (!buf) {
-			return; // out of memory: drop (counted as a bad command later)
+			mStats.badCommands++; // out of memory: the command is lost
+			mPending = 0;
+			return;
 		}
 		mPendingBuf = buf;
 		mPendingCap = cap;
 	}
 	memcpy(mPendingBuf + mPending, bytes, n);
 	mPending += n;
-
-	// Commands are short except draws; don't re-parse a long draw for every byte that arrives.
-	u8 op = mPendingBuf[0];
-	if (op >= OP_DRAW_FIRST && op < 0xC0 && mPending >= 3) {
-		VertexLayout layout;
-		layoutFor(op & 7, layout);
-		u32 need = 3 + be16(mPendingBuf + 1) * layout.size;
-		if (mPending < need) {
-			return;
-		}
-	}
-	u32 used = run(mPendingBuf, mPending, false);
-	if (used) {
-		memmove(mPendingBuf, mPendingBuf + used, mPending - used);
-		mPending -= used;
-	}
 }
 
 void CommandProcessor::write(const u8* data, u32 size)
 {
-	if (mPending == 0) {
-		// Usual case: whole commands; keep only an incomplete one at the end.
-		u32 used = run(data, size, false);
-		if (used < size) {
-			push(data + used, size - used);
+	const u64 base = mReceived;
+	mReceived += size;
+	u32 pos = 0;
+	if (mPending) {
+		// Complete the command held from the last write with exactly the bytes it still needs.
+		for (;;) {
+			u32 need = commandLength(mPendingBuf, mPending);
+			u32 want = need ? need - mPending : 1; // (header still incomplete: one byte at a time)
+			if (pos >= size) {
+				return;
+			}
+			u32 take = want < size - pos ? want : size - pos;
+			hold(data + pos, take);
+			pos += take;
+			if (!mPending) {
+				break; // (lost: out of memory)
+			}
+			if (need && mPending == need) {
+				u32 n    = mPending;
+				mPending = 0;
+				mCmdEnd  = base + pos;
+				execute(mPendingBuf, n, false);
+				mStats.commands++;
+				break;
+			}
 		}
-		return;
 	}
-	push(data, size);
+	u32 used = run(data + pos, size - pos, false, base + pos);
+	pos += used;
+	if (pos < size) {
+		hold(data + pos, size - pos);
+	}
 }
 
 void CommandProcessor::write8(u32 value)
 {
 	u8 b = (u8)value;
-	push(&b, 1);
+	write(&b, 1);
 }
 
 void CommandProcessor::write16(u32 value)
 {
 	u8 b[2] = { (u8)(value >> 8), (u8)value };
-	push(b, 2);
+	write(b, 2);
 }
 
 void CommandProcessor::write32(u32 value)
 {
 	u8 b[4] = { (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value };
-	push(b, 4);
+	write(b, 4);
 }
 
 // ---------------------------------------------------------------- commands
 
-u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList)
+u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base)
 {
 	u32 pos = 0;
 	while (pos < size) {
 		const u8* p = data + pos;
 		u32 avail   = size - pos;
-		u8 op       = p[0];
-		u32 used    = 0;
-		switch (op) {
-		case OP_NOP:
-		case OP_INVAL_VCACHE:
-			used = 1;
-			break;
-		case OP_LOAD_CP:
-			if (avail >= 6) {
-				loadCp(p[1], be32(p + 2));
-				used = 6;
-			}
-			break;
-		case OP_LOAD_XF:
-			if (avail >= 5) {
-				u32 header = be32(p + 1);
-				u32 count  = ((header >> 16) & 0xF) + 1;
-				if (avail >= 5 + count * 4) {
-					loadXf(header & 0xFFFF, count, p + 5);
-					used = 5 + count * 4;
-				}
-			}
-			break;
-		case OP_LOAD_INDX_A:
-		case OP_LOAD_INDX_B:
-		case OP_LOAD_INDX_C:
-		case OP_LOAD_INDX_D:
-			if (avail >= 5) {
-				loadIndexed(op, be32(p + 1));
-				used = 5;
-			}
-			break;
-		case OP_CALL_DL:
-			if (avail >= 9) {
-				if (inDisplayList) {
-					mStats.nestedDisplayLists++; // not supported by the hardware either
-				} else {
-					callDisplayList(be32(p + 1), be32(p + 5));
-				}
-				used = 9;
-			}
-			break;
-		case OP_LOAD_BP:
-			if (avail >= 5) {
-				loadBp(be32(p + 1));
-				used = 5;
-			}
-			break;
-		default:
-			if (op >= OP_DRAW_FIRST && op < 0xC0) {
-				used = drawCommand(p, avail, inDisplayList);
-			} else {
-				mStats.badCommands++;
-				if (mListener) {
-					mListener->badCommand(op, p, avail, inDisplayList);
-				}
-				used = 1; // skip the byte (the hardware would hang)
-			}
-			break;
+		if (p[0] == OP_NOP) { // (GXFlush pads with 32 of them)
+			mStats.commands++;
+			pos++;
+			continue;
 		}
-		if (used == 0) {
+		if (!knownOpcode(p[0])) {
+			mStats.badCommands++;
+			if (mListener) {
+				mListener->badCommand(p[0], p, avail, inDisplayList);
+			}
+			mStats.commands++;
+			pos++; // skip the byte (the hardware would hang)
+			continue;
+		}
+		u32 len = commandLength(p, avail);
+		if (len == 0 || len > avail) {
 			// Incomplete command.
 			if (inDisplayList) {
 				mStats.badCommands++;
 				if (mListener) {
-					mListener->badCommand(op, p, avail, true);
+					mListener->badCommand(p[0], p, avail, true);
 				}
 				return size;
 			}
 			return pos;
 		}
+		if (!inDisplayList) {
+			mCmdEnd = base + pos + len;
+		}
+		execute(p, len, inDisplayList);
 		mStats.commands++;
-		pos += used;
+		pos += len;
 	}
 	return pos;
+}
+
+void CommandProcessor::execute(const u8* p, u32 length, bool inDisplayList)
+{
+	const u8 op = p[0];
+	switch (op) {
+	case OP_NOP:
+	case OP_INVAL_VCACHE:
+		break;
+	case OP_LOAD_CP:
+		loadCp(p[1], be32(p + 2));
+		break;
+	case OP_LOAD_XF:
+	{
+		u32 header = be32(p + 1);
+		loadXf(header & 0xFFFF, ((header >> 16) & 0xF) + 1, p + 5);
+		break;
+	}
+	case OP_LOAD_INDX_A:
+	case OP_LOAD_INDX_B:
+	case OP_LOAD_INDX_C:
+	case OP_LOAD_INDX_D:
+		loadIndexed(op, be32(p + 1));
+		break;
+	case OP_CALL_DL:
+		if (inDisplayList) {
+			mStats.nestedDisplayLists++; // not supported by the hardware either
+		} else {
+			callDisplayList(be32(p + 1), be32(p + 5));
+		}
+		break;
+	case OP_LOAD_BP:
+		loadBp(be32(p + 1));
+		break;
+	default:
+		if (op >= OP_DRAW_FIRST && op < 0xC0) {
+			drawCommand(p, inDisplayList);
+		} else {
+			mStats.badCommands++;
+			if (mListener) {
+				mListener->badCommand(op, p, length, inDisplayList);
+			}
+		}
+		break;
+	}
 }
 
 void CommandProcessor::loadCp(u32 reg, u32 value)
 {
 	mStats.cpLoads++;
-	mState.cp[reg & 0xFF] = value;
+	reg &= 0xFF;
+	mState.cp[reg] = value;
+	if (reg == 0x50 || reg == 0x60) {
+		mLayoutValid = 0; // vertex descriptor: all formats
+	} else if (reg >= 0x70 && reg < 0xA0 && (reg & 0xF) < 8) {
+		mLayoutValid &= (u8)~(1u << (reg & 7)); // VAT A/B/C of one format
+	}
 }
 
 void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
@@ -325,7 +387,7 @@ void CommandProcessor::callDisplayList(u32 address, u32 size)
 		return;
 	}
 	mDisplayListDepth++;
-	run(list, size, true);
+	run(list, size, true, 0);
 	mDisplayListDepth--;
 }
 
@@ -492,9 +554,9 @@ struct ArraySource {
 
 } // namespace
 
-void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32 count)
+void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32 count, bool decode)
 {
-	if (count > mVertCap) {
+	if (decode && count > mVertCap) {
 		u32 cap = mVertCap ? mVertCap : 256;
 		while (cap < count) {
 			cap *= 2;
@@ -592,6 +654,10 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 				mListener->memoryFailed(base + lo * S.stride, bytes, MEM_ARRAY);
 			}
 		}
+	}
+
+	if (!decode) {
+		return;
 	}
 
 	// Pass 2: decode.
@@ -701,34 +767,29 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 	}
 }
 
-u32 CommandProcessor::drawCommand(const u8* data, u32 size, bool inDisplayList)
+void CommandProcessor::drawCommand(const u8* data, bool inDisplayList)
 {
-	if (size < 3) {
-		return 0;
-	}
-	const u8 op    = data[0];
-	const u32 count = be16(data + 1);
-	VertexLayout L;
-	layoutFor(op & 7, L);
-	const u32 need = 3 + count * L.size;
-	if (size < need) {
-		return 0;
-	}
+	const u8 op           = data[0];
+	const u32 count       = be16(data + 1);
+	const VertexLayout& L = layout(op & 7);
 	mStats.draws++;
 	mStats.vertices += count;
 	mStats.primitives |= 1u << ((op >> 3) & 7);
-	decodeVertices(L, data + 3, count);
-	if (mListener && count <= mVertCap) {
+	const VertexDetail detail = mListener ? mListener->vertexDetail() : VERTICES_NONE;
+	if (detail != VERTICES_NONE) {
+		decodeVertices(L, data + 3, count, detail == VERTICES_DECODED);
+	}
+	if (mListener) {
 		DrawCall call;
 		call.primitive     = op & 0xF8;
 		call.vat           = op & 7;
 		call.count         = (u16)count;
 		call.inDisplayList = inDisplayList;
 		call.layout        = &L;
-		call.vertices      = mVerts;
+		call.vertices      = (detail == VERTICES_DECODED && count <= mVertCap) ? mVerts : NULL;
+		call.data          = data + 3;
 		mListener->draw(call);
 	}
-	return need;
 }
 
 // ---------------------------------------------------------------- textures

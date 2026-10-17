@@ -3,14 +3,16 @@
 // PIKMIN/gx_trace_NN_<section>.bin, for replaying and drawing off the console.
 //
 // File layout (all words big-endian):
-//   "GXTRACE1", u32 version (1), u32 frame, char label[32]
+//   "GXTRACE1", u32 version (2), u32 frame, char label[32]
 //   u32 cp[256], u32 bp[256], u32 xf[0x1100]          register state at the start of the frame
-//   events until the frame is copied to the display (the last FIFO event can continue past the copy;
-//   a replay stops at the first copy to the display):
+//   events:
 //     'FIFO' u32 length, bytes (padded to 4)            command bytes, in the order written
 //     'MEM ' u32 address, u32 size, u32 kind, data     a block of memory the processor read
 //     'MREF' u32 address, u32 size, u32 kind, u32 off  the same block again, unchanged (data at file offset off)
-//     'END '
+//     'END ' u32 fifoBytes                             the frame is the first fifoBytes FIFO bytes (the
+//                                                      last FIFO event can go on past the frame's copy)
+// Version 1 (test builds 17-18) started at a batch boundary and had no fifoBytes: a replay stops at the
+// first copy to the display.
 
 #include "../sdk/sdk_internal.h"
 
@@ -41,6 +43,7 @@ static u32 sTraces;
 static u32 sTraceBytes;
 static u32 sTraceFrame;
 static char sTraceLabel[32];
+static gpu::u64 sRecordStart; // FIFO stream offset where the recorded frame starts
 static volatile int sWriterBusy;
 static bool sWriterStarted;
 static u32 sWriteLen;
@@ -50,14 +53,13 @@ struct Pending {
 	char label[32];
 	u32 frame;
 };
+// Scheduled recordings: the game's thread adds them, the graphics thread starts them.
 static Pending sPending[MAX_PENDING];
 static int sPendingCount;
 static char sUsed[16][32];
 static int sUsedCount;
-static u32 sCurrentFrame;
-static Pending sStartPending;
-static u32 sStartFrame;
-static bool sStartIsDue;
+static volatile u32 sCurrentFrame;
+static volatile int sScheduleLock;
 
 // Dedup: last recorded copy of each (address, size, kind)
 static u32 sDedupKey[DEDUP_SLOTS][3];
@@ -106,10 +108,11 @@ static void closeFifo()
 	sFifoLenAt = 0;
 }
 
-static void stopRecording()
+static void stopRecording(gpu::u64 fifoBytes)
 {
 	closeFifo();
 	put32(0x454E4420); // 'END '
+	put32((u32)fifoBytes);
 	sRecording = false;
 }
 
@@ -127,7 +130,7 @@ void traceFifo(const u8* bytes, u32 n)
 	}
 	putBytes(bytes, n);
 	if (sTruncated) {
-		stopRecording();
+		stopRecording(0xFFFFFFFF);
 	}
 }
 
@@ -161,7 +164,7 @@ void traceMemory(u32 address, u32 size, gpu::MemKind kind, const u8* data)
 	putBytes(data, size);
 	pad4();
 	if (sTruncated) {
-		stopRecording();
+		stopRecording(0xFFFFFFFF);
 		return;
 	}
 	for (int probe = 0; probe < 8; probe++) {
@@ -229,10 +232,17 @@ static void handOff()
 
 // ---------------------------------------------------------------- frame boundaries
 
+static void dropPending()
+{
+	ps3gx::spinLock(&sScheduleLock);
+	sPendingCount = 0;
+	ps3gx::spinUnlock(&sScheduleLock);
+}
+
 static void startRecording(const char* label, u32 frame, const gpu::CommandProcessor& cp)
 {
 	if (!ps3b_data_root()) {
-		sPendingCount = 0; // no USB drive to write to
+		dropPending(); // no USB drive to write to
 		return;
 	}
 	if (!sBuf) {
@@ -242,7 +252,7 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 		}
 		if (!sBuf) {
 			ps3Log("[gpu] no memory to record a frame\n");
-			sPendingCount = 0;
+			dropPending();
 			return;
 		}
 		sBufSize = size;
@@ -255,7 +265,7 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 	sTraceFrame = frame;
 
 	putBytes((const u8*)"GXTRACE1", 8);
-	put32(1);
+	put32(2);
 	put32(frame);
 	char name[32];
 	memset(name, 0, sizeof(name));
@@ -271,62 +281,72 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 	for (u32 i = 0; i < 0x1100; i++) {
 		put32(S.xf[i]);
 	}
-	sRecording = true;
+	sRecording   = true;
+	sRecordStart = cp.commandEnd();
 	sTraces++;
+
+	// The frame starts just after the copy that ended the last one, in the middle of the batch of FIFO
+	// bytes being interpreted: record the rest of that batch now, before the processor goes on (the
+	// memory blocks it reads come after their FIFO bytes in the file).
+	const u8* batch;
+	u32 batchLen;
+	gpu::u64 base;
+	if (ps3gx::currentBatch(&batch, &batchLen, &base) && sRecordStart >= base && sRecordStart <= base + batchLen) {
+		u32 skip = (u32)(sRecordStart - base);
+		if (skip < batchLen) {
+			traceFifo(batch + skip, batchLen - skip);
+		}
+	}
 }
 
 void traceFrameEnd(u32 frame, const gpu::CommandProcessor& cp)
 {
 	sCurrentFrame = frame;
 	if (sRecording) {
-		stopRecording();
+		stopRecording(cp.commandEnd() - sRecordStart);
 		handOff();
 		return;
 	}
-	if (sPendingCount == 0 || sWriterBusy || sStartIsDue || sTraces >= MAX_TRACES) {
+	if (sPendingCount == 0 || sWriterBusy || sTraces >= MAX_TRACES) {
 		return;
 	}
-	// The earliest pending recording that is due.
+	// The earliest pending recording that is due: it records the next frame, from here.
+	Pending due;
+	bool found = false;
+	ps3gx::spinLock(&sScheduleLock);
 	int best = -1;
 	for (int i = 0; i < sPendingCount; i++) {
 		if (sPending[i].frame <= frame && (best < 0 || sPending[i].frame < sPending[best].frame)) {
 			best = i;
 		}
 	}
-	if (best < 0) {
-		return;
+	if (best >= 0) {
+		due            = sPending[best];
+		sPending[best] = sPending[--sPendingCount];
+		found          = true;
 	}
-	// Commands are interpreted in batches (gx_fifo.cpp), and this frame ended in the middle of one: the
-	// recording starts with the next batch, from the state at that point.
-	sStartPending  = sPending[best];
-	sStartFrame    = frame + 1;
-	sStartIsDue    = true;
-	sPending[best] = sPending[--sPendingCount];
-	(void)cp;
-}
-
-void traceAtFlush(const gpu::CommandProcessor& cp)
-{
-	if (sStartIsDue && !sRecording && cp.idle()) { // (not with half a command left over from the last batch)
-		sStartIsDue = false;
-		startRecording(sStartPending.label, sStartFrame, cp);
+	ps3gx::spinUnlock(&sScheduleLock);
+	if (found) {
+		startRecording(due.label, frame + 1, cp);
 	}
 }
 
 void traceSchedule(const char* label, u32 delay)
 {
+	ps3gx::spinLock(&sScheduleLock);
+	bool used = false;
 	for (int i = 0; i < sUsedCount; i++) {
 		if (strcmp(sUsed[i], label) == 0) {
-			return;
+			used = true;
 		}
 	}
-	if (sUsedCount >= 16 || sPendingCount >= MAX_PENDING) {
-		return;
+	if (!used && sUsedCount < 16 && sPendingCount < MAX_PENDING) {
+		snprintf(sUsed[sUsedCount++], 32, "%s", label);
+		Pending& p = sPending[sPendingCount++];
+		snprintf(p.label, sizeof(p.label), "%s", label);
+		p.frame = sCurrentFrame + delay;
 	}
-	snprintf(sUsed[sUsedCount++], 32, "%s", label);
-	Pending& p = sPending[sPendingCount++];
-	snprintf(p.label, sizeof(p.label), "%s", label);
-	p.frame = sCurrentFrame + delay;
+	ps3gx::spinUnlock(&sScheduleLock);
 }
 
 void traceStatus(char* buf, unsigned int size)

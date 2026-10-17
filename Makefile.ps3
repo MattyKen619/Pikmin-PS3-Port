@@ -48,7 +48,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 18
+TEST_BUILD := 19
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -97,10 +97,12 @@ $(call objs_of,$(JAUDIO_C)): $(OBJDIR)/%.o: %
 
 # Nintendo's GX library: C compiled as C++ (its write-gather pipe, GXWGFifo, is a C++ object on the PS3).
 # -fpermissive: the C code converts between ints and enums, and casts pointers to u32 (addresses fit).
+# Not instrumented: the game calls it constantly, and it has no loops that wait for another thread
+# without calling an SDK function (GXWaitDrawDone sleeps in OSSleepThread).
 $(call objs_of,$(GXSDK_C)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
-	@$(CXX) $(GAME_CXXFLAGS) -fpermissive -x c++ -c $< -o $@
+	@$(CXX) $(PLATFORM_CXXFLAGS) -g1 -fpermissive -x c++ -c $< -o $@
 
 # C libraries (mtx, hvqm4dec, MSL float constants)
 $(call objs_of,$(LIBS_C)): $(OBJDIR)/%.o: %

@@ -17,8 +17,12 @@ GPU_SRC  := $(wildcard $(ROOT)/platform/ps3/gpu/*.cpp)
 OBJS     := $(patsubst $(ROOT)/%,$(BUILD)/%.o,$(GX_SRC) $(GPU_SRC)) $(BUILD)/host_os.o $(BUILD)/gx_selftest.o
 
 all: $(BUILD)/gx_selftest $(BUILD)/gx_replay
-	$(BUILD)/gx_selftest
+	rm -rf $(BUILD)/traces && mkdir -p $(BUILD)/traces
+	GX_TRACE_DIR=$(BUILD)/traces $(BUILD)/gx_selftest
+	rm -rf $(BUILD)/traces && mkdir -p $(BUILD)/traces
+	GX_TRACE_DIR=$(BUILD)/traces $(BUILD)/gx_selftest sync
 	$(BUILD)/gx_selftest loadscreen
+	$(BUILD)/gx_selftest loadscreen sync
 
 # Replays frame traces recorded on the PS3 (needs only the command processor)
 $(BUILD)/gx_replay: gx_replay.cpp gx_trace_file.h $(ROOT)/platform/ps3/gpu/gpu_cp.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.h

@@ -22,7 +22,9 @@ struct TraceFile {
 	gpu::u32 frame;
 	char label[33];
 	gpu::State state;
+	gpu::u32 version;
 	gpu::u32 fifoBytes, memEvents, memBytes;
+	gpu::u32 fifoLimit; // FIFO bytes that make up the frame (version 2); 0xFFFFFFFF: up to the first copy
 
 	static gpu::u32 be32(const gpu::u8* p) { return ((gpu::u32)p[0] << 24) | ((gpu::u32)p[1] << 16) | ((gpu::u32)p[2] << 8) | p[3]; }
 
@@ -48,7 +50,9 @@ struct TraceFile {
 			fprintf(stderr, "%s: not a frame trace\n", path);
 			return false;
 		}
-		frame = be32(p + 12);
+		version   = be32(p + 8);
+		frame     = be32(p + 12);
+		fifoLimit = 0xFFFFFFFF;
 		memcpy(label, p + 16, 32);
 		label[32] = 0;
 		p += 48;
@@ -70,6 +74,9 @@ struct TraceFile {
 			gpu::u32 tag = be32(p);
 			p += 4;
 			if (tag == 0x454E4420) { // 'END '
+				if (version >= 2 && end - p >= 4) {
+					fifoLimit = be32(p);
+				}
 				break;
 			}
 			TraceEvent e;
@@ -141,7 +148,8 @@ struct TraceMemory : gpu::Memory {
 // Runs the trace through a command processor.
 inline void replayTrace(const TraceFile& trace, gpu::CommandProcessor& cp, TraceMemory& mem)
 {
-	cp.state() = trace.state;
+	cp.state()   = trace.state;
+	gpu::u32 fed = 0;
 	for (size_t i = 0; i < trace.events.size(); i++) {
 		const TraceEvent& e = trace.events[i];
 		if (e.type != TraceEvent::FIFO) {
@@ -150,8 +158,17 @@ inline void replayTrace(const TraceFile& trace, gpu::CommandProcessor& cp, Trace
 		if (mem.cursor < i) {
 			mem.cursor = i; // the reads this chunk triggers were recorded after it
 		}
-		for (gpu::u32 k = 0; k < e.size; k++) {
-			cp.write8(e.data[k]);
+		gpu::u32 n = e.size;
+		if (n > trace.fifoLimit - fed) {
+			n = trace.fifoLimit - fed;
+		}
+		// (in pieces, as the console interprets them)
+		for (gpu::u32 k = 0; k < n; k += 16384) {
+			cp.write(e.data + k, n - k < 16384 ? n - k : 16384);
+		}
+		fed += n;
+		if (fed >= trace.fifoLimit) {
+			break;
 		}
 	}
 }

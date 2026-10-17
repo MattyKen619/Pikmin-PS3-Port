@@ -11,22 +11,33 @@ namespace ps3gx {
 gpu::CommandProcessor& commandProcessor();
 // Draws and copies are passed on to this listener (the renderer; host tests).
 void setRenderer(gpu::Listener* renderer);
+// Waits until the graphics thread has interpreted everything written so far (host tests).
+void finish();
+// Interpret commands on the writing thread, as they are flushed (host tests; call before GXInit).
+void forceSynchronous();
+// While the processor interprets a batch of FIFO bytes (data[0..size), starting at stream offset
+// `base`): that batch. False between batches.
+bool currentBatch(const gpu::u8** data, gpu::u32* size, gpu::u64* base);
+
+// A lock for data the game thread and the graphics thread share (short critical sections only).
+void spinLock(volatile int* lock);
+void spinUnlock(volatile int* lock);
 
 // ---- frame traces (gx_trace.cpp)
 //
 // A trace is one frame of graphics commands: the command processor's register state at the start of
-// the frame, then everything it consumed until the frame was copied to the display: FIFO bytes, and
-// every block of memory it read (display lists, vertex arrays, textures), in order. Replaying it
-// through the same command processor reproduces the frame exactly, off the console.
+// the frame (just after the previous frame's copy to the display), then everything it consumed until the
+// frame was copied to the display: FIFO bytes, and every block of memory it read (display lists, vertex
+// arrays, textures), in order. Replaying it through the same command processor reproduces the frame
+// exactly, off the console.
 
 bool traceRecording();
 void traceFifo(const gpu::u8* bytes, gpu::u32 n);
 void traceMemory(gpu::u32 address, gpu::u32 size, gpu::MemKind kind, const gpu::u8* data);
-// Called at every copy to the display (the end of a frame). Ends recordings, and arms the next one,
-// which starts at the next batch of commands (traceAtFlush, before the batch is interpreted).
+// Called at every copy to the display (the end of a frame), from inside the processor (so
+// cp.commandEnd() is just past the copy). Ends a recording, or starts one that is due.
 void traceFrameEnd(gpu::u32 frame, const gpu::CommandProcessor& cp);
-void traceAtFlush(const gpu::CommandProcessor& cp);
-// Records a frame `delay` frames from now (once per label).
+// Records a frame `delay` frames from now (once per label). Called by the game's thread.
 void traceSchedule(const char* label, gpu::u32 delay);
 void traceStatus(char* buf, unsigned int size);
 

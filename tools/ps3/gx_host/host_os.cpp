@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 extern "C" {
@@ -43,19 +44,38 @@ u8* hostArena()
 void* OSGetArenaLo(void) { return hostArena(); }
 void* OSGetArenaHi(void) { return hostArena() + kArenaSize; }
 
-// ---- interrupts
+// ---- interrupts (raised by the graphics thread or the test's own thread, delivered on the test's thread)
 static __OSInterruptHandler sHandlers[32];
 static int sPending[64];
 static int sPendingCount;
 static BOOL sEnabled = TRUE;
 static OSContext sContext;
+static pthread_mutex_t sIntLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sIntCond  = PTHREAD_COND_INITIALIZER;
+static pthread_t sMainThread;
+static bool sMainKnown;
+
+static bool onMainThread()
+{
+	if (!sMainKnown) {
+		sMainThread = pthread_self();
+		sMainKnown  = true;
+	}
+	return pthread_equal(pthread_self(), sMainThread);
+}
 
 static void deliver()
 {
-	while (sPendingCount > 0) {
+	for (;;) {
+		pthread_mutex_lock(&sIntLock);
+		if (sPendingCount == 0) {
+			pthread_mutex_unlock(&sIntLock);
+			return;
+		}
 		int n = sPending[0];
 		memmove(sPending, sPending + 1, (sPendingCount - 1) * sizeof(int));
 		sPendingCount--;
+		pthread_mutex_unlock(&sIntLock);
 		if (sHandlers[n]) {
 			sHandlers[n]((__OSInterrupt)n, &sContext);
 		}
@@ -64,16 +84,20 @@ static void deliver()
 
 void ps3RaiseInterrupt(int interrupt)
 {
+	pthread_mutex_lock(&sIntLock);
 	if (sPendingCount < 64) {
 		sPending[sPendingCount++] = interrupt;
 	}
-	if (sEnabled) {
+	pthread_cond_broadcast(&sIntCond);
+	pthread_mutex_unlock(&sIntLock);
+	if (sEnabled && onMainThread()) {
 		deliver();
 	}
 }
 
 BOOL OSDisableInterrupts(void)
 {
+	onMainThread();
 	BOOL old = sEnabled;
 	sEnabled = FALSE;
 	return old;
@@ -108,10 +132,20 @@ void OSInitThreadQueue(OSThreadQueue* queue) { queue->head = queue->tail = NULL;
 void OSSleepThread(OSThreadQueue* queue)
 {
 	(void)queue;
-	// Another thread (or the idle loop) would run the pending interrupts meanwhile.
+	// Another thread (or the idle loop) would run the pending interrupts meanwhile: wait for one.
+	pthread_mutex_lock(&sIntLock);
+	if (sPendingCount == 0) {
+		struct timespec t;
+		clock_gettime(CLOCK_REALTIME, &t);
+		t.tv_sec += 2;
+		pthread_cond_timedwait(&sIntCond, &sIntLock, &t);
+	}
+	bool woken = sPendingCount > 0;
+	pthread_mutex_unlock(&sIntLock);
 	deliver();
-	if (++sSleeps > 1000) {
-		fprintf(stderr, "FAILED: OSSleepThread: nothing wakes the thread\n");
+	sSleeps++;
+	if (!woken) {
+		fprintf(stderr, "FAILED: OSSleepThread: nothing woke the thread for 2 seconds\n");
 		exit(1);
 	}
 }
@@ -168,6 +202,39 @@ void ps3LogOnce(int* flag, const char* fmt, ...)
 
 void ps3NoteActivity(const char* what) { (void)what; }
 
+// mutexes and condition variables (handles index these tables)
+static pthread_mutex_t sMutexes[16];
+static pthread_cond_t sConds[16];
+static unsigned sMutexCount, sCondCount;
+int ps3b_mutex_create(unsigned int* out)
+{
+	pthread_mutex_init(&sMutexes[sMutexCount], NULL);
+	*out = sMutexCount++;
+	return 0;
+}
+void ps3b_mutex_lock(unsigned int m) { pthread_mutex_lock(&sMutexes[m]); }
+void ps3b_mutex_unlock(unsigned int m) { pthread_mutex_unlock(&sMutexes[m]); }
+static unsigned sCondMutex[16];
+int ps3b_cond_create(unsigned int* out, unsigned int mutex)
+{
+	pthread_cond_init(&sConds[sCondCount], NULL);
+	sCondMutex[sCondCount] = mutex;
+	*out                   = sCondCount++;
+	return 0;
+}
+int ps3b_cond_wait(unsigned int c, unsigned int timeout_usec)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_REALTIME, &t);
+	t.tv_nsec += (long)(timeout_usec % 1000000) * 1000;
+	t.tv_sec += timeout_usec / 1000000 + t.tv_nsec / 1000000000;
+	t.tv_nsec %= 1000000000;
+	return pthread_cond_timedwait(&sConds[c], &sMutexes[sCondMutex[c]], &t) == 0 ? 0 : 1;
+}
+void ps3b_cond_signal(unsigned int c) { pthread_cond_signal(&sConds[c]); }
+void ps3b_cond_broadcast(unsigned int c) { pthread_cond_broadcast(&sConds[c]); }
+int ps3b_file_exists(const char* path) { return access(path, F_OK) == 0; }
+
 const char* ps3b_data_root(void) { return getenv("GX_TRACE_DIR"); }
 void* ps3b_memalign(unsigned int align, unsigned int size)
 {
@@ -206,7 +273,8 @@ void ps3b_file_close(int fd) { close(fd); }
 
 extern "C" unsigned long long ps3b_timebase(void)
 {
-	static unsigned long long t;
-	return t += 10;
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (unsigned long long)t.tv_sec * 79800000ULL + (unsigned long long)t.tv_nsec * 798 / 10000;
 }
 extern "C" unsigned long long ps3b_timebase_freq(void) { return 79800000ULL; }

@@ -5,6 +5,7 @@
 #include "types.h"
 
 #include "../../../platform/ps3/gpu/gx_internal.h"
+#include "gx_trace_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,6 +83,7 @@ static void quadDirect()
 	GXColor4u8(255, 255, 255, 128);
 	GXEnd();
 	GXFlush(); // the port interprets commands in batches
+	ps3gx::finish(); // (on the graphics thread)
 }
 
 // The game's first loading-screen frame (System::Initialise -> startLoading -> loadFunc), call for call:
@@ -188,7 +190,9 @@ static int loadingScreen()
 	GXEnd();
 	// DGXGraphics::doneRender
 	GXFlush();
+	ps3gx::finish();
 	GXDrawDone();
+	ps3gx::finish();
 
 	const gpu::Stats& st = cp.stats();
 	printf("loading screen: %llu commands, %llu draws, %llu draw dones, %llu bad commands, processor %s\n",
@@ -204,7 +208,15 @@ static int loadingScreen()
 
 int main(int argc, char** argv)
 {
-	if (argc > 1 && strcmp(argv[1], "loadscreen") == 0) {
+	bool loadscreen = false;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "sync") == 0) {
+			ps3gx::forceSynchronous(); // interpret on this thread (otherwise: on the graphics thread)
+		} else if (strcmp(argv[i], "loadscreen") == 0) {
+			loadscreen = true;
+		}
+	}
+	if (loadscreen) {
 		return loadingScreen();
 	}
 	static Recorder rec; // zero-initialized (and keeps its vtable)
@@ -245,6 +257,7 @@ int main(int argc, char** argv)
 	GXWGFifo.u16 = 1;
 	GXEnd();
 	GXFlush();
+	ps3gx::finish();
 	CHECK(rec.n == 2);
 	if (rec.n >= 2) {
 		CHECK(rec.draws[1].prim == gpu::PRIM_TRIANGLES && rec.draws[1].vat == 1);
@@ -262,6 +275,7 @@ int main(int argc, char** argv)
 	CHECK(dlSize > 0 && (dlSize & 31) == 0);
 	GXCallDisplayList(dl, dlSize);
 	GXFlush();
+	ps3gx::finish();
 	CHECK(rec.n == 3);
 	if (rec.n >= 3) {
 		CHECK(rec.draws[2].inDl && rec.draws[2].count == 4 && near(rec.draws[2].v[1].pos[0], 1.0f));
@@ -275,6 +289,7 @@ int main(int argc, char** argv)
 	m[2][2] = 3.0f;
 	GXLoadPosMtxImm(m, GX_PNMTX1);
 	GXFlush();
+	ps3gx::finish();
 	{
 		union {
 			u32 u;
@@ -294,6 +309,7 @@ int main(int argc, char** argv)
 	proj[3][2] = -1.0f;
 	GXSetProjection(proj, GX_PERSPECTIVE);
 	GXFlush();
+	ps3gx::finish();
 	CHECK(cp.state().xf[0x1026] == 0); // projection type: perspective
 
 	// 5. a texture used by TEV stage 0
@@ -319,6 +335,7 @@ int main(int argc, char** argv)
 	GXTexCoord2u16(512, 0);
 	GXEnd();
 	GXFlush();
+	ps3gx::finish();
 	CHECK(rec.n == 4);
 	if (rec.n >= 4) {
 		CHECK(rec.draws[3].prim == gpu::PRIM_TRI_STRIP);
@@ -338,10 +355,13 @@ int main(int argc, char** argv)
 	GXSetDispCopyDst(640, 480);
 	GXCopyDisp(xfb, GX_TRUE);
 	GXFlush();
+	ps3gx::finish();
 	CHECK(rec.xfbCopies == 1);
 	CHECK(ps3FramesDrawn() == 1);
 	GXDrawDone();
+	ps3gx::finish();
 	GXSetDrawSync(0x1234);
+	ps3gx::finish();
 	CHECK(GXReadDrawSync() == 0x1234);
 
 	// 7. frame traces (with GX_TRACE_DIR set): schedule one, draw frames until it is written
@@ -371,6 +391,7 @@ int main(int argc, char** argv)
 			GXEnd();
 			GXCopyDisp(xfb, GX_TRUE);
 			GXDrawDone();
+			ps3gx::finish();
 		}
 		for (int i = 0; i < 100 && !ps3gx::traceRecording(); i++) {
 			char st[96];
@@ -380,6 +401,31 @@ int main(int argc, char** argv)
 			}
 		}
 		usleep(300 * 1000); // the writer thread
+
+		// The recording holds exactly one whole frame: replayed, it has the frame's four draws and its
+		// copy to the display, and nothing else.
+		char path[512];
+		snprintf(path, sizeof(path), "%s/gx_trace_01_nintendo_logo.bin", getenv("GX_TRACE_DIR"));
+		TraceFile trace;
+		CHECK(trace.load(path));
+		CHECK(trace.version == 2);
+		struct Count : gpu::Listener {
+			int draws, copies;
+			void draw(const gpu::DrawCall& c) override { draws++; (void)c; }
+			void copy(const gpu::CopyInfo& c) override { copies += c.toXfb; }
+		} count;
+		count.draws = count.copies = 0;
+		gpu::CommandProcessor replay;
+		TraceMemory mem(trace);
+		replay.setMemory(&mem);
+		replay.setListener(&count);
+		replayTrace(trace, replay, mem);
+		printf("trace: frame %u, %u FIFO bytes (frame: %u), %u memory blocks; replay: %d draws, %d copies, %llu memory failures\n",
+		       trace.frame, trace.fifoBytes, trace.fifoLimit, trace.memEvents, count.draws, count.copies,
+		       (unsigned long long)replay.stats().memoryFailures);
+		CHECK(count.draws == 4 && count.copies == 1);
+		CHECK(replay.stats().memoryFailures == 0 && replay.stats().badCommands == 0);
+		CHECK(replay.idle());
 	}
 
 	const gpu::Stats& st = cp.stats();
