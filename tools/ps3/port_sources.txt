@@ -454,3 +454,4 @@ gxsdk src/gx/GXStubs.c
 gxsdk src/gx/GXDisplayList.c
 gxsdk src/gx/GXTransform.c
 libs src/MSL_C/PPCEABI/bare/H/float.c
+libs src/MSL_C/PPCEABI/bare/H/rand.c

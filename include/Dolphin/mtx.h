@@ -31,7 +31,7 @@ typedef struct Quaternion {
 
 /////////////// MATRIX FUNCTION ALIAS MACROS //////////////////////////////////////////////////////////////////////////////////////////////
 
-#if DEBUG
+#if DEBUG || defined(TARGET_PS3) // (PS3: the paired-singles versions are GameCube assembly)
 
 #define MTXIdentity         C_MTXIdentity
 #define MTXCopy             C_MTXCopy

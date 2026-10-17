@@ -77,6 +77,8 @@ static u32 sPageKey[PAGE_SLOTS]; // (kind group << 20 | address >> 12) + 1; 0 = 
 static u32 sPageData[PAGE_SLOTS]; // offset of the bytes in sBuf
 static u16 sPageLo[PAGE_SLOTS];   // the recorded part of the page: [lo, lo + len)
 static u16 sPageLen[PAGE_SLOTS];  // (len 0 means 4096)
+static u32 sPageChecked[PAGE_SLOTS]; // batch in which the page was last found unchanged (or recorded)
+static u32 sBatchSerial;          // FIFO batches interpreted while recording
 static u32 sPageCount;
 static u32 sPagesRecorded;
 
@@ -233,6 +235,7 @@ void traceBatchDone()
 	u32 batchLen;
 	u64 base;
 	if (sRecording && ps3gx::currentBatch(&batch, &batchLen, &base)) {
+		sBatchSerial++;
 		recordFifoTo(base + batchLen);
 		if (sTruncated) {
 			finishRecording();
@@ -271,9 +274,17 @@ void traceMemory(u32 address, u32 size, gpu::MemKind kind, const u8* data, const
 		if (sPageKey[slot]) {
 			u32 rlo = sPageLo[slot];
 			u32 rhi = rlo + (sPageLen[slot] ? sPageLen[slot] : PAGE_SIZE);
-			if (rlo <= useLo && useHi <= rhi
-			    && memcmp(sBuf + sPageData[slot] + (useLo - rlo), realPage + useLo, useHi - useLo) == 0) {
-				continue; // unchanged since recorded
+			if (rlo <= useLo && useHi <= rhi) {
+				// Compared at most once per batch of commands: a gameplay frame reads the same model
+				// and texture pages thousands of times (test 20: comparing every read froze the game
+				// for about 20 seconds per recorded frame).
+				if (sPageChecked[slot] == sBatchSerial) {
+					continue;
+				}
+				if (memcmp(sBuf + sPageData[slot] + (useLo - rlo), realPage + useLo, useHi - useLo) == 0) {
+					sPageChecked[slot] = sBatchSerial;
+					continue; // unchanged since recorded
+				}
 			}
 		} else if (sPageCount >= PAGE_SLOTS * 3 / 4) {
 			continue; // (table full: the read is not recorded; a replay reports it)
@@ -305,8 +316,9 @@ void traceMemory(u32 address, u32 size, gpu::MemKind kind, const u8* data, const
 			sPageKey[slot] = key;
 			sPageCount++;
 		}
-		sPageData[slot] = at;
-		sPageLo[slot]   = (u16)lo;
+		sPageData[slot]    = at;
+		sPageChecked[slot] = sBatchSerial;
+		sPageLo[slot]      = (u16)lo;
 		sPageLen[slot]  = (u16)((hi - lo) & 0xFFFF);
 		sPagesRecorded++;
 	}
@@ -344,6 +356,7 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 	sFifoLenAt = 0;
 	memset(sPageKey, 0, sizeof(sPageKey));
 	sPageCount = 0;
+	sBatchSerial++;
 	snprintf(sTraceLabel, sizeof(sTraceLabel), "%s", label);
 	sTraceFrame = frame;
 

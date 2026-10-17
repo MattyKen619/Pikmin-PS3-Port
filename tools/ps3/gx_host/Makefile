@@ -16,7 +16,7 @@ GX_SRC   := $(filter-out $(ROOT)/src/gx/GXPerf.c,$(wildcard $(ROOT)/src/gx/*.c))
 GPU_SRC  := $(wildcard $(ROOT)/platform/ps3/gpu/*.cpp)
 OBJS     := $(patsubst $(ROOT)/%,$(BUILD)/%.o,$(GX_SRC) $(GPU_SRC)) $(BUILD)/host_os.o $(BUILD)/gx_selftest.o
 
-all: $(BUILD)/gx_selftest $(BUILD)/gx_replay
+all: $(BUILD)/gx_selftest $(BUILD)/gx_replay $(BUILD)/gx_render
 	rm -rf $(BUILD)/traces && mkdir -p $(BUILD)/traces
 	GX_TRACE_DIR=$(BUILD)/traces $(BUILD)/gx_selftest
 	rm -rf $(BUILD)/traces && mkdir -p $(BUILD)/traces
@@ -28,6 +28,11 @@ all: $(BUILD)/gx_selftest $(BUILD)/gx_replay
 $(BUILD)/gx_replay: gx_replay.cpp gx_trace_file.h $(ROOT)/platform/ps3/gpu/gpu_cp.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.h
 	@mkdir -p $(BUILD)
 	g++ -std=gnu++14 -O2 -g -Wall -o $@ gx_replay.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.cpp
+
+# Draws frame traces with the software renderer (sw_render.cpp): gx_render TRACE OUT.png
+$(BUILD)/gx_render: gx_render.cpp sw_render.cpp sw_render.h gx_trace_file.h $(ROOT)/platform/ps3/gpu/gpu_cp.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.h
+	@mkdir -p $(BUILD)
+	g++ -std=gnu++14 -O2 -g -Wall -o $@ gx_render.cpp sw_render.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.cpp -lz
 
 $(BUILD)/gx_selftest: $(OBJS)
 	g++ -o $@ $(OBJS) -lpthread

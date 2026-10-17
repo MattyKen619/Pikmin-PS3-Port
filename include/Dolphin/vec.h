@@ -25,7 +25,7 @@ typedef struct SVec {
 
 /////////////// VECTOR FUNCTION ALIAS MACROS //////////////////////////////////////////////////////////////////////////////////////////////
 
-#if DEBUG
+#if DEBUG || defined(TARGET_PS3) // (PS3: the paired-singles versions are GameCube assembly)
 
 #define VECAdd            C_VECAdd
 #define VECSubtract       C_VECSubtract

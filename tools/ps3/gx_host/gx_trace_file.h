@@ -145,12 +145,14 @@ struct TraceMemory : gpu::Memory {
 	size_t cursor;
 	gpu::u8* image[3];
 	std::vector<gpu::u8> present[3]; // one bit per 4 KB page
+	void (*onPage)(int group, gpu::u32 address, gpu::u32 size); // a page was copied into an image
 	static gpu::u32 spaceBits(int g) { return g == 0 ? 32 : g == 1 ? 30 : 26; }
 	static int group(gpu::u32 kind) { return kind == gpu::MEM_DISPLAY_LIST ? 0 : kind == gpu::MEM_ARRAY ? 1 : 2; }
 
 	explicit TraceMemory(const TraceFile& t)
 	    : trace(t)
 	    , cursor(0)
+	    , onPage(NULL)
 	{
 		for (int g = 0; g < 3; g++) {
 			image[g] = NULL;
@@ -185,6 +187,9 @@ struct TraceMemory : gpu::Memory {
 			return;
 		}
 		memcpy(image[g] + a, e.data, e.size);
+		if (onPage) {
+			onPage(g, (gpu::u32)a, e.size);
+		}
 		for (gpu::u64 page = a >> 12; page <= (a + e.size - 1) >> 12 && e.size; page++) {
 			present[g][page >> 3] |= (gpu::u8)(1 << (page & 7));
 		}

@@ -19,10 +19,13 @@ from symbolize_log import read_elf, demangle  # noqa: E402
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    argv = sys.argv[1:]
     top = 25
-    if "--top" in sys.argv:
-        top = int(sys.argv[sys.argv.index("--top") + 1])
+    if "--top" in argv:
+        i = argv.index("--top")
+        top = int(argv[i + 1])
+        del argv[i:i + 2]
+    args = argv
     if len(args) != 2:
         sys.exit(__doc__)
     elf, log = args

@@ -18,5 +18,7 @@ for u in json.loads((ROOT / "objdiff.json").read_text())["units"]:
     if src and group_of(src):
         rows.append(f"{group_of(src)} {src}")
 rows.append("libs src/MSL_C/PPCEABI/bare/H/float.c")  # MSL float constants (__float_nan etc.)
+# MSL's rand(): the game divides by its RAND_MAX (0x7fff); newlib's rand() goes up to 0x7fffffff.
+rows.append("libs src/MSL_C/PPCEABI/bare/H/rand.c")
 (ROOT / "tools/ps3/port_sources.txt").write_text("\n".join(rows) + "\n")
 print(f"{len(rows)} sources -> tools/ps3/port_sources.txt")
