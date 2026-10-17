@@ -60,6 +60,7 @@ extern "C" void ps3PlatformInit(void)
 
 	ps3BootStage("scheduler");
 	ps3SchedInit();
+	ps3ProfilerStart();
 
 	ps3BootStage("looking for the game data");
 	const char* root = ps3b_data_root();

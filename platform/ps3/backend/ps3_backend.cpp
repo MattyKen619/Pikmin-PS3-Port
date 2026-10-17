@@ -50,8 +50,17 @@ extern "C" int ps3b_exit_requested(void)
 	return sExitRequested;
 }
 
+static void (*volatile sExitHook)(void);
+
+extern "C" void ps3b_set_exit_hook(void (*hook)(void)) { sExitHook = hook; }
+
 extern "C" void ps3b_exit(int code)
 {
+	void (*hook)(void) = sExitHook;
+	sExitHook          = 0;
+	if (hook) {
+		hook();
+	}
 	ps3b_log_write("[ps3] exiting to XMB\n");
 	ps3b_log_flush();
 	ps3b_audio_shutdown();

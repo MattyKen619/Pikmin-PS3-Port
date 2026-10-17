@@ -3,16 +3,21 @@
 // PIKMIN/gx_trace_NN_<section>.bin, for replaying and drawing off the console.
 //
 // File layout (all words big-endian):
-//   "GXTRACE1", u32 version (2), u32 frame, char label[32]
+//   "GXTRACE1", u32 version (3), u32 frame, char label[32]
 //   u32 cp[256], u32 bp[256], u32 xf[0x1100]          register state at the start of the frame
-//   events:
-//     'FIFO' u32 length, bytes (padded to 4)            command bytes, in the order written
-//     'MEM ' u32 address, u32 size, u32 kind, data     a block of memory the processor read
-//     'MREF' u32 address, u32 size, u32 kind, u32 off  the same block again, unchanged (data at file offset off)
-//     'END ' u32 fifoBytes                             the frame is the first fifoBytes FIFO bytes (the
-//                                                      last FIFO event can go on past the frame's copy)
-// Version 1 (test builds 17-18) started at a batch boundary and had no fifoBytes: a replay stops at the
-// first copy to the display.
+//   events, in the order the command processor met them:
+//     'FIFO' u32 length, bytes (padded to 4)            command bytes
+//     'PAGE' u32 kind, u32 address, u32 length, bytes   memory the processor is about to read: (part of) a
+//                                                      4 KB page, at its address as commands give it (the
+//                                                      address bits of that kind of read, see gpu::MemKind)
+//     'END ' u32 fifoBytes, u32 flags                  the frame is the first fifoBytes FIFO bytes;
+//                                                      flags bit 0: incomplete (the buffer was full)
+// A page is recorded before the command that reads it, and again whenever the bytes a command reads have
+// changed since. Replaying the events in order, with the pages kept in a memory image, reproduces the
+// frame exactly.
+//
+// Older versions (test builds 17-19): MEM/MREF events with whole blocks, recorded after the FIFO bytes
+// that read them (version 1 also started at a batch boundary and had no fifoBytes).
 
 #include "../sdk/sdk_internal.h"
 
@@ -24,13 +29,16 @@
 namespace ps3gx {
 
 using gpu::u32;
+using gpu::u64;
 using gpu::u8;
 
 enum {
-	BUFFER_SIZE  = 32 << 20,
-	MAX_TRACES   = 8,
-	MAX_PENDING  = 8,
-	DEDUP_SLOTS  = 1 << 14,
+	BUFFER_SIZE = 32 << 20,
+	MAX_TRACES  = 8,
+	MAX_PENDING = 8,
+	PAGE_SIZE   = 4096,
+	PAGE_SLOTS  = 1 << 15,
+	END_RESERVE = 16, // bytes at the end of the buffer kept for the END event
 };
 
 static u8* sBuf;
@@ -43,10 +51,13 @@ static u32 sTraces;
 static u32 sTraceBytes;
 static u32 sTraceFrame;
 static char sTraceLabel[32];
-static gpu::u64 sRecordStart; // FIFO stream offset where the recorded frame starts
+static u64 sRecordStart;    // FIFO stream offset where the recorded frame starts
+static u64 sFifoRecordedTo; // FIFO stream offset up to which bytes are in the trace
 static volatile int sWriterBusy;
 static bool sWriterStarted;
 static u32 sWriteLen;
+static u32 sWriteFrame;
+static bool sWriteTruncated;
 static char sWriteName[64];
 
 struct Pending {
@@ -61,9 +72,13 @@ static int sUsedCount;
 static volatile u32 sCurrentFrame;
 static volatile int sScheduleLock;
 
-// Dedup: last recorded copy of each (address, size, kind)
-static u32 sDedupKey[DEDUP_SLOTS][3];
-static u32 sDedupOffset[DEDUP_SLOTS]; // 0 = empty
+// Pages in the trace: (kind, page) -> where their latest recorded bytes are.
+static u32 sPageKey[PAGE_SLOTS]; // (kind group << 20 | address >> 12) + 1; 0 = empty
+static u32 sPageData[PAGE_SLOTS]; // offset of the bytes in sBuf
+static u16 sPageLo[PAGE_SLOTS];   // the recorded part of the page: [lo, lo + len)
+static u16 sPageLen[PAGE_SLOTS];  // (len 0 means 4096)
+static u32 sPageCount;
+static u32 sPagesRecorded;
 
 static void put32(u32 v)
 {
@@ -108,76 +123,7 @@ static void closeFifo()
 	sFifoLenAt = 0;
 }
 
-static void stopRecording(gpu::u64 fifoBytes)
-{
-	closeFifo();
-	put32(0x454E4420); // 'END '
-	put32((u32)fifoBytes);
-	sRecording = false;
-}
-
 bool traceRecording() { return sRecording; }
-
-void traceFifo(const u8* bytes, u32 n)
-{
-	if (!sRecording) {
-		return;
-	}
-	if (!sFifoLenAt) {
-		put32(0x4649464F); // 'FIFO'
-		sFifoLenAt = sLen;
-		put32(0);
-	}
-	putBytes(bytes, n);
-	if (sTruncated) {
-		stopRecording(0xFFFFFFFF);
-	}
-}
-
-void traceMemory(u32 address, u32 size, gpu::MemKind kind, const u8* data)
-{
-	if (!sRecording) {
-		return;
-	}
-	closeFifo();
-	u32 h = ((address >> 2) * 2654435761u ^ size * 40503u ^ (u32)kind) & (DEDUP_SLOTS - 1);
-	for (int probe = 0; probe < 8; probe++) {
-		u32 i = (h + probe) & (DEDUP_SLOTS - 1);
-		if (!sDedupOffset[i]) {
-			break;
-		}
-		if (sDedupKey[i][0] == address && sDedupKey[i][1] == size && sDedupKey[i][2] == (u32)kind
-		    && memcmp(sBuf + sDedupOffset[i], data, size) == 0) {
-			put32(0x4D524546); // 'MREF'
-			put32(address);
-			put32(size);
-			put32((u32)kind);
-			put32(sDedupOffset[i]);
-			return;
-		}
-	}
-	put32(0x4D454D20); // 'MEM '
-	put32(address);
-	put32(size);
-	put32((u32)kind);
-	u32 at = sLen;
-	putBytes(data, size);
-	pad4();
-	if (sTruncated) {
-		stopRecording(0xFFFFFFFF);
-		return;
-	}
-	for (int probe = 0; probe < 8; probe++) {
-		u32 i = (h + probe) & (DEDUP_SLOTS - 1);
-		if (!sDedupOffset[i] || (sDedupKey[i][0] == address && sDedupKey[i][1] == size && sDedupKey[i][2] == (u32)kind)) {
-			sDedupKey[i][0] = address;
-			sDedupKey[i][1] = size;
-			sDedupKey[i][2] = (u32)kind;
-			sDedupOffset[i] = at;
-			break;
-		}
-	}
-}
 
 // ---------------------------------------------------------------- writing to the USB drive
 
@@ -196,8 +142,8 @@ static void writerThread(void*)
 			int wrote = ps3b_file_pwrite(fd, sBuf, 0, sWriteLen);
 			ps3b_file_close(fd);
 			if (wrote == (int)sWriteLen) {
-				ps3Log("[gpu] frame %u recorded to PIKMIN/%s (%u KB%s)\n", (unsigned)sTraceFrame, sWriteName, (unsigned)(sWriteLen >> 10),
-				       sTruncated ? ", incomplete: too large" : "");
+				ps3Log("[gpu] frame %u recorded to PIKMIN/%s (%u KB%s)\n", (unsigned)sWriteFrame, sWriteName,
+				       (unsigned)(sWriteLen >> 10), sWriteTruncated ? ", incomplete: the frame did not fit" : "");
 			} else {
 				ps3Log("[gpu] writing %s failed\n", path);
 			}
@@ -209,7 +155,9 @@ static void writerThread(void*)
 
 static void handOff()
 {
-	sWriteLen = sLen;
+	sWriteLen       = sLen;
+	sWriteFrame     = sTraceFrame;
+	sWriteTruncated = sTruncated;
 	char safe[32];
 	int n = 0;
 	for (const char* p = sTraceLabel; *p && n < 24; p++) {
@@ -228,6 +176,140 @@ static void handOff()
 	}
 	__sync_synchronize();
 	sWriterBusy = 1;
+}
+
+// Ends the recording (the frame's copy to the display, or the buffer is full) and writes it out.
+static void finishRecording()
+{
+	closeFifo();
+	bool truncated = sTruncated;
+	sTruncated     = false;
+	sBufSize += END_RESERVE; // (kept free for this)
+	put32(0x454E4420);       // 'END '
+	put32((u32)(sFifoRecordedTo - sRecordStart));
+	put32(truncated ? 1 : 0);
+	sBufSize -= END_RESERVE;
+	sTruncated = truncated;
+	sRecording = false;
+	handOff();
+}
+
+// ---------------------------------------------------------------- recording
+
+// FIFO bytes of the batch being interpreted, from sFifoRecordedTo up to stream offset `to`.
+static void recordFifoTo(u64 to)
+{
+	const u8* batch;
+	u32 batchLen;
+	u64 base;
+	if (!ps3gx::currentBatch(&batch, &batchLen, &base)) {
+		return;
+	}
+	if (to > base + batchLen) {
+		to = base + batchLen;
+	}
+	if (sFifoRecordedTo < base || to <= sFifoRecordedTo) {
+		return; // (bytes of an earlier batch are in the trace already)
+	}
+	if (!sFifoLenAt) {
+		u32 start = sLen;
+		put32(0x4649464F); // 'FIFO'
+		put32(0);
+		if (sTruncated) {
+			sLen = start;
+			return;
+		}
+		sFifoLenAt = start + 4;
+	}
+	putBytes(batch + (sFifoRecordedTo - base), (u32)(to - sFifoRecordedTo)); // (all or nothing)
+	if (!sTruncated) {
+		sFifoRecordedTo = to;
+	}
+}
+
+void traceBatchDone()
+{
+	const u8* batch;
+	u32 batchLen;
+	u64 base;
+	if (sRecording && ps3gx::currentBatch(&batch, &batchLen, &base)) {
+		recordFifoTo(base + batchLen);
+		if (sTruncated) {
+			finishRecording();
+		}
+	}
+}
+
+static u32 pageSlot(u32 key)
+{
+	u32 h = (key * 2654435761u) & (PAGE_SLOTS - 1);
+	while (sPageKey[h] && sPageKey[h] != key) {
+		h = (h + 1) & (PAGE_SLOTS - 1);
+	}
+	return h;
+}
+
+void traceMemory(u32 address, u32 size, gpu::MemKind kind, const u8* data, const u8* regionLo, const u8* regionHi)
+{
+	if (!sRecording || !size) {
+		return;
+	}
+	// Textures and TLUTs are both 26-bit addresses into the same memory.
+	const u32 group = kind == gpu::MEM_TLUT ? (u32)gpu::MEM_TEXTURE : (u32)kind;
+	bool fifoDone   = false;
+	u32 page        = address & ~(u32)(PAGE_SIZE - 1);
+	const u32 end   = address + size;
+	for (; page < end && page >= (address & ~(u32)(PAGE_SIZE - 1)); page += PAGE_SIZE) {
+		// The part of the page the read uses, and the part that can be recorded (within the region).
+		u32 useLo         = address > page ? address - page : 0;
+		u32 useHi         = end - page < PAGE_SIZE ? end - page : PAGE_SIZE;
+		const u8* realPage = data + ((long long)page - (long long)address); // (may lie before the region)
+		u32 lo            = realPage >= regionLo ? 0 : (u32)(regionLo - realPage);
+		u32 hi            = realPage + PAGE_SIZE <= regionHi ? PAGE_SIZE : (u32)(regionHi - realPage);
+		u32 key           = ((group << 20) | (page >> 12)) + 1;
+		u32 slot          = pageSlot(key);
+		if (sPageKey[slot]) {
+			u32 rlo = sPageLo[slot];
+			u32 rhi = rlo + (sPageLen[slot] ? sPageLen[slot] : PAGE_SIZE);
+			if (rlo <= useLo && useHi <= rhi
+			    && memcmp(sBuf + sPageData[slot] + (useLo - rlo), realPage + useLo, useHi - useLo) == 0) {
+				continue; // unchanged since recorded
+			}
+		} else if (sPageCount >= PAGE_SLOTS * 3 / 4) {
+			continue; // (table full: the read is not recorded; a replay reports it)
+		}
+		if (!fifoDone) {
+			// The command doing this read goes after its pages.
+			fifoDone = true;
+			recordFifoTo(ps3gx::commandProcessor().commandStart());
+			closeFifo();
+		}
+		if (sTruncated) {
+			finishRecording();
+			return;
+		}
+		u32 start = sLen;
+		put32(0x50414745); // 'PAGE'
+		put32((u32)kind);
+		put32(page + lo);
+		put32(hi - lo);
+		u32 at = sLen;
+		putBytes(realPage + lo, hi - lo);
+		pad4();
+		if (sTruncated) {
+			sLen = start; // (not the half-written event)
+			finishRecording();
+			return;
+		}
+		if (!sPageKey[slot]) {
+			sPageKey[slot] = key;
+			sPageCount++;
+		}
+		sPageData[slot] = at;
+		sPageLo[slot]   = (u16)lo;
+		sPageLen[slot]  = (u16)((hi - lo) & 0xFFFF);
+		sPagesRecorded++;
+	}
 }
 
 // ---------------------------------------------------------------- frame boundaries
@@ -255,17 +337,18 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 			dropPending();
 			return;
 		}
-		sBufSize = size;
+		sBufSize = size - END_RESERVE;
 	}
 	sLen       = 0;
 	sTruncated = false;
 	sFifoLenAt = 0;
-	memset(sDedupOffset, 0, sizeof(sDedupOffset));
+	memset(sPageKey, 0, sizeof(sPageKey));
+	sPageCount = 0;
 	snprintf(sTraceLabel, sizeof(sTraceLabel), "%s", label);
 	sTraceFrame = frame;
 
 	putBytes((const u8*)"GXTRACE1", 8);
-	put32(2);
+	put32(3);
 	put32(frame);
 	char name[32];
 	memset(name, 0, sizeof(name));
@@ -281,30 +364,20 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 	for (u32 i = 0; i < 0x1100; i++) {
 		put32(S.xf[i]);
 	}
-	sRecording   = true;
-	sRecordStart = cp.commandEnd();
+	// The frame starts just after the copy that ended the last one (in the middle of the batch being
+	// interpreted); its FIFO bytes are recorded as the processor goes on.
+	sRecording      = true;
+	sRecordStart    = cp.commandEnd();
+	sFifoRecordedTo = sRecordStart;
 	sTraces++;
-
-	// The frame starts just after the copy that ended the last one, in the middle of the batch of FIFO
-	// bytes being interpreted: record the rest of that batch now, before the processor goes on (the
-	// memory blocks it reads come after their FIFO bytes in the file).
-	const u8* batch;
-	u32 batchLen;
-	gpu::u64 base;
-	if (ps3gx::currentBatch(&batch, &batchLen, &base) && sRecordStart >= base && sRecordStart <= base + batchLen) {
-		u32 skip = (u32)(sRecordStart - base);
-		if (skip < batchLen) {
-			traceFifo(batch + skip, batchLen - skip);
-		}
-	}
 }
 
 void traceFrameEnd(u32 frame, const gpu::CommandProcessor& cp)
 {
 	sCurrentFrame = frame;
 	if (sRecording) {
-		stopRecording(cp.commandEnd() - sRecordStart);
-		handOff();
+		recordFifoTo(cp.commandEnd());
+		finishRecording();
 		return;
 	}
 	if (sPendingCount == 0 || sWriterBusy || sTraces >= MAX_TRACES) {
@@ -378,4 +451,5 @@ extern "C" void ps3GxNoteSection(const char* name)
 			ps3gx::traceSchedule(kPlan[i].label, kPlan[i].delay);
 		}
 	}
+	ps3ProfileSection(name);
 }

@@ -198,7 +198,12 @@ public:
 	{
 		const gpu::u8* p = translate(address, size, kind);
 		if (p && ps3gx::traceRecording()) {
-			ps3gx::traceMemory(address, size, kind, p);
+			uptr q = (uptr)p;
+			if (sArenaLo && q >= sArenaLo && q < sArenaHi) {
+				ps3gx::traceMemory(address, size, kind, p, (const gpu::u8*)sArenaLo, (const gpu::u8*)sArenaHi);
+			} else {
+				ps3gx::traceMemory(address, size, kind, p, (const gpu::u8*)kLowLo, (const gpu::u8*)kLowHi);
+			}
 		}
 		return p;
 	}
@@ -455,14 +460,14 @@ bool ps3gx::currentBatch(const gpu::u8** data, gpu::u32* size, gpu::u64* base)
 
 static void interpret(const gpu::u8* p, u32 n)
 {
-	if (ps3gx::traceRecording()) {
-		ps3gx::traceFifo(p, n);
-	}
 	unsigned long long t0 = ps3b_timebase();
 	sBatch                = p;
 	sBatchLen             = n;
 	sBatchBase            = sCp.received();
 	sCp.write(p, n);
+	if (ps3gx::traceRecording()) {
+		ps3gx::traceBatchDone();
+	}
 	sBatch = NULL;
 	sCpTime += ps3b_timebase() - t0;
 }

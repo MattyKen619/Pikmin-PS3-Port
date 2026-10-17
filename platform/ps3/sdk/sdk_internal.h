@@ -32,6 +32,19 @@ int ps3InInterrupt(void);
 
 // Diagnostics
 void ps3NoteActivity(const char* what); // remembers the last SDK call, for stall reports
+void ps3ProfileSection(const char* name); // a game section starts: report the profile of the last one
+void ps3ProfilerStart(void);
+
+// What the running game thread is doing (os_sched.cpp, for the profiler).
+#define PS3_SAMPLE_DEPTH 64
+typedef struct Ps3SchedSample {
+	int thread;  // OS thread index
+	int waiting; // the thread holding the baton is waiting (nothing else can run)
+	void* pc;    // last game code it ran
+	int depth;
+	void* fns[PS3_SAMPLE_DEPTH]; // its shadow call stack, outermost first (function descriptors)
+} Ps3SchedSample;
+int ps3SchedSample(Ps3SchedSample* out);
 
 // Use at the top of SDK functions: logs "[trace] first call: NAME" once, then notes the activity.
 // The trace shows how far the game got if it stops without an error message.

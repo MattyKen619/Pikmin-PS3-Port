@@ -418,6 +418,34 @@ static void noteNanOrigin(ThreadImpl* t, u32 fpscr)
 
 extern "C" unsigned int ps3NanCount(void) { return sNanCount; }
 
+// For the sampling profiler (profiler.cpp): what the baton holder is doing right now. Read without the
+// lock (a sample may be slightly inconsistent; that is fine for a profile).
+extern "C" int ps3SchedSample(Ps3SchedSample* out)
+{
+	ThreadImpl* t = sRunning;
+	if (!t || !t->os) {
+		return 0;
+	}
+	out->thread  = t->index;
+	out->waiting = t->os->state != OS_THREAD_STATE_RUNNING;
+	out->pc      = t->lastPc;
+	int depth    = t->depth;
+	if (depth > SHADOW_DEPTH) {
+		depth = SHADOW_DEPTH;
+	}
+	if (depth > PS3_SAMPLE_DEPTH) {
+		depth = PS3_SAMPLE_DEPTH;
+	}
+	if (depth < 0) {
+		depth = 0;
+	}
+	for (int i = 0; i < depth; i++) {
+		out->fns[i] = t->stackFn[i];
+	}
+	out->depth = depth;
+	return 1;
+}
+
 extern "C" void __cyg_profile_func_enter(void* fn, void* site)
 {
 	ThreadImpl* t = sRunning;

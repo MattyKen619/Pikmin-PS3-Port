@@ -13,6 +13,7 @@ extern "C" {
 void ps3b_init(void);              // sysutil callbacks, timebase; call first
 int ps3b_exit_requested(void);     // XMB "Quit Game" was chosen
 void ps3b_exit(int code) __attribute__((noreturn));
+void ps3b_set_exit_hook(void (*hook)(void)); // called by ps3b_exit before the log is flushed
 
 // ---- memory (newlib heap)
 void* ps3b_memalign(unsigned int align, unsigned int size);

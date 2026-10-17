@@ -27,13 +27,17 @@ void spinUnlock(volatile int* lock);
 //
 // A trace is one frame of graphics commands: the command processor's register state at the start of
 // the frame (just after the previous frame's copy to the display), then everything it consumed until the
-// frame was copied to the display: FIFO bytes, and every block of memory it read (display lists, vertex
-// arrays, textures), in order. Replaying it through the same command processor reproduces the frame
-// exactly, off the console.
+// frame was copied to the display: FIFO bytes, and the memory it read (display lists, vertex arrays,
+// textures) as 4 KB pages, each recorded before the command that reads it. Replaying it through the same
+// command processor reproduces the frame exactly, off the console.
 
 bool traceRecording();
-void traceFifo(const gpu::u8* bytes, gpu::u32 n);
-void traceMemory(gpu::u32 address, gpu::u32 size, gpu::MemKind kind, const gpu::u8* data);
+// After the processor interpreted a batch of FIFO bytes (while the batch is still current).
+void traceBatchDone();
+// A memory read by the processor: `size` bytes at `address` (as the command gives it) are at `data`, in
+// a region of game memory [regionLo, regionHi).
+void traceMemory(gpu::u32 address, gpu::u32 size, gpu::MemKind kind, const gpu::u8* data, const gpu::u8* regionLo,
+                 const gpu::u8* regionHi);
 // Called at every copy to the display (the end of a frame), from inside the processor (so
 // cp.commandEnd() is just past the copy). Ends a recording, or starts one that is due.
 void traceFrameEnd(gpu::u32 frame, const gpu::CommandProcessor& cp);

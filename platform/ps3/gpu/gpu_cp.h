@@ -219,9 +219,10 @@ public:
 	u8 pendingOpcode() const { return mPending ? mPendingBuf[0] : 0; }
 
 	// Position in the FIFO stream: bytes written so far, and (while a command runs, e.g. inside a listener
-	// call) the offset just past the FIFO command being executed (for a command inside a display list: the
-	// display list call).
+	// call or a memory read) the offsets of the FIFO command being executed and just past it (for a command
+	// inside a display list: the display list call).
 	u64 received() const { return mReceived; }
+	u64 commandStart() const { return mCmdStart; }
 	u64 commandEnd() const { return mCmdEnd; }
 
 	// The register state. (Changing it through the non-const accessor is allowed: cached vertex layouts
@@ -281,6 +282,7 @@ private:
 	u32 mPending;
 	u32 mPendingCap;
 	u64 mReceived;
+	u64 mCmdStart;
 	u64 mCmdEnd;
 
 	// vertex layouts by format, computed when first needed after the CP registers change

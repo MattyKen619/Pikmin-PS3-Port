@@ -26,6 +26,7 @@ CommandProcessor::CommandProcessor()
     , mPending(0)
     , mPendingCap(0)
     , mReceived(0)
+    , mCmdStart(0)
     , mCmdEnd(0)
     , mLayoutValid(0)
     , mVerts(NULL)
@@ -130,9 +131,10 @@ void CommandProcessor::write(const u8* data, u32 size)
 				break; // (lost: out of memory)
 			}
 			if (need && mPending == need) {
-				u32 n    = mPending;
-				mPending = 0;
-				mCmdEnd  = base + pos;
+				u32 n     = mPending;
+				mPending  = 0;
+				mCmdEnd   = base + pos;
+				mCmdStart = mCmdEnd - n;
 				execute(mPendingBuf, n, false);
 				mStats.commands++;
 				break;
@@ -199,7 +201,8 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 			return pos;
 		}
 		if (!inDisplayList) {
-			mCmdEnd = base + pos + len;
+			mCmdStart = base + pos;
+			mCmdEnd   = base + pos + len;
 		}
 		execute(p, len, inDisplayList);
 		mStats.commands++;

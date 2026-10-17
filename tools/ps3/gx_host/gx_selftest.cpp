@@ -408,7 +408,7 @@ int main(int argc, char** argv)
 		snprintf(path, sizeof(path), "%s/gx_trace_01_nintendo_logo.bin", getenv("GX_TRACE_DIR"));
 		TraceFile trace;
 		CHECK(trace.load(path));
-		CHECK(trace.version == 2);
+		CHECK(trace.version == 3 && !trace.incomplete);
 		struct Count : gpu::Listener {
 			int draws, copies;
 			void draw(const gpu::DrawCall& c) override { draws++; (void)c; }

@@ -201,6 +201,7 @@ void ps3LogOnce(int* flag, const char* fmt, ...)
 }
 
 void ps3NoteActivity(const char* what) { (void)what; }
+void ps3ProfileSection(const char* name) { (void)name; }
 
 // mutexes and condition variables (handles index these tables)
 static pthread_mutex_t sMutexes[16];
