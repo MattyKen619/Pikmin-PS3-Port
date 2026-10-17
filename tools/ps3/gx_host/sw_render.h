@@ -12,6 +12,7 @@
 #define GX_HOST_SW_RENDER_H
 
 #include "../../../platform/ps3/gpu/gpu_cp.h"
+#include "../../../platform/ps3/gpu/gpu_xf.h"
 
 #include <map>
 #include <vector>
@@ -65,14 +66,9 @@ public:
 		mSkipLast  = last;
 	}
 
-	struct OutVertex {
-		float clip[4];      // clip-space position
-		float color[2][4];  // channel colors 0-1
-		float tex[8][3];    // s, t, q
-	};
+	typedef gpu::XfVertex OutVertex;
 
 private:
-	void transform(const gpu::Vertex& in, const gpu::VertexLayout& layout, OutVertex& out);
 	void triangle(const OutVertex& a, const OutVertex& b, const OutVertex& c);
 	void rasterize(const OutVertex* v[3]);
 	void shade(int x, int y, float z, const float* color0, const float* color1, const float (*tex)[3]);

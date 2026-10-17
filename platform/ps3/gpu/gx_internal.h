@@ -44,6 +44,8 @@ void traceFrameEnd(gpu::u32 frame, const gpu::CommandProcessor& cp);
 // Records a frame `delay` frames from now (once per label). Called by the game's thread.
 void traceSchedule(const char* label, gpu::u32 delay);
 void traceStatus(char* buf, unsigned int size);
+// While a frame is recorded: a name for files that go with it ("NN_label", as in gx_trace_NN_label.bin).
+bool traceCurrentName(char* buf, unsigned int size);
 
 } // namespace ps3gx
 

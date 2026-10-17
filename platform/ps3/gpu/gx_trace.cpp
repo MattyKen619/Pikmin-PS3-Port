@@ -155,18 +155,34 @@ static void writerThread(void*)
 	}
 }
 
-static void handOff()
+static void safeLabel(char* safe)
 {
-	sWriteLen       = sLen;
-	sWriteFrame     = sTraceFrame;
-	sWriteTruncated = sTruncated;
-	char safe[32];
 	int n = 0;
 	for (const char* p = sTraceLabel; *p && n < 24; p++) {
 		char c = *p;
 		safe[n++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
 	}
 	safe[n] = 0;
+}
+
+bool traceCurrentName(char* buf, unsigned int size)
+{
+	if (!sRecording) {
+		return false;
+	}
+	char safe[32];
+	safeLabel(safe);
+	snprintf(buf, size, "%02u_%s", (unsigned)sTraces, safe);
+	return true;
+}
+
+static void handOff()
+{
+	sWriteLen       = sLen;
+	sWriteFrame     = sTraceFrame;
+	sWriteTruncated = sTruncated;
+	char safe[32];
+	safeLabel(safe);
 	snprintf(sWriteName, sizeof(sWriteName), "gx_trace_%02u_%s.bin", (unsigned)sTraces, safe);
 	sTraceBytes += sLen;
 	if (!sWriterStarted) {

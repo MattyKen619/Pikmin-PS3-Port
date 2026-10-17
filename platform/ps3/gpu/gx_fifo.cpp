@@ -12,9 +12,11 @@
 // processor raises the pixel engine's interrupts (draw done, tokens), so GXDrawDone and GXReadDrawSync
 // work as on the GameCube.
 //
-// Nothing is drawn yet: the processor checks and counts every command, and records selected frames to
-// the USB drive (gx_trace.cpp) for checking off the console. If PIKMIN/gx_sync.txt exists on the USB
-// drive, commands are interpreted on the game's thread instead (as in test builds 17 and 18).
+// The processor's draws and copies go to the RSX renderer (platform/ps3/rsx), which takes the display over
+// from the text console. The processor also checks and counts every command, and records selected frames
+// to the USB drive (gx_trace.cpp) for checking off the console, with the RSX's picture of each recorded
+// frame. If PIKMIN/gx_sync.txt exists on the USB drive, commands are interpreted on the game's thread
+// instead (as in test builds 17 and 18).
 
 #include "../sdk/sdk_internal.h"
 
@@ -23,6 +25,7 @@
 #include "Dolphin/GX/GXFifo.h"
 #include "Dolphin/OS/OSInterrupt.h"
 #include "Dolphin/hw_regs.h"
+#include "../rsx/rsx_port.h"
 #include "gx_internal.h"
 #include "ps3/gxport.h"
 #include <stdio.h>
@@ -214,6 +217,7 @@ public:
 static gpu::CommandProcessor sCp;
 static GameMemory sMemory;
 static gpu::Listener* sRenderer;
+static bool sRendererIsRsx;
 
 gpu::CommandProcessor& ps3gx::commandProcessor() { return sCp; }
 void ps3gx::setRenderer(gpu::Listener* renderer) { sRenderer = renderer; }
@@ -357,9 +361,24 @@ public:
 		}
 	}
 
+	void bpWritten(gpu::u32 reg, gpu::u32 value) override
+	{
+		if (sRenderer) {
+			sRenderer->bpWritten(reg, value);
+		}
+	}
+
 	void copy(const gpu::CopyInfo& info) override
 	{
 		if (sRenderer) {
+			if (info.toXfb && sRendererIsRsx && ps3gx::traceRecording()) {
+				// (the recorded frame ends here: keep the RSX's picture of it too)
+				char name[64], file[80];
+				if (ps3gx::traceCurrentName(name, sizeof(name))) {
+					snprintf(file, sizeof(file), "rsx_frame_%s", name);
+					ps3rsx::captureFrame(info, file);
+				}
+			}
 			sRenderer->copy(info);
 		}
 		if (!info.toXfb) {
@@ -592,6 +611,10 @@ static void start()
 	sArenaHi = (uptr)OSGetArenaHi();
 	sCp.setMemory(&sMemory);
 	sCp.setListener(&sEvents);
+	if (!sRenderer) {
+		sRenderer      = ps3rsx::start(sCp, sMemory);
+		sRendererIsRsx = sRenderer != NULL;
+	}
 	sRing = (gpu::u8*)ps3b_memalign(128, RING_SIZE);
 	if (!sRing) {
 		ps3Log("[gpu] FAILED: no memory for the graphics command buffer\n");
@@ -608,8 +631,9 @@ static void start()
 	    && ps3b_thread_create(graphicsThread, NULL, 1500, 0x10000, "pikmin_gpu") == 0) {
 		sThreaded = true;
 	}
-	ps3Log("[gpu] graphics commands are interpreted (not drawn yet) %s; game memory 0x%08x-0x%08x\n",
-	       sThreaded ? "on the graphics thread" : "on the game's thread", (unsigned)sArenaLo, (unsigned)sArenaHi);
+	ps3Log("[gpu] graphics commands are interpreted %s and %s; game memory 0x%08x-0x%08x\n",
+	       sThreaded ? "on the graphics thread" : "on the game's thread", sRendererIsRsx ? "drawn by the RSX" : "not drawn",
+	       (unsigned)sArenaLo, (unsigned)sArenaHi);
 }
 
 extern "C" void ps3GxSetCpuFifo(__GXFifoObj* fifo, int linkedToGp)
@@ -737,3 +761,5 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 	         (unsigned long long)st.memoryFailures, sTextureFailures, (int)CHECK_EVERY, sUnnoted, sAmbiguous,
 	         (unsigned long long)st.draws, (unsigned long long)st.drawDones, pending, sProducerWaits, trace);
 }
+
+extern "C" void ps3RsxStatus(char* buf, unsigned int size) { ps3rsx::status(buf, size); }

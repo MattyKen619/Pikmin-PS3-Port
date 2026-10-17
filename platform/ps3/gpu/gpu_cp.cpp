@@ -673,15 +673,51 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 		texScale[i] = (L.texType[i] == COMP_F32) ? 1.0f : 1.0f / (float)(1u << L.texFrac[i]);
 	}
 
+	// (per draw: the default matrix indices, and which attributes are present)
+	const u8 defPn = (u8)bits(matA, 0, 6);
+	u8 defTex[8];
+	bool anyTexMtx = false;
+	for (int i = 0; i < 8; i++) {
+		defTex[i] = (u8)(i < 4 ? bits(matA, 6 + i * 6, 6) : bits(matB, (i - 4) * 6, 6));
+		anyTexMtx |= L.texmtx[i] != 0;
+	}
+	int texList[8], texN = 0;
+	for (int i = 0; i < 8; i++) {
+		if (L.texMode[i] != ATTR_NONE) {
+			texList[texN++] = i;
+		}
+	}
+	const bool hasNbt = L.nrmMode != ATTR_NONE && L.nrmNbt;
+
 	for (u32 v = 0; v < count; v++) {
 		const u8* p = data + v * L.size;
 		Vertex& out = mVerts[v];
-		memset(&out, 0, sizeof(out));
+		// (fields this layout does not set are zero)
+		if (L.posMode == ATTR_NONE) {
+			out.pos[0] = out.pos[1] = 0;
+		}
+		out.pos[2] = 0;
+		if (L.nrmMode == ATTR_NONE) {
+			out.nrm[0] = out.nrm[1] = out.nrm[2] = 0;
+		}
+		if (!hasNbt) {
+			out.binormal[0] = out.binormal[1] = out.binormal[2] = 0;
+			out.tangent[0] = out.tangent[1] = out.tangent[2] = 0;
+		}
+		for (int i = 0; i < 2; i++) {
+			if (L.clrMode[i] == ATTR_NONE) {
+				out.clr[i][0] = out.clr[i][1] = out.clr[i][2] = out.clr[i][3] = 0;
+			}
+		}
+		memset(out.tex, 0, sizeof(out.tex));
 
-		out.pnmtx = L.pnmtx ? (p[0] & 63) : (u8)bits(matA, 0, 6);
-		for (int i = 0; i < 8; i++) {
-			u8 def        = (u8)(i < 4 ? bits(matA, 6 + i * 6, 6) : bits(matB, (i - 4) * 6, 6));
-			out.texmtx[i] = L.texmtx[i] ? (p[texMtxOff[i]] & 63) : def;
+		out.pnmtx = L.pnmtx ? (p[0] & 63) : defPn;
+		if (anyTexMtx) {
+			for (int i = 0; i < 8; i++) {
+				out.texmtx[i] = L.texmtx[i] ? (p[texMtxOff[i]] & 63) : defTex[i];
+			}
+		} else {
+			memcpy(out.texmtx, defTex, 8);
 		}
 
 		// position
@@ -699,6 +735,8 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 				for (u32 k = 0; k < L.posCount; k++) {
 					out.pos[k] = readComp(q + k * cs, L.posType, posScale);
 				}
+			} else {
+				out.pos[0] = out.pos[1] = 0;
 			}
 		}
 
@@ -725,6 +763,8 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 					for (u32 k = 0; k < 3; k++) {
 						dst[n][k] = readComp(q + k * cs, L.nrmType, nrmScale);
 					}
+				} else {
+					dst[n][0] = dst[n][1] = dst[n][2] = 0;
 				}
 			}
 		}
@@ -744,14 +784,14 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 			}
 			if (q) {
 				readColor(q, L.clrFormat[i], out.clr[i]);
+			} else {
+				out.clr[i][0] = out.clr[i][1] = out.clr[i][2] = out.clr[i][3] = 0;
 			}
 		}
 
 		// texture coordinates
-		for (int i = 0; i < 8; i++) {
-			if (L.texMode[i] == ATTR_NONE) {
-				continue;
-			}
+		for (int ti = 0; ti < texN; ti++) {
+			const int i = texList[ti];
 			const u8* q = NULL;
 			if (L.texMode[i] == ATTR_DIRECT) {
 				q = p + texOff[i];

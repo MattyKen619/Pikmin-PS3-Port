@@ -61,9 +61,26 @@ void ps3b_log_flush(void);                // writes out everything queued, now
 const char* ps3b_log_path(void);          // NULL if no writable location was found
 void ps3b_log_memory(const char* when);   // logs lv2's user-memory totals
 
-// ---- on-screen text console (shown while graphics are not implemented)
+// ---- on-screen text console (shown until the game's graphics take over the screen)
 void ps3b_console_init(void);
 void ps3b_console_shutdown(void);         // finish pending RSX work before the process exits
+
+// The display, handed over to the renderer (platform/ps3/rsx): the console stops drawing and flipping, and
+// the renderer owns the RSX context from then on. The RSX-mapped main memory after the command buffer
+// ([host + commandSize, host + hostSize)) is free for the renderer.
+typedef struct Ps3bDisplay {
+	void* context;            // gcmContextData*
+	unsigned int width, height, pitch;
+	unsigned int* buffers[2]; // display buffers (RSX local memory), registered with gcmSetDisplayBuffer
+	unsigned int offsets[2];
+	unsigned int next;        // the buffer that is not on screen
+	int flipped;              // the console has flipped at least once
+	void* host;
+	unsigned int hostSize, commandSize;
+} Ps3bDisplay;
+int ps3b_console_take_display(Ps3bDisplay* out); // 0, or -1 if the display was not set up
+// Called by ps3b_console_shutdown when the display was taken over (to stop the renderer first).
+void ps3b_console_set_display_owner_stop(void (*stop)(void));
 
 // ---- system modules
 void ps3b_log_modules(void); // logs the names of the PRX modules loaded in this process (sound thread)

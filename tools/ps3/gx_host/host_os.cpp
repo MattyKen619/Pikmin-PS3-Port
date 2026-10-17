@@ -279,3 +279,24 @@ extern "C" unsigned long long ps3b_timebase(void)
 	return (unsigned long long)t.tv_sec * 79800000ULL + (unsigned long long)t.tv_nsec * 798 / 10000;
 }
 extern "C" unsigned long long ps3b_timebase_freq(void) { return 79800000ULL; }
+
+// ---- the RSX renderer: none on the host (gx_rsx.cpp runs it with a software device instead)
+#include "../../../platform/ps3/rsx/rsx_port.h"
+
+gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
+{
+	(void)cp;
+	(void)memory;
+	return NULL;
+}
+void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
+{
+	(void)info;
+	(void)name;
+}
+void ps3rsx::status(char* buf, unsigned int size)
+{
+	if (size) {
+		buf[0] = 0;
+	}
+}

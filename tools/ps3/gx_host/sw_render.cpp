@@ -4,6 +4,8 @@
 
 #include "sw_render.h"
 
+#include "../../../platform/ps3/gpu/gpu_tex.h"
+
 #include <math.h>
 #include <string.h>
 #include <zlib.h>
@@ -24,7 +26,6 @@ static inline float asFloat(u32 w)
 }
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
-static inline u32 be16(const u8* p) { return ((u32)p[0] << 8) | p[1]; }
 
 // ================================================================== textures
 
@@ -61,125 +62,6 @@ struct Bound {
 Bound sBound[8];
 
 inline u32 pack(u32 r, u32 g, u32 b, u32 a) { return (r << 24) | (g << 16) | (b << 8) | a; }
-inline u32 c4to8(u32 v) { return (v << 4) | v; }
-inline u32 c5to8(u32 v) { return (v << 3) | (v >> 2); }
-inline u32 c6to8(u32 v) { return (v << 2) | (v >> 4); }
-inline u32 c3to8(u32 v) { return (v << 5) | (v << 2) | (v >> 1); }
-
-u32 rgb565(u32 v) { return pack(c5to8(bits(v, 11, 5)), c6to8(bits(v, 5, 6)), c5to8(bits(v, 0, 5)), 255); }
-u32 rgb5a3(u32 v)
-{
-	if (v & 0x8000) {
-		return pack(c5to8(bits(v, 10, 5)), c5to8(bits(v, 5, 5)), c5to8(bits(v, 0, 5)), 255);
-	}
-	return pack(c4to8(bits(v, 8, 4)), c4to8(bits(v, 4, 4)), c4to8(bits(v, 0, 4)), c3to8(bits(v, 12, 3)));
-}
-u32 ia8(u32 v) // first byte alpha, second intensity
-{
-	u32 a = v >> 8, i = v & 0xFF;
-	return pack(i, i, i, a);
-}
-
-u32 tlutColor(const u8* tmem, u32 tlut, u32 tlutFormat, u32 index)
-{
-	u32 v = be16(tmem + ((tlut + index * 2) & 0xFFFFF));
-	switch (tlutFormat) {
-	case 0: return ia8(v);
-	case 1: return rgb565(v);
-	default: return rgb5a3(v);
-	}
-}
-
-// Decodes a whole texture into RGBA (32-bit words 0xRRGGBBAA).
-void decodeTexture(const u8* src, u32 width, u32 height, u32 format, const u8* tmem, u32 tlut, u32 tlutFormat, u32* out)
-{
-	u32 bw, bh, bb;
-	switch (format) {
-	case gpu::TF_I4:
-	case gpu::TF_C4:
-	case gpu::TF_CMPR: bw = 8, bh = 8, bb = 32; break;
-	case gpu::TF_I8:
-	case gpu::TF_IA4:
-	case gpu::TF_C8: bw = 8, bh = 4, bb = 32; break;
-	case gpu::TF_RGBA8: bw = 4, bh = 4, bb = 64; break;
-	default: bw = 4, bh = 4, bb = 32; break;
-	}
-	const u32 blocksX = (width + bw - 1) / bw;
-	const u32 blocksY = (height + bh - 1) / bh;
-	for (u32 by = 0; by < blocksY; by++) {
-		for (u32 bx = 0; bx < blocksX; bx++) {
-			const u8* b = src + (by * blocksX + bx) * bb;
-			for (u32 py = 0; py < bh; py++) {
-				for (u32 px = 0; px < bw; px++) {
-					u32 x = bx * bw + px, y = by * bh + py;
-					if (x >= width || y >= height) {
-						continue;
-					}
-					u32 c = 0;
-					u32 i   = py * bw + px;
-					switch (format) {
-					case gpu::TF_I4:
-					{
-						u32 v = (b[i / 2] >> ((i & 1) ? 0 : 4)) & 0xF;
-						v     = c4to8(v);
-						c     = pack(v, v, v, v);
-						break;
-					}
-					case gpu::TF_I8:
-					{
-						u32 v = b[i];
-						c     = pack(v, v, v, v);
-						break;
-					}
-					case gpu::TF_IA4:
-					{
-						u32 v = b[i];
-						u32 l = c4to8(v & 0xF), a = c4to8(v >> 4);
-						c     = pack(l, l, l, a);
-						break;
-					}
-					case gpu::TF_IA8: c = ia8(be16(b + i * 2)); break;
-					case gpu::TF_RGB565: c = rgb565(be16(b + i * 2)); break;
-					case gpu::TF_RGB5A3: c = rgb5a3(be16(b + i * 2)); break;
-					case gpu::TF_RGBA8:
-					{
-						u32 a = b[i * 2], r = b[i * 2 + 1], g = b[32 + i * 2], bl = b[32 + i * 2 + 1];
-						c     = pack(r, g, bl, a);
-						break;
-					}
-					case gpu::TF_C4: c = tlutColor(tmem, tlut, tlutFormat, (b[i / 2] >> ((i & 1) ? 0 : 4)) & 0xF); break;
-					case gpu::TF_C8: c = tlutColor(tmem, tlut, tlutFormat, b[i]); break;
-					case gpu::TF_C14X2: c = tlutColor(tmem, tlut, tlutFormat, be16(b + i * 2) & 0x3FFF); break;
-					case gpu::TF_CMPR:
-					{
-						// 4 DXT1-like sub-blocks of 4x4: top left, top right, bottom left, bottom right.
-						const u8* s = b + ((py / 4) * 2 + (px / 4)) * 8;
-						u32 c0 = be16(s), c1 = be16(s + 2);
-						u32 sx = px & 3, sy = py & 3;
-						u32 idx = (s[4 + sy] >> (6 - sx * 2)) & 3;
-						u32 r0 = c5to8(bits(c0, 11, 5)), g0 = c6to8(bits(c0, 5, 6)), b0 = c5to8(bits(c0, 0, 5));
-						u32 r1 = c5to8(bits(c1, 11, 5)), g1 = c6to8(bits(c1, 5, 6)), b1 = c5to8(bits(c1, 0, 5));
-						switch (idx) {
-						case 0: c = pack(r0, g0, b0, 255); break;
-						case 1: c = pack(r1, g1, b1, 255); break;
-						case 2:
-							c = c0 > c1 ? pack((2 * r0 + r1) / 3, (2 * g0 + g1) / 3, (2 * b0 + b1) / 3, 255)
-							            : pack((r0 + r1) / 2, (g0 + g1) / 2, (b0 + b1) / 2, 255);
-							break;
-						default:
-							c = c0 > c1 ? pack((r0 + 2 * r1) / 3, (g0 + 2 * g1) / 3, (b0 + 2 * b1) / 3, 255) : pack(0, 0, 0, 0);
-							break;
-						}
-						break;
-					}
-					default: c = pack(255, 0, 255, 255); break;
-					}
-					out[y * width + x] = c;
-				}
-			}
-		}
-	}
-}
 
 inline u32 wrapCoord(int v, u32 size, u32 mode)
 {
@@ -268,190 +150,6 @@ void Renderer::bpWritten(u32 reg, u32 value)
 
 // ---------------------------------------------------------------- vertices
 
-void Renderer::transform(const gpu::Vertex& in, const gpu::VertexLayout& L, OutVertex& out)
-{
-	const u32* xf = mCp.state().xf;
-	const u32 idx = in.pnmtx & 63;
-	const u32* m  = xf + idx * 4;
-	float pos[3]  = { in.pos[0], in.pos[1], L.posCount == 3 ? in.pos[2] : 0.0f };
-	float view[3];
-	for (int r = 0; r < 3; r++) {
-		view[r] = asFloat(m[r * 4]) * pos[0] + asFloat(m[r * 4 + 1]) * pos[1] + asFloat(m[r * 4 + 2]) * pos[2] + asFloat(m[r * 4 + 3]);
-	}
-	// normal
-	float nrm[3] = { 0, 0, 1 };
-	if (L.nrmMode != gpu::ATTR_NONE) {
-		const u32* n = xf + 0x400 + (idx & 31) * 3;
-		for (int r = 0; r < 3; r++) {
-			nrm[r] = asFloat(n[r * 3]) * in.nrm[0] + asFloat(n[r * 3 + 1]) * in.nrm[1] + asFloat(n[r * 3 + 2]) * in.nrm[2];
-		}
-		float len = sqrtf(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
-		if (len > 0) {
-			nrm[0] /= len, nrm[1] /= len, nrm[2] /= len;
-		}
-	}
-	// projection
-	float p[6];
-	for (int i = 0; i < 6; i++) {
-		p[i] = asFloat(xf[0x1020 + i]);
-	}
-	if (xf[0x1026] == 0) { // perspective
-		out.clip[0] = p[0] * view[0] + p[1] * view[2];
-		out.clip[1] = p[2] * view[1] + p[3] * view[2];
-		out.clip[2] = p[4] * view[2] + p[5];
-		out.clip[3] = -view[2];
-	} else {
-		out.clip[0] = p[0] * view[0] + p[1];
-		out.clip[1] = p[2] * view[1] + p[3];
-		out.clip[2] = p[4] * view[2] + p[5];
-		out.clip[3] = 1.0f;
-	}
-
-	// colors and lighting
-	const u32 numChans = xf[0x1009] & 3;
-	for (int c = 0; c < 2; c++) {
-		float vtx[4] = { 1, 1, 1, 1 };
-		if (L.clrMode[c] != gpu::ATTR_NONE) {
-			for (int k = 0; k < 4; k++) {
-				vtx[k] = in.clr[c][k] / 255.0f;
-			}
-		} else if (c == 1 && L.clrMode[0] != gpu::ATTR_NONE) {
-			for (int k = 0; k < 4; k++) {
-				vtx[k] = in.clr[0][k] / 255.0f;
-			}
-		}
-		if ((u32)c >= numChans) {
-			for (int k = 0; k < 4; k++) {
-				out.color[c][k] = 0;
-			}
-			continue;
-		}
-		for (int part = 0; part < 2; part++) { // 0: color (rgb), 1: alpha
-			const u32 ctrl = xf[(part ? 0x1010 : 0x100E) + c];
-			const u32 matR = xf[0x100C + c], ambR = xf[0x100A + c];
-			float mat[4], amb[4];
-			for (int k = 0; k < 4; k++) {
-				mat[k] = bits(ctrl, 0, 1) ? vtx[k] : ((matR >> (24 - k * 8)) & 0xFF) / 255.0f;
-				amb[k] = bits(ctrl, 6, 1) ? vtx[k] : ((ambR >> (24 - k * 8)) & 0xFF) / 255.0f;
-			}
-			float result[4];
-			if (bits(ctrl, 1, 1)) {
-				float acc[4] = { amb[0], amb[1], amb[2], amb[3] };
-				const u32 mask = bits(ctrl, 2, 4) | (bits(ctrl, 11, 4) << 4);
-				const u32 diffuse = bits(ctrl, 7, 2);
-				const bool attnOn = bits(ctrl, 9, 1), spot = bits(ctrl, 10, 1);
-				for (int l = 0; l < 8; l++) {
-					if (!(mask & (1u << l))) {
-						continue;
-					}
-					const u32* lt = xf + 0x600 + l * 16;
-					float lcol[4] = { ((lt[3] >> 24) & 0xFF) / 255.0f, ((lt[3] >> 16) & 0xFF) / 255.0f, ((lt[3] >> 8) & 0xFF) / 255.0f,
-						              (lt[3] & 0xFF) / 255.0f };
-					float A[3] = { asFloat(lt[4]), asFloat(lt[5]), asFloat(lt[6]) };
-					float K[3] = { asFloat(lt[7]), asFloat(lt[8]), asFloat(lt[9]) };
-					float lp[3] = { asFloat(lt[10]), asFloat(lt[11]), asFloat(lt[12]) };
-					float ld[3] = { asFloat(lt[13]), asFloat(lt[14]), asFloat(lt[15]) };
-					float dir[3], attn = 1.0f;
-					if (attnOn && !spot) { // specular
-						float len = sqrtf(lp[0] * lp[0] + lp[1] * lp[1] + lp[2] * lp[2]);
-						for (int k = 0; k < 3; k++) dir[k] = len > 0 ? lp[k] / len : 0;
-						float nd  = nrm[0] * dir[0] + nrm[1] * dir[1] + nrm[2] * dir[2];
-						float a   = nd >= 0 ? fmaxf(0, nrm[0] * ld[0] + nrm[1] * ld[1] + nrm[2] * ld[2]) : 0;
-						float cosA = A[0] + A[1] * a + A[2] * a * a;
-						float disA = K[0] + K[1] * a + K[2] * a * a;
-						attn       = disA != 0 ? fmaxf(0, cosA) / disA : 0;
-					} else {
-						for (int k = 0; k < 3; k++) dir[k] = lp[k] - view[k];
-						float d2 = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
-						float d  = sqrtf(d2);
-						for (int k = 0; k < 3; k++) dir[k] = d > 0 ? dir[k] / d : 0;
-						if (attnOn) {
-							float a    = fmaxf(0, dir[0] * ld[0] + dir[1] * ld[1] + dir[2] * ld[2]);
-							float cosA = A[0] + A[1] * a + A[2] * a * a;
-							float disA = K[0] + K[1] * d + K[2] * d2;
-							attn       = disA != 0 ? fmaxf(0, cosA) / disA : 0;
-						}
-					}
-					float dif = 1.0f;
-					if (diffuse) {
-						dif = nrm[0] * dir[0] + nrm[1] * dir[1] + nrm[2] * dir[2];
-						if (diffuse == 2) dif = fmaxf(0, dif);
-					}
-					for (int k = 0; k < 4; k++) acc[k] += attn * dif * lcol[k];
-				}
-				for (int k = 0; k < 4; k++) result[k] = mat[k] * clampf(acc[k], 0, 1);
-			} else {
-				for (int k = 0; k < 4; k++) result[k] = mat[k];
-			}
-			if (part == 0) {
-				out.color[c][0] = result[0], out.color[c][1] = result[1], out.color[c][2] = result[2];
-			} else {
-				out.color[c][3] = result[3];
-			}
-		}
-	}
-
-	// texture coordinates
-	const u32 numTexGens = xf[0x103F] & 0xF;
-	const bool dual      = xf[0x1012] & 1;
-	for (u32 t = 0; t < 8; t++) {
-		out.tex[t][0] = out.tex[t][1] = 0;
-		out.tex[t][2] = 1;
-		if (t >= numTexGens) {
-			continue;
-		}
-		const u32 reg  = xf[0x1040 + t];
-		const bool stq = bits(reg, 1, 1);
-		const bool abc1 = bits(reg, 2, 1);
-		const u32 type = bits(reg, 4, 3);
-		const u32 row  = bits(reg, 7, 5);
-		float src[4]   = { 0, 0, 1, 1 };
-		switch (row) {
-		case 0: src[0] = pos[0], src[1] = pos[1], src[2] = pos[2]; break;
-		case 1: src[0] = in.nrm[0], src[1] = in.nrm[1], src[2] = in.nrm[2]; break;
-		case 3: src[0] = in.tangent[0], src[1] = in.tangent[1], src[2] = in.tangent[2]; break;
-		case 4: src[0] = in.binormal[0], src[1] = in.binormal[1], src[2] = in.binormal[2]; break;
-		default:
-			if (row >= 5 && row <= 12) {
-				src[0] = in.tex[row - 5][0], src[1] = in.tex[row - 5][1];
-			}
-			break;
-		}
-		if (!abc1) {
-			src[2] = 1.0f;
-		}
-		float s = 0, tt = 0, q = 1;
-		if (type == 0) {
-			const u32* tm = xf + (in.texmtx[t] & 63) * 4;
-			s  = asFloat(tm[0]) * src[0] + asFloat(tm[1]) * src[1] + asFloat(tm[2]) * src[2] + asFloat(tm[3]) * src[3];
-			tt = asFloat(tm[4]) * src[0] + asFloat(tm[5]) * src[1] + asFloat(tm[6]) * src[2] + asFloat(tm[7]) * src[3];
-			if (stq) {
-				q = asFloat(tm[8]) * src[0] + asFloat(tm[9]) * src[1] + asFloat(tm[10]) * src[2] + asFloat(tm[11]) * src[3];
-			}
-		} else if (type == 1) {
-			mStats.embossTexgens++;
-			u32 from = bits(reg, 12, 3);
-			s = out.tex[from][0], tt = out.tex[from][1], q = out.tex[from][2];
-		} else { // color: s = red, t = green of the channel
-			int c = type == 2 ? 0 : 1;
-			s = out.color[c][0], tt = out.color[c][1];
-		}
-		if (dual && type == 0) {
-			const u32 post = xf[0x1050 + t];
-			float v[3]     = { s, tt, q };
-			if (bits(post, 8, 1)) {
-				float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-				if (len > 0) v[0] /= len, v[1] /= len, v[2] /= len;
-			}
-			const u32* pm = xf + 0x500 + bits(post, 0, 6) * 4;
-			s  = asFloat(pm[0]) * v[0] + asFloat(pm[1]) * v[1] + asFloat(pm[2]) * v[2] + asFloat(pm[3]);
-			tt = asFloat(pm[4]) * v[0] + asFloat(pm[5]) * v[1] + asFloat(pm[6]) * v[2] + asFloat(pm[7]);
-			q  = asFloat(pm[8]) * v[0] + asFloat(pm[9]) * v[1] + asFloat(pm[10]) * v[2] + asFloat(pm[11]);
-		}
-		out.tex[t][0] = s, out.tex[t][1] = tt, out.tex[t][2] = q;
-	}
-}
-
 // ---------------------------------------------------------------- textures for a draw
 
 static void bindTextures(const gpu::State& S, gpu::Memory& mem, const u8* tmem, const std::map<u32, CopyTexture>& copies, Stats& st)
@@ -511,7 +209,7 @@ static void bindTextures(const gpu::State& S, gpu::Memory& mem, const u8* tmem, 
 			d.height = k.height;
 			d.size   = size;
 			d.rgba.assign(k.width * k.height, 0);
-			decodeTexture(src, k.width, k.height, k.format, tmem, k.tlut, k.tlutFormat, d.rgba.data());
+			gpu::decodeTexture(src, k.width, k.height, k.format, tmem, k.tlut, k.tlutFormat, d.rgba.data(), k.width, gpu::TEXELS_RGBA);
 			it = sTexCache.insert(std::make_pair(k, d)).first;
 		}
 		b.texels  = it->second.rgba.data();
@@ -603,9 +301,14 @@ void Renderer::draw(const gpu::DrawCall& call)
 	mScissor[2] = (int)bits(S.bp[0x21], 12, 11) - 342;
 	bindTextures(S, mMem, mTmem, mCopies, mStats);
 
+	gpu::XfSetup xs;
+	gpu::xfPrepare(S.xf, *call.layout, xs);
+	if (xs.emboss) {
+		mStats.embossTexgens++;
+	}
 	std::vector<OutVertex> v(call.count);
 	for (u32 i = 0; i < call.count; i++) {
-		transform(call.vertices[i], *call.layout, v[i]);
+		gpu::xfTransform(xs, call.vertices[i], v[i]);
 	}
 	const u32 n = call.count;
 	switch (prim) {
@@ -661,8 +364,8 @@ void Renderer::triangle(const OutVertex& a, const OutVertex& b, const OutVertex&
 		for (int i = 0; i < nin; i++) {
 			const OutVertex& p = in[i];
 			const OutVertex& q = in[(i + 1) % nin];
-			float dp = plane == 0 ? p.clip[2] + p.clip[3] : p.clip[3] - 1e-5f;
-			float dq = plane == 0 ? q.clip[2] + q.clip[3] : q.clip[3] - 1e-5f;
+			float dp = plane == 0 ? p.pos[2] + p.pos[3] : p.pos[3] - 1e-5f;
+			float dq = plane == 0 ? q.pos[2] + q.pos[3] : q.pos[3] - 1e-5f;
 			if (dp >= 0) {
 				out[nout++] = p;
 			}
@@ -698,10 +401,10 @@ void Renderer::rasterize(const OutVertex* v[3])
 	const float xo = asFloat(xf[0x101D]) - 342, yo = asFloat(xf[0x101E]) - 342, zo = asFloat(xf[0x101F]);
 	Screen p[3];
 	for (int i = 0; i < 3; i++) {
-		float iw  = 1.0f / v[i]->clip[3];
-		p[i].x    = xo + xs * v[i]->clip[0] * iw;
-		p[i].y    = yo + ys * v[i]->clip[1] * iw;
-		p[i].z    = zo + zs * v[i]->clip[2] * iw;
+		float iw  = 1.0f / v[i]->pos[3];
+		p[i].x    = xo + xs * v[i]->pos[0] * iw;
+		p[i].y    = yo + ys * v[i]->pos[1] * iw;
+		p[i].z    = zo + zs * v[i]->pos[2] * iw;
 		p[i].invW = iw;
 	}
 	float area = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (p[1].y - p[0].y);
@@ -792,6 +495,7 @@ void Renderer::shade(int x, int y, float zf, const float* color0, const float* c
 		ras[0][k] = clampi((int)(color0[k] * 255.0f + 0.5f), 0, 255);
 		ras[1][k] = clampi((int)(color1[k] * 255.0f + 0.5f), 0, 255);
 	}
+	u32 lastC = 0, lastA = 0;
 	for (u32 s = 0; s < stages; s++) {
 		const u32 tref = S.bp[0x28 + s / 2] >> ((s & 1) * 12);
 		const u32 cenv = S.bp[0xC0 + s * 2];
@@ -924,9 +628,12 @@ void Renderer::shade(int x, int y, float zf, const float* color0, const float* c
 		}
 		for (int k = 0; k < 3; k++) regs[cdest][k] = outC[k];
 		regs[adest][3] = outA;
+		lastC = cdest, lastA = adest;
 	}
+	// (the last stage's results are the output, whichever register they went to)
 	int src[4];
-	for (int k = 0; k < 4; k++) src[k] = clampi(regs[0][k], 0, 255);
+	for (int k = 0; k < 3; k++) src[k] = clampi(regs[lastC][k], 0, 255);
+	src[3] = clampi(regs[lastA][3], 0, 255);
 
 	// alpha test
 	const u32 ac = S.bp[0xF3];

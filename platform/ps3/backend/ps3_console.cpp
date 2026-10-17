@@ -1,5 +1,6 @@
-// PS3 port: on-screen text console. Until the GX->RSX graphics layer exists (Phase 4) the game draws
-// nothing, so the boot log is shown here instead. Drawn by the CPU straight into an RSX framebuffer.
+// PS3 port: on-screen text console. Until the game draws its first frames (the renderer in
+// platform/ps3/rsx takes the display over, ps3b_console_take_display), the boot log is shown here.
+// Drawn by the CPU straight into an RSX framebuffer.
 // The display set-up is a step-by-step copy of PSL1GHT's "blitting" sample (known to work on the
 // user's console), with every step logged so a failure shows up in the log file.
 // A background thread redraws the screen, answers the XMB "Quit Game" request and watches for the
@@ -34,7 +35,10 @@ static u32 sCurrent      = 0;
 static int sFirstFlip    = 1;
 static volatile int sScreenReady = 0;
 static u32 sLabelValue   = 1;
-static unsigned int sRsxMutex = 0; // RSX command buffer: console thread vs. shutdown
+static unsigned int sRsxMutex = 0; // RSX command buffer: console thread vs. shutdown and the hand-over
+static void* sHost        = NULL;
+static volatile int sTaken = 0;    // the renderer owns the display
+static void (*sOwnerStop)(void) = NULL;
 
 static char sLines[CON_LINES][CON_COLS + 1];
 static int sHead       = 0; // index of the line being written
@@ -156,6 +160,11 @@ static void waitFlip()
 
 static void redraw()
 {
+	ps3b_mutex_lock(sRsxMutex);
+	if (!sScreenReady) {
+		ps3b_mutex_unlock(sRsxMutex);
+		return;
+	}
 	u32* fb = sColor[sCurrent];
 	for (u32 i = 0; i < sHeight * (sPitch / 4); i++) {
 		fb[i] = 0x00101828;
@@ -182,19 +191,16 @@ static void redraw()
 	sDirty = 0;
 	ps3b_mutex_unlock(sConMutex);
 
-	ps3b_mutex_lock(sRsxMutex);
-	if (sScreenReady) {
-		if (!sFirstFlip) {
-			waitFlip();
-		} else {
-			gcmResetFlipStatus();
-			sFirstFlip = 0;
-		}
-		gcmSetFlip(sCtx, sCurrent);
-		rsxFlushBuffer(sCtx);
-		gcmSetWaitFlip(sCtx);
-		sCurrent ^= 1;
+	if (!sFirstFlip) {
+		waitFlip();
+	} else {
+		gcmResetFlipStatus();
+		sFirstFlip = 0;
 	}
+	gcmSetFlip(sCtx, sCurrent);
+	rsxFlushBuffer(sCtx);
+	gcmSetWaitFlip(sCtx);
+	sCurrent ^= 1;
 	ps3b_mutex_unlock(sRsxMutex);
 }
 
@@ -234,6 +240,7 @@ static int setupDisplay()
 {
 	conLog("[boot] video: reserving %d MB of RSX-mapped memory\n", CON_HOST_SIZE >> 20);
 	void* host = memalign(1024 * 1024, CON_HOST_SIZE);
+	sHost      = host;
 	if (!host) {
 		conLog("[boot] video: FAILED to allocate the RSX memory\n");
 		return 0;
@@ -309,8 +316,48 @@ extern "C" void ps3b_console_init(void)
 	}
 }
 
+extern "C" int ps3b_console_take_display(Ps3bDisplay* out)
+{
+	if (!sRsxMutex || !sScreenReady) {
+		return -1;
+	}
+	ps3b_mutex_lock(sRsxMutex);
+	if (!sScreenReady) {
+		ps3b_mutex_unlock(sRsxMutex);
+		return -1;
+	}
+	sScreenReady = 0;
+	sTaken       = 1;
+	if (!waitRSXIdle()) {
+		conLog("[boot] video: the RSX did not become idle for the hand-over\n");
+	}
+	out->context     = sCtx;
+	out->width       = sWidth;
+	out->height      = sHeight;
+	out->pitch       = sPitch;
+	out->buffers[0]  = sColor[0];
+	out->buffers[1]  = sColor[1];
+	out->offsets[0]  = sColorOffset[0];
+	out->offsets[1]  = sColorOffset[1];
+	out->next        = sCurrent;
+	out->flipped     = !sFirstFlip;
+	out->host        = sHost;
+	out->hostSize    = CON_HOST_SIZE;
+	out->commandSize = CON_CB_SIZE;
+	ps3b_mutex_unlock(sRsxMutex);
+	return 0;
+}
+
+extern "C" void ps3b_console_set_display_owner_stop(void (*stop)(void)) { sOwnerStop = stop; }
+
 extern "C" void ps3b_console_shutdown(void)
 {
+	if (sTaken) {
+		if (sOwnerStop) {
+			sOwnerStop(); // (the renderer stops and waits for the RSX)
+		}
+		return;
+	}
 	if (!sScreenReady || !sRsxMutex) {
 		return;
 	}

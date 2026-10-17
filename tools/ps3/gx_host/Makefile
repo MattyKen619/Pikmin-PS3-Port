@@ -16,7 +16,7 @@ GX_SRC   := $(filter-out $(ROOT)/src/gx/GXPerf.c,$(wildcard $(ROOT)/src/gx/*.c))
 GPU_SRC  := $(wildcard $(ROOT)/platform/ps3/gpu/*.cpp)
 OBJS     := $(patsubst $(ROOT)/%,$(BUILD)/%.o,$(GX_SRC) $(GPU_SRC)) $(BUILD)/host_os.o $(BUILD)/gx_selftest.o
 
-all: $(BUILD)/gx_selftest $(BUILD)/gx_replay $(BUILD)/gx_render
+all: $(BUILD)/gx_selftest $(BUILD)/gx_replay $(BUILD)/gx_render $(BUILD)/gx_rsx
 	rm -rf $(BUILD)/traces && mkdir -p $(BUILD)/traces
 	GX_TRACE_DIR=$(BUILD)/traces $(BUILD)/gx_selftest
 	rm -rf $(BUILD)/traces && mkdir -p $(BUILD)/traces
@@ -30,9 +30,20 @@ $(BUILD)/gx_replay: gx_replay.cpp gx_trace_file.h $(ROOT)/platform/ps3/gpu/gpu_c
 	g++ -std=gnu++14 -O2 -g -Wall -o $@ gx_replay.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.cpp
 
 # Draws frame traces with the software renderer (sw_render.cpp): gx_render TRACE OUT.png
-$(BUILD)/gx_render: gx_render.cpp sw_render.cpp sw_render.h gx_trace_file.h $(ROOT)/platform/ps3/gpu/gpu_cp.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.h
+SHARED_GPU := $(ROOT)/platform/ps3/gpu/gpu_cp.cpp $(ROOT)/platform/ps3/gpu/gpu_xf.cpp $(ROOT)/platform/ps3/gpu/gpu_tex.cpp
+SHARED_HDR := $(ROOT)/platform/ps3/gpu/gpu_cp.h $(ROOT)/platform/ps3/gpu/gpu_xf.h $(ROOT)/platform/ps3/gpu/gpu_tex.h
+$(BUILD)/gx_render: gx_render.cpp sw_render.cpp sw_render.h gx_trace_file.h $(SHARED_GPU) $(SHARED_HDR)
 	@mkdir -p $(BUILD)
-	g++ -std=gnu++14 -O2 -g -Wall -o $@ gx_render.cpp sw_render.cpp $(ROOT)/platform/ps3/gpu/gpu_cp.cpp -lz
+	g++ -std=gnu++14 -O2 -g -Wall -o $@ gx_render.cpp sw_render.cpp $(SHARED_GPU) -lz
+
+# Draws frame traces with the PS3 renderer (platform/ps3/rsx) on a software RSX, compared with gx_render
+RSX_DIR := $(ROOT)/platform/ps3/rsx
+RSX_SRC := $(RSX_DIR)/renderer.cpp $(RSX_DIR)/tev_program.cpp $(RSX_DIR)/fp_assembler.cpp $(RSX_DIR)/fpasm/parser.cpp \
+           $(RSX_DIR)/fpasm/fpparser.cpp $(RSX_DIR)/fpasm/compilerfp.cpp
+RSX_HDR := $(wildcard $(RSX_DIR)/*.h) $(wildcard $(RSX_DIR)/fpasm/*.h)
+$(BUILD)/gx_rsx: gx_rsx.cpp soft_device.cpp soft_device.h sw_render.cpp sw_render.h gx_trace_file.h $(SHARED_GPU) $(SHARED_HDR) $(RSX_SRC) $(RSX_HDR)
+	@mkdir -p $(BUILD)
+	g++ -std=gnu++14 -O2 -g -Wall -Wno-unused-function -o $@ gx_rsx.cpp soft_device.cpp sw_render.cpp $(SHARED_GPU) $(RSX_SRC) -lz
 
 $(BUILD)/gx_selftest: $(OBJS)
 	g++ -o $@ $(OBJS) -lpthread

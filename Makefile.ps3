@@ -31,10 +31,13 @@ GXSDK_C      := $(shell awk '$$1=="gxsdk"{print $$2}' $(PORT_LIST))
 LIBS_C       := $(shell awk '$$1=="libs"{print $$2}' $(PORT_LIST))
 PLATFORM_CPP := $(wildcard platform/ps3/sdk/*.cpp) $(wildcard platform/ps3/gpu/*.cpp) $(wildcard platform/ps3/stubs/*.cpp)
 BACKEND_CPP  := $(wildcard platform/ps3/backend/*.cpp)
+# The RSX renderer (with PSL1GHT's fragment program assembler, platform/ps3/rsx/fpasm)
+RSX_CPP      := $(wildcard platform/ps3/rsx/*.cpp) $(wildcard platform/ps3/rsx/fpasm/*.cpp)
 
 OBJDIR  := $(BUILD)/obj
 objs_of  = $(addprefix $(OBJDIR)/,$(addsuffix .o,$(1)))
-OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(GXSDK_C) $(LIBS_C) $(PLATFORM_CPP) $(BACKEND_CPP))
+OBJECTS := $(call objs_of,$(GAME_CPP) $(JAUDIO_C) $(GXSDK_C) $(LIBS_C) $(PLATFORM_CPP) $(BACKEND_CPP) $(RSX_CPP))
+GENDIR  := $(BUILD)/gen
 
 #---------------------------------------------------------------------------------
 # Flags
@@ -48,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 21
+TEST_BUILD := 22
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -115,6 +118,18 @@ $(call objs_of,$(BACKEND_CPP)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
 	@$(CXX) $(BACKEND_CXXFLAGS) -c $< -o $@
+
+# RSX renderer (PS3 SDK headers, like the backend; the vertex program is assembled by cgcomp)
+$(call objs_of,$(RSX_CPP)): $(OBJDIR)/%.o: % | $(GENDIR)/passthrough_vpo.h
+	@mkdir -p $(dir $@)
+	@echo $<
+	@$(CXX) $(BACKEND_CXXFLAGS) -I$(GENDIR) -c $< -o $@
+
+$(GENDIR)/passthrough_vpo.h: platform/ps3/rsx/passthrough.vp tools/ps3/bin2h.py
+	@mkdir -p $(GENDIR)
+	@echo $<
+	@$(PS3DEV)/bin/cgcomp -v -a $< $(GENDIR)/passthrough.vpo
+	@python3 tools/ps3/bin2h.py $(GENDIR)/passthrough.vpo kPassthroughVpo $@
 
 clean:
 	@rm -rf $(BUILD)

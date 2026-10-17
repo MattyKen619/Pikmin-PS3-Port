@@ -1,0 +1,17 @@
+!!VP2.0
+# PS3 port: the renderer's only vertex program. Vertices arrive transformed and lit (renderer.cpp does
+# that on the CPU): the position is already in clip space. Texture coordinates come as (s, t, q) and leave
+# as (s, t, q, q), so a projective texture lookup (TXP) divides s and t by q.
+# Assembled at build time with PSL1GHT's cgcomp (cgcomp -v -a), see Makefile.ps3.
+MOV o[HPOS], v[0];
+MOV o[COL0], v[3];
+MOV o[COL1], v[4];
+MOV o[TEX0], v[8].xyzz;
+MOV o[TEX1], v[9].xyzz;
+MOV o[TEX2], v[10].xyzz;
+MOV o[TEX3], v[11].xyzz;
+MOV o[TEX4], v[12].xyzz;
+MOV o[TEX5], v[13].xyzz;
+MOV o[TEX6], v[14].xyzz;
+MOV o[TEX7], v[15].xyzz;
+END
