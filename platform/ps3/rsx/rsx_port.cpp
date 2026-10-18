@@ -50,6 +50,16 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 	}
 	ps3b_log_write(sRenderer->gpuTransform() ? "[rsx] vertices are transformed and lit by the RSX (vertex programs)\n"
 	                                         : "[rsx] vertices are transformed and lit on the CPU\n");
+	if (ps3b_data_root()) {
+		char path[256];
+		snprintf(path, sizeof(path), "%s/no_vertex_cache.txt", ps3b_data_root());
+		if (ps3b_file_exists(path)) {
+			sRenderer->setVertexCache(false);
+			ps3b_log_write("[rsx] PIKMIN/no_vertex_cache.txt exists: the vertex cache is off\n");
+		}
+	}
+	ps3b_log_write(sRenderer->vertexCache() ? "[rsx] display list draws are kept in the vertex cache\n"
+	                                        : "[rsx] the vertex cache is off\n");
 	sRenderer->begin();
 	return sRenderer;
 }

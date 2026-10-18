@@ -13,6 +13,7 @@
 extern "C" void ps3OsMiscInit(void);
 extern "C" void ps3StartWatchdog(void);
 extern "C" void ps3CardPreload(void);
+extern "C" void ps3AudioStartOutput(void);
 
 #ifndef PS3_TEST_BUILD
 #define PS3_TEST_BUILD 0
@@ -85,5 +86,7 @@ extern "C" void ps3PlatformInit(void)
 	ps3ViStart();
 	ps3BootStage("watchdog");
 	ps3StartWatchdog();
+	ps3BootStage("sound output");
+	ps3AudioStartOutput();
 	ps3BootStage("platform ready, starting the game");
 }

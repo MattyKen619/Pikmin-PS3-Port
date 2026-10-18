@@ -152,6 +152,7 @@ struct State {
 	u8 fadeRequested[TRACKED_VOICES];
 	u8 endedHere[TRACKED_VOICES];   // this file set "done" (sound ended, or a requested fade finished)
 	u32 startedAt[TRACKED_VOICES];  // sub-frame count when it started
+	u16 peakIn[TRACKED_VOICES];     // largest input sample (before volume) since it started: 0 = silent data
 };
 
 static State S;
@@ -630,6 +631,7 @@ static void renderVoice(DSPchannel_* block)
 		S.startedAt[index]     = S.subframes;
 		S.fadeRequested[index] = 0;
 		S.endedHere[index]     = 0;
+		S.peakIn[index]        = 0;
 	}
 	if (v.endRequested && tracked && !S.fadeRequested[index]) {
 		S.fadeRequested[index] = 1;
@@ -649,6 +651,14 @@ static void renderVoice(DSPchannel_* block)
 
 	s16 in[SUBFRAME];
 	loadInput(&v, in);
+	if (tracked && S.loggedStops < 24) {
+		u16 pk = S.peakIn[index];
+		for (int i = 0; i < SUBFRAME; i++) {
+			const u16 a = (u16)(in[i] < 0 ? -(s32)in[i] : in[i]);
+			pk          = a > pk ? a : pk;
+		}
+		S.peakIn[index] = pk;
+	}
 
 	if (v.lowPassCoeff != 0) {
 		lowPass(&v, in);
@@ -903,7 +913,8 @@ extern "C" void ps3DspRenderSubframe(void)
 				const char* how = S.endedHere[i] ? (S.fadeRequested[i] ? "faded out" : "sound ended")
 				                                 : (S.fadeRequested[i] ? "stopped by the game during its fade-out"
 				                                                       : "stopped by the game");
-				ps3Log("[sound] voice %d: %s, after %u ms\n", (int)i, how, (unsigned)((S.subframes - S.startedAt[i]) * 5 / 2));
+				ps3Log("[sound] voice %d: %s, after %u ms (loudest sample %u of 32767)\n", (int)i, how,
+				       (unsigned)((S.subframes - S.startedAt[i]) * 5 / 2), (unsigned)S.peakIn[i]);
 			}
 			S.active[i] = active;
 		}

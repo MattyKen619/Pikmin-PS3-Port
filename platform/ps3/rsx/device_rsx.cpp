@@ -1073,14 +1073,17 @@ void RsxDevice::testVertexPrograms(u8* mem, const RenderState& rs)
 		else NOTE("WRONG (%08x %08x)", seen[0], seen[1]);
 	}
 	// j. 32-bit indices read from memory: vertices far into the memory (the renderer's vertex cache draws
-	// them that way)
+	// them that way). In a row of its own: the row above is full (test 27 drew it past the frame's right
+	// edge, and the pixel read there is 0).
 	mIndex32Works = false;
 	if (plain) {
 		const u32 far = 70000; // (beyond 16 bits)
 		u8* vbase     = mem + ((used + 127) & ~127u);
 		u8* v         = vbase + far * 32;
 		memset(v, 0, 4 * 32);
-		const float xs[4] = { x0, x0 + 40, x0 + 40, x0 }, ys[4] = { y0, y0, y0 + 30, y0 + 30 };
+		x0 = 10;
+		const float yj = y0 - 40;
+		const float xs[4] = { x0, x0 + 40, x0 + 40, x0 }, ys[4] = { yj, yj, yj + 30, yj + 30 };
 		for (int i = 0; i < 4; i++) {
 			float* fv = (float*)(v + i * 32);
 			fv[0]     = xs[i] / EFB_WIDTH * 2.0f - 1.0f;
@@ -1093,7 +1096,7 @@ void RsxDevice::testVertexPrograms(u8* mem, const RenderState& rs)
 		u32* qi32 = (u32*)(v + 4 * 32 + 128); // (the chip reads the indices from memory)
 		qi32[0] = far, qi32[1] = far + 1, qi32[2] = far + 2, qi32[3] = far, qi32[4] = far + 2, qi32[5] = far + 3;
 		drawTriangles32(qi32, 6);
-		u32 px        = pixel((u32)x0 + 20, (u32)y0 + 15);
+		u32 px        = pixel((u32)x0 + 20, (u32)yj + 15);
 		mIndex32Works = px == 0xFF00FF00;
 		NOTE(", 32-bit indices %s", mIndex32Works ? "ok" : "WRONG");
 		if (!mIndex32Works) NOTE(" (%08x)", px);

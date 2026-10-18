@@ -69,6 +69,11 @@ static volatile u32 sRingRead;  // frames read
 static volatile unsigned long long sLastPullTb;
 static volatile u32 sUnderruns, sOverruns;
 
+// (diagnostics, further down)
+static void captureOutput(const float* src, u32 have, u32 frames);
+static volatile u32 sEarlyDropped, sEarlyUnderruns;
+static volatile unsigned long long sStartTb, sFirstPullTb;
+
 // Resampler state: position in source frames relative to the current block (-1 <= pos < 0 between
 // blocks: interpolate from the previous block's last frame).
 static double sSrcPos = -1.0;
@@ -123,6 +128,15 @@ static unsigned int pullOutput(float* dst, unsigned int frames)
 	if (n < frames && sAiBlocks > 100) {
 		sUnderruns++;
 	}
+	if (sStartTb) {
+		if (n < frames && sAiBlocks <= 400) {
+			sEarlyUnderruns++;
+		}
+		if (!sFirstPullTb) {
+			sFirstPullTb = sLastPullTb;
+		}
+	}
+	captureOutput(dst, n, frames);
 	return n;
 }
 
@@ -152,33 +166,65 @@ extern "C" void ps3NoteDspOverload(unsigned int frameGap, unsigned int subframeT
 static u32 sLastBlockAddr;
 static u32 sLastStreamState = 4;
 
-// The recording was for checking the sound in test builds 14-16; build with -DPS3_SOUND_CAPTURE=1 to
-// turn it back on.
+// Recordings of the first seconds of sound, for checking it off the console: what the game's mixer made
+// (PIKMIN/sound_mix.wav, 32 kHz, the blocks the AI plays) and what went to the PS3's sound output
+// (PIKMIN/sound_out.wav, 48 kHz). (Test builds 14-16 recorded the first; test 28 both, to find where the
+// Nintendo logo's sound is lost.) Build with -DPS3_SOUND_CAPTURE=0 to leave them out.
 #ifndef PS3_SOUND_CAPTURE
-#define PS3_SOUND_CAPTURE 0
+#define PS3_SOUND_CAPTURE 1
 #endif
-enum { CAPTURE_SECONDS = 150, CAPTURE_RATE = 32028 };
-static u8* sCapture;               // WAV data: little-endian 16-bit, left then right
-static volatile u32 sCaptureFrames; // frames recorded (timer thread)
-static u32 sCaptureMax;
+enum { CAPTURE_SECONDS = 25 };
+struct Capture {
+	u8* data;              // WAV data: little-endian 16-bit, left then right
+	volatile u32 frames;   // frames recorded
+	u32 max, rate;
+	const char* name;
+};
+static Capture sMixCapture = { NULL, 0, 0, 32028, "sound_mix.wav" };
+static Capture sOutCapture = { NULL, 0, 0, 48000, "sound_out.wav" };
 
+// (src: interleaved s16, right then left as the AI plays them)
 static void captureBlock(const s16* src, u32 frames)
 {
-	if (!sCapture) {
+	Capture& c = sMixCapture;
+	if (!c.data) {
 		return;
 	}
-	u32 n = sCaptureFrames;
-	for (u32 i = 0; i < frames && n < sCaptureMax; i++, n++) {
+	u32 n = c.frames;
+	for (u32 i = 0; i < frames && n < c.max; i++, n++) {
 		u16 l   = (u16)src[2 * i + 1];
 		u16 r   = (u16)src[2 * i];
-		u8* out = sCapture + n * 4;
+		u8* out = c.data + n * 4;
 		out[0]  = (u8)l;
 		out[1]  = (u8)(l >> 8);
 		out[2]  = (u8)r;
 		out[3]  = (u8)(r >> 8);
 	}
 	__sync_synchronize();
-	sCaptureFrames = n;
+	c.frames = n;
+}
+
+// (src: interleaved floats, left then right, as the sound thread gets them; silence for frames missing)
+static void captureOutput(const float* src, u32 have, u32 frames)
+{
+	Capture& c = sOutCapture;
+	if (!c.data) {
+		return;
+	}
+	u32 n = c.frames;
+	for (u32 i = 0; i < frames && n < c.max; i++, n++) {
+		float fl = i < have ? src[2 * i] : 0.0f, fr = i < have ? src[2 * i + 1] : 0.0f;
+		s32 l = (s32)(fl * 32767.0f), r = (s32)(fr * 32767.0f);
+		l = l < -32768 ? -32768 : (l > 32767 ? 32767 : l);
+		r = r < -32768 ? -32768 : (r > 32767 ? 32767 : r);
+		u8* out = c.data + n * 4;
+		out[0]  = (u8)(u16)l;
+		out[1]  = (u8)((u16)l >> 8);
+		out[2]  = (u8)(u16)r;
+		out[3]  = (u8)((u16)r >> 8);
+	}
+	__sync_synchronize();
+	c.frames = n;
 }
 
 static void put32le(u8* p, u32 v)
@@ -191,47 +237,55 @@ static void put32le(u8* p, u32 v)
 
 static void captureWriterThread(void*)
 {
-	char path[512];
-	snprintf(path, sizeof(path), "%s/sound_capture.wav", ps3b_data_root());
-	int fd = ps3b_file_open_rw(path, 1);
-	if (fd < 0) {
-		ps3Log("[ps3] sound capture: could not create %s\n", path);
-		return;
+	Capture* caps[2] = { &sMixCapture, &sOutCapture };
+	int fd[2];
+	u32 written[2] = { 0, 0 };
+	bool done[2]   = { false, false };
+	for (int k = 0; k < 2; k++) {
+		char path[512];
+		snprintf(path, sizeof(path), "%s/%s", ps3b_data_root(), caps[k]->name);
+		fd[k] = ps3b_file_open_rw(path, 1);
+		if (fd[k] < 0) {
+			ps3Log("[ps3] sound capture: could not create %s\n", path);
+			done[k] = true;
+		}
 	}
-	ps3Log("[ps3] sound capture: recording the first %d seconds to %s\n", CAPTURE_SECONDS, path);
-	u32 written = 0;
-	for (;;) {
+	ps3Log("[ps3] sound capture: recording the first %d seconds to PIKMIN/sound_mix.wav and sound_out.wav\n", CAPTURE_SECONDS);
+	while (!done[0] || !done[1]) {
 		ps3b_sleep_us(500 * 1000);
-		u32 frames = sCaptureFrames;
-		if (frames == written) {
-			continue;
-		}
-		ps3b_file_pwrite(fd, sCapture + written * 4, 44 + (unsigned long long)written * 4, (frames - written) * 4);
-		written = frames;
-		u8 h[44];
-		memcpy(h, "RIFF", 4);
-		put32le(h + 4, 36 + written * 4);
-		memcpy(h + 8, "WAVEfmt ", 8);
-		put32le(h + 16, 16);
-		h[20] = 1; // PCM
-		h[21] = 0;
-		h[22] = 2; // channels
-		h[23] = 0;
-		put32le(h + 24, CAPTURE_RATE);
-		put32le(h + 28, CAPTURE_RATE * 4);
-		h[32] = 4; // bytes per frame
-		h[33] = 0;
-		h[34] = 16; // bits
-		h[35] = 0;
-		memcpy(h + 36, "data", 4);
-		put32le(h + 40, written * 4);
-		ps3b_file_pwrite(fd, h, 0, 44);
-		if (written >= sCaptureMax) {
-			ps3b_file_close(fd);
-			ps3Log("[ps3] sound capture: done (%d seconds)\n", CAPTURE_SECONDS);
-			return;
+		for (int k = 0; k < 2; k++) {
+			Capture& c   = *caps[k];
+			u32 frames   = c.frames;
+			if (done[k] || frames == written[k]) {
+				continue;
+			}
+			ps3b_file_pwrite(fd[k], c.data + written[k] * 4, 44 + (unsigned long long)written[k] * 4, (frames - written[k]) * 4);
+			written[k] = frames;
+			u8 h[44];
+			memcpy(h, "RIFF", 4);
+			put32le(h + 4, 36 + frames * 4);
+			memcpy(h + 8, "WAVEfmt ", 8);
+			put32le(h + 16, 16);
+			h[20] = 1; // PCM
+			h[21] = 0;
+			h[22] = 2; // channels
+			h[23] = 0;
+			put32le(h + 24, c.rate);
+			put32le(h + 28, c.rate * 4);
+			h[32] = 4; // bytes per frame
+			h[33] = 0;
+			h[34] = 16; // bits
+			h[35] = 0;
+			memcpy(h + 36, "data", 4);
+			put32le(h + 40, frames * 4);
+			ps3b_file_pwrite(fd[k], h, 0, 44);
+			if (frames >= c.max) {
+				ps3b_file_close(fd[k]);
+				done[k] = true;
+			}
 		}
 	}
+	ps3Log("[ps3] sound capture: done (%d seconds)\n", CAPTURE_SECONDS);
 }
 
 static void startCapture()
@@ -239,14 +293,20 @@ static void startCapture()
 	if (!ps3b_data_root()) {
 		return;
 	}
-	sCaptureMax = CAPTURE_SECONDS * CAPTURE_RATE;
-	sCapture    = (u8*)ps3b_memalign(32, sCaptureMax * 4);
-	if (!sCapture) {
-		ps3Log("[ps3] sound capture: not enough memory\n");
-		return;
+	Capture* caps[2] = { &sMixCapture, &sOutCapture };
+	for (int k = 0; k < 2; k++) {
+		caps[k]->max  = CAPTURE_SECONDS * caps[k]->rate;
+		caps[k]->data = (u8*)ps3b_memalign(32, caps[k]->max * 4);
+		if (!caps[k]->data) {
+			ps3Log("[ps3] sound capture: not enough memory\n");
+			return;
+		}
 	}
 	ps3b_thread_create(captureWriterThread, NULL, 1400, 0x8000, "pikmin_capture");
 }
+
+// (sEarlyDropped, sEarlyUnderruns: the first seconds of sound, where the Nintendo logo's is: blocks the game
+// made while the sound output was not running, not sent on; times the output found nothing queued)
 
 static bool outputRunning(unsigned long long now, unsigned long long freq)
 {
@@ -324,8 +384,20 @@ static void aiTimerThread(void*)
 			sLastBlockAddr = addr;
 			if (output) {
 				pushDacBlock((const s16*)(uptr)addr, len / 4, rate48 ? 48000.0 : 32028.5);
+			} else if (sAiBlocks <= 400) {
+				sEarlyDropped++;
 			}
 			captureBlock((const s16*)(uptr)addr, len / 4);
+			static int sReported;
+			const u32 blocks = sAiBlocks;
+			if ((blocks >= 100 && sReported == 0) || (blocks >= 400 && sReported == 1)) {
+				sReported++;
+				const unsigned long long f = ps3b_timebase_freq();
+				ps3Log("[ps3] audio: first %u blocks (%u ms): %u not sent on (the sound output was not running), %u times the "
+				       "output found nothing queued; output first pulled %u ms after the start\n",
+				       (unsigned)blocks, (unsigned)((ps3b_timebase() - sStartTb) * 1000 / f), (unsigned)sEarlyDropped,
+				       (unsigned)sEarlyUnderruns, sFirstPullTb ? (unsigned)((sFirstPullTb - sStartTb) * 1000 / f) : 0u);
+			}
 		}
 		u32 streamState = ps3StreamControl->playbackState;
 		if (streamState == 5 && sLastStreamState != 5) {
@@ -369,6 +441,7 @@ void AIStartDMA(void)
 	PS3_ACTIVITY("AIStartDMA");
 	if (!sAiThreadStarted) {
 		sAiThreadStarted = 1;
+		sStartTb = ps3b_timebase();
 		if (PS3_SOUND_CAPTURE) {
 			startCapture();
 		}
@@ -377,6 +450,10 @@ void AIStartDMA(void)
 		ps3Log("[ps3] audio: interface timer started\n");
 	}
 }
+
+// The PS3's sound output starts at boot, playing silence until the game's sound starts (AIStartDMA): a
+// TV or receiver that takes a moment to pick the sound up has it by the time of the Nintendo logo's.
+extern "C" void ps3AudioStartOutput(void) { ps3b_audio_start(pullOutput); }
 
 void AISetDSPSampleRate(u32 rate) { sDspSampleRate = rate; }
 u32 AIGetDSPSampleRate(void) { return sDspSampleRate; }
