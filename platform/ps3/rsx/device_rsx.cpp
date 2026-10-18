@@ -505,11 +505,10 @@ void RsxDevice::setVertexProgram(const VertexProgram* program)
 void RsxDevice::setVertexConstants(u32 first, u32 count, const float* values)
 {
 	checkStop();
-	// (in pieces of at most 7: PSL1GHT's loader copies blocks of 8 or more wrongly)
-	for (u32 i = 0; i < count; i += 7) {
-		const u32 n = count - i < 7 ? count - i : 7;
-		rsxSetVertexProgramConstants(CTX, first + i, n * 4, values + i * 4);
-	}
+	// Not rsxSetVertexProgramConstants: in PSL1GHT it converts the floats to integers (1.0 arrives as the
+	// bits 0x00000001) and then moves past its commands a second time, leaving that many stale words of the
+	// command buffer for the RSX to run as commands (test 25: the RSX drew nothing all game).
+	rsxLoadVertexProgramParameterBlock(CTX, first, count, values);
 }
 
 void RsxDevice::setVertexFormat(const void* base, const VertexFormat& f)
@@ -960,7 +959,8 @@ void RsxDevice::testVertexPrograms(u8* mem, const RenderState& rs)
 		b.sne(DT(4, M_Z), C(110)("x"), T(3)("x"));   // 1
 		b.mul(DT(2, M_W), T(4)("x"), T(4)("y"));
 		b.mul(DT(2, M_W), T(2)("w"), T(4)("z"));     // 1
-		b.max(DT(5, M_X), -C(110)("x"), C(0)("x"));  // 0
+		b.mov(DT(7), C(110));
+		b.max(DT(5, M_X), -T(7)("x"), C(0)("x"));    // 0
 		b.add(DT(2, M_X), T(2)("x"), T(5)("x"));
 		b.mad(DT(6), T(2), C(0)("y"), C(0)("x"), true);
 		b.mov(DO(O_COL0), T(6));
