@@ -32,7 +32,7 @@ public:
 	int GetTexcoord3D() const { return m_nTexcoord3D; }
 
 	int GetInstructionCount() const {return m_nInstructions;}
-	std::list<struct fragment_program_data> GetConstRelocations() const { return m_lConstData; }
+	gfx::List<struct fragment_program_data> GetConstRelocations() const { return m_lConstData; }
 	struct fragment_program_exec* GetInstructions() const { return m_pInstructions; }
 	const char* GetError() const { return m_pError; } // (PS3 port) NULL if the program compiled
 
@@ -71,7 +71,7 @@ private:
 	inline param GetImmData(int index)
 	{
 		s32 i;
-		std::list<param>::iterator it = m_lParameters.begin();
+		gfx::List<param>::iterator it = m_lParameters.begin();
 		for(;it!=m_lParameters.end();it++) {
 			for(i=0;i<it->count;i++) {
 				if((int)(it->index + i)==index) {
@@ -86,7 +86,7 @@ private:
 	inline param GetInputAttrib(int index)
 	{
 		s32 i;
-		std::list<param>::iterator it = m_lParameters.begin();
+		gfx::List<param>::iterator it = m_lParameters.begin();
 		for(;it!=m_lParameters.end();it++) {
 			for(i=0;i<it->count;i++) {
 				if((int)(it->index + i)==index) {
@@ -117,11 +117,11 @@ private:
 	u8 m_RRegs[NUM_HW_REGS];
 	u8 m_HRegs[NUM_HW_REGS];
 
-	std::list<param> m_lParameters;
-	std::list<struct fragment_program_data> m_lConstData;
-	std::stack<int> m_repStack;
-	std::stack<int> m_ifStack;
-	std::stack<int> m_loopStack;
+	gfx::List<param> m_lParameters;
+	gfx::List<struct fragment_program_data> m_lConstData;
+	gfx::Stack<int> m_repStack;
+	gfx::Stack<int> m_ifStack;
+	gfx::Stack<int> m_loopStack;
 
 	const char* m_pError; // (PS3 port)
 };

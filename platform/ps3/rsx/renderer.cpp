@@ -119,9 +119,9 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 Renderer::~Renderer()
 {
 	free(mTmem);
-	for (std::map<u32, std::vector<ProgramEntry*> >::iterator it = mPrograms.begin(); it != mPrograms.end(); ++it) {
+	for (Map<u32, Vec<ProgramEntry*> >::iterator it = mPrograms.begin(); it != mPrograms.end(); ++it) {
 		for (size_t i = 0; i < it->second.size(); i++) {
-			delete it->second[i];
+			destroy(it->second[i]);
 		}
 	}
 }
@@ -365,7 +365,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	k.format  = bits(img0, 20, 4);
 
 	// a copy out of the frame buffer to this address?
-	std::map<u32, CopyEntry>::iterator ci = mCopies.find(k.address);
+	Map<u32, CopyEntry>::iterator ci = mCopies.find(k.address);
 	if (ci != mCopies.end()) {
 		CopyEntry& c = ci->second;
 		bool valid   = true;
@@ -512,7 +512,7 @@ bool Renderer::updateState()
 	TevKey key;
 	makeTevKey(bp, key);
 	if (!mProgram || !(mProgram->key == key)) {
-		std::vector<ProgramEntry*>& chain = mPrograms[key.hash()];
+		Vec<ProgramEntry*>& chain = mPrograms[key.hash()];
 		ProgramEntry* found               = NULL;
 		for (size_t i = 0; i < chain.size(); i++) {
 			if (chain[i]->key == key) {
@@ -521,7 +521,7 @@ bool Renderer::updateState()
 			}
 		}
 		if (!found) {
-			found      = new ProgramEntry;
+			found      = create<ProgramEntry>();
 			found->key = key;
 			const char* error;
 			found->ok = buildTevProgram(key, found->prog, &error);
@@ -530,7 +530,7 @@ bool Renderer::updateState()
 				mStats.programErrors++;
 				if (mStats.programErrors <= 3) {
 					log("[rsx] FAILED to assemble a TEV program (%s):\n", error ? error : "?");
-					const std::string& t = found->prog.text;
+					const Str& t = found->prog.text;
 					for (size_t at = 0; at < t.size(); at += 400) {
 						log("%s", t.substr(at, 400).c_str());
 					}
@@ -680,7 +680,7 @@ void Renderer::draw(const gpu::DrawCall& call)
 	// correct also for triangles that cross the camera plane).
 	const float xyScale = mState.viewportScale[0] * mState.viewportScale[1];
 	const u32 cull      = mCull;
-	std::vector<unsigned short>& ix = mBatch.indices;
+	Vec<unsigned short>& ix = mBatch.indices;
 	const u32 n = call.count;
 #define POS(i) ((const float*)(out + (i) * stride))
 #define TRI(i0, i1, i2)                                                                                                  \
@@ -789,7 +789,7 @@ void Renderer::present(const gpu::CopyInfo& info)
 {
 	if (!mCopyProgramReady[COPY_RGB][0]) {
 		const char* error;
-		std::string text = copyProgramText(COPY_RGB, false);
+		Str text = copyProgramText(COPY_RGB, false);
 		if (!assembleFragmentProgram(text.c_str(), mCopyPrograms[COPY_RGB][0], &error)) {
 			log("[rsx] FAILED to assemble the display program: %s\n", error);
 			return;
@@ -848,7 +848,7 @@ void Renderer::copyToTexture(const gpu::CopyInfo& info)
 	const int in = (intens && (mode == COPY_R_ALL || mode == COPY_RA)) ? 1 : 0;
 	if (!mCopyProgramReady[mode][in]) {
 		const char* error;
-		std::string text = copyProgramText(mode, in != 0);
+		Str text = copyProgramText(mode, in != 0);
 		if (!assembleFragmentProgram(text.c_str(), mCopyPrograms[mode][in], &error)) {
 			log("[rsx] FAILED to assemble a copy program: %s\n", error);
 			return;
@@ -889,7 +889,7 @@ void Renderer::copyToTexture(const gpu::CopyInfo& info)
 	c.memKnown     = mem != NULL;
 	c.memHash      = mem ? gpu::hashMemory(mem, size) : 0;
 	// (decoded textures at that address are out of date)
-	for (std::map<TexKey, TexEntry>::iterator it = mTextures.begin(); it != mTextures.end();) {
+	for (Map<TexKey, TexEntry>::iterator it = mTextures.begin(); it != mTextures.end();) {
 		if (it->first.address == address) {
 			retire(it->second.tex);
 			mTextures.erase(it++);
@@ -957,7 +957,7 @@ void Renderer::evictTextures()
 	if (mTextureBytes <= TEXTURE_BUDGET) {
 		return;
 	}
-	for (std::map<TexKey, TexEntry>::iterator it = mTextures.begin(); it != mTextures.end() && mTextureBytes > TEXTURE_BUDGET * 3 / 4;) {
+	for (Map<TexKey, TexEntry>::iterator it = mTextures.begin(); it != mTextures.end() && mTextureBytes > TEXTURE_BUDGET * 3 / 4;) {
 		if (it->second.usedFrame + 2 <= mFrame) {
 			retire(it->second.tex);
 			mTextures.erase(it++);

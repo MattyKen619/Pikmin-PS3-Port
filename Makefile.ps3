@@ -78,6 +78,7 @@ $(BUILD)/$(TARGET).elf: $(OBJECTS)
 	@echo linking ... $(notdir $@)
 	@$(CXX) $(LDFLAGS) $(OBJECTS) $(LIBPSL1GHT_LIB) $(LIBS) -o $@
 	@python3 tools/ps3/check_imports.py $@ --allow cellSysmodule --allow cellAudio || (rm -f $@; false)
+	@! $(PREFIX)nm -u $(call objs_of,$(RSX_CPP)) | grep -E ' _Zn[wa]' || (echo "the renderer must not use the game's operator new (platform/ps3/rsx/rsx_alloc.h)"; rm -f $@; false)
 	@mkdir -p $(BUILD)/archive/test$(TEST_BUILD) && cp $@ $(BUILD)/$(TARGET).map $(BUILD)/archive/test$(TEST_BUILD)/
 
 # game C++

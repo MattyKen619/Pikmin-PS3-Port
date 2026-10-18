@@ -9,7 +9,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <vector>
 
 static gfx::RsxDevice* sDev;
 static gfx::Renderer* sRenderer;
@@ -26,12 +25,12 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 			return NULL;
 		}
 	}
-	sDev = new gfx::RsxDevice;
+	sDev = gfx::create<gfx::RsxDevice>();
 	if (!sDev->init()) {
 		return NULL;
 	}
 	sDev->selfTest();
-	sRenderer = new gfx::Renderer(cp, memory, *sDev);
+	sRenderer = gfx::create<gfx::Renderer>(cp, memory, *sDev);
 	sRenderer->setLogger(logLine);
 	sRenderer->begin();
 	return sRenderer;
@@ -45,7 +44,7 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 	gfx::u32 w = info.width, h = info.height;
 	if (info.srcLeft + w > gfx::EFB_WIDTH) w = gfx::EFB_WIDTH - info.srcLeft;
 	if (info.srcTop + h > gfx::EFB_HEIGHT) h = gfx::EFB_HEIGHT - info.srcTop;
-	std::vector<gfx::u32> px(w * h);
+	gfx::Vec<gfx::u32> px(w * h);
 	unsigned long long t0 = ps3b_timebase();
 	if (!sRenderer->readEfb(&px[0], info.srcLeft, info.srcTop, w, h)) {
 		ps3b_log_write("[rsx] could not read the frame back from the RSX\n");
@@ -53,7 +52,7 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 	}
 	char header[64];
 	int hl = snprintf(header, sizeof(header), "P6\n%u %u\n255\n", w, h);
-	std::vector<unsigned char> file(hl + w * h * 3);
+	gfx::Vec<unsigned char> file(hl + w * h * 3);
 	memcpy(&file[0], header, hl);
 	for (gfx::u32 i = 0; i < w * h; i++) {
 		gfx::u32 c          = px[i];

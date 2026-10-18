@@ -39,9 +39,9 @@ CParser::CParser()
 
 CParser::~CParser()
 {
-	if(m_pInstructions) delete [] m_pInstructions;
+	free(m_pInstructions); // (PS3 port: allocated with calloc)
 	// (PS3 port: the parameter values are allocated by InitParameter)
-	for(std::list<param>::iterator it = m_lParameters.begin();it!=m_lParameters.end();it++)
+	for(gfx::List<param>::iterator it = m_lParameters.begin();it!=m_lParameters.end();it++)
 		free(it->values);
 }
 
@@ -206,7 +206,7 @@ bool CParser::isWhitespace(int c)
 s32 CParser::GetParamType(const char *param_str)
 {
 	for(size_t i=0;i<PARAM_TYPE_CNT;i++) {
-		if(strcasecmp(param_str,paramtypes[i].ident.c_str())==0)
+		if(strcasecmp(param_str,paramtypes[i].ident)==0)
 			return (s32)paramtypes[i].type;
 	}
 	return -1;

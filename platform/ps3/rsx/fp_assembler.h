@@ -7,7 +7,7 @@
 #ifndef PS3_RSX_FP_ASSEMBLER_H
 #define PS3_RSX_FP_ASSEMBLER_H
 
-#include <vector>
+#include "rsx_alloc.h"
 
 namespace gfx {
 
@@ -17,7 +17,7 @@ typedef unsigned short u16;
 struct FragmentProgram {
 	// The microcode as the RSX reads it: 16-byte slots (instructions, and the constants that follow the
 	// instructions using them), 32-bit words with their 16-bit halves swapped (as cgcomp writes .fpo files).
-	std::vector<u32> ucode;
+	Vec<u32> ucode;
 	u32 numRegs;
 	u32 control;    // FP_CONTROL bits (uses KIL, writes depth, ...)
 	u16 texcoords;  // texture coordinates read
@@ -28,7 +28,7 @@ struct FragmentProgram {
 		u32 index;
 		u32 slot;
 	};
-	std::vector<Reloc> relocs;
+	Vec<Reloc> relocs;
 };
 
 // Returns false (and an error message) if the program does not assemble.

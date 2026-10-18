@@ -13,9 +13,9 @@ bool assembleFragmentProgram(const char* text, FragmentProgram& out, const char*
 {
 	*error = NULL;
 	// (the parser tokenizes in place)
-	std::vector<char> copy(text, text + strlen(text) + 1);
-	CFPParser* parser     = new CFPParser();
-	CCompilerFP* compiler = new CCompilerFP();
+	Vec<char> copy(text, text + strlen(text) + 1);
+	CFPParser* parser     = create<CFPParser>();
+	CCompilerFP* compiler = create<CCompilerFP>();
 	bool ok               = false;
 	parser->Parse(&copy[0]);
 	if (parser->GetError()) {
@@ -42,8 +42,8 @@ bool assembleFragmentProgram(const char* text, FragmentProgram& out, const char*
 			out.texcoord2D = (u16)compiler->GetTexcoord2D();
 			out.texcoord3D = (u16)compiler->GetTexcoord3D();
 			out.relocs.clear();
-			std::list<fragment_program_data> relocs = compiler->GetConstRelocations();
-			for (std::list<fragment_program_data>::iterator it = relocs.begin(); it != relocs.end(); ++it) {
+			List<fragment_program_data> relocs = compiler->GetConstRelocations();
+			for (List<fragment_program_data>::iterator it = relocs.begin(); it != relocs.end(); ++it) {
 				FragmentProgram::Reloc r;
 				r.index = (u32)it->index;
 				r.slot  = it->offset;
@@ -52,8 +52,8 @@ bool assembleFragmentProgram(const char* text, FragmentProgram& out, const char*
 			ok = true;
 		}
 	}
-	delete compiler; // (before the parser: it shares the parser's parameter values)
-	delete parser;
+	destroy(compiler); // (before the parser: it shares the parser's parameter values)
+	destroy(parser);
 	return ok;
 }
 

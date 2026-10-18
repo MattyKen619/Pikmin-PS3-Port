@@ -149,7 +149,8 @@ static const size_t FP_OUTPUTS_CNT = sizeof(fp_outputs)/sizeof(ioset);
 
 CFPParser::CFPParser() : CParser()
 {
-	m_pInstructions = new struct nvfx_insn[MAX_NV_FRAGMENT_PROGRAM_INSTRUCTIONS];
+	// (PS3 port: calloc, not the global operator new)
+	m_pInstructions = (struct nvfx_insn*)calloc(MAX_NV_FRAGMENT_PROGRAM_INSTRUCTIONS, sizeof(struct nvfx_insn));
 }
 
 CFPParser::~CFPParser()
@@ -160,13 +161,18 @@ int CFPParser::Parse(const char *str)
 {
 	int i,iline = 0;
 	bool inProgram = false;
-	std::stringstream input(str);
+	const char *cursor = str; // (PS3 port: lines split here, not with a std::stringstream)
 
-	while(!input.eof()) {
+	while(*cursor) {
 		char line[256];
 		struct nvfx_insn *insn = NULL;
 
-		input.getline(line,255);
+		size_t len = 0;
+		while(cursor[len] && cursor[len]!='\n' && len<254) len++;
+		memcpy(line,cursor,len);
+		line[len] = 0;
+		cursor += len;
+		if(*cursor=='\n') cursor++;
 		iline++;
 			
 		for(i=0;i<256;i++) {
@@ -432,14 +438,14 @@ const char* CFPParser::ParseOutputReg(const char *token, s32 *reg,u8 *is_fp16)
 	}
 
 	for(size_t i=0;i<FP_OUTPUTS_CNT;i++) {
-		size_t tlen = strlen(fp_outputs[i].name.c_str());
-		if(strncmp(token,fp_outputs[i].name.c_str(),tlen)==0) {
+		size_t tlen = strlen(fp_outputs[i].name);
+		if(strncmp(token,fp_outputs[i].name,tlen)==0) {
 			*reg = fp_outputs[i].index;
-			if(strcmp(fp_outputs[i].name.c_str(), "result.color")==0 ||
-			   strcmp(fp_outputs[i].name.c_str(), "COLR")==0 ||
-			   strcmp(fp_outputs[i].name.c_str(), "COLH")==0)
+			if(strcmp(fp_outputs[i].name, "result.color")==0 ||
+			   strcmp(fp_outputs[i].name, "COLR")==0 ||
+			   strcmp(fp_outputs[i].name, "COLH")==0)
 			{
-				if(strcmp(fp_outputs[i].name.c_str(), "COLH")==0)
+				if(strcmp(fp_outputs[i].name, "COLH")==0)
 					*is_fp16 = 1;
 
 				if(token[tlen]=='[' && isdigit(token[tlen+1])) {
@@ -468,10 +474,10 @@ const char* CFPParser::ParseInputReg(const char *token, s32 *reg)
 	}
 
 	for(size_t i=0;i<FP_INPUTS_CNT;i++) {
-		size_t tlen = strlen(fp_inputs[i].name.c_str());
-		if(strncmp(token,fp_inputs[i].name.c_str(),tlen)==0) {
+		size_t tlen = strlen(fp_inputs[i].name);
+		if(strncmp(token,fp_inputs[i].name,tlen)==0) {
 			*reg = fp_inputs[i].index;
-			if(strcmp(fp_inputs[i].name.c_str(),"fragment.texcoord")==0) {
+			if(strcmp(fp_inputs[i].name,"fragment.texcoord")==0) {
 				if(token[tlen]!='[' || !isdigit(token[tlen+1])) return NULL;
 
 				char *p = (char*)(token + tlen + 1);
@@ -491,7 +497,7 @@ const char* CFPParser::ParseInputReg(const char *token, s32 *reg)
 
 const char* CFPParser::ParseOutputRegAlias(const char *token,s32 *reg,u8 *is_fp16)
 {
-	std::list<oparam>::iterator it = m_lOParameters.begin();
+	gfx::List<oparam>::iterator it = m_lOParameters.begin();
 
 	*is_fp16 = 0;
 
@@ -645,7 +651,7 @@ void CFPParser::ParseScalarSrc(const char *token,struct nvfx_src *reg)
 int CFPParser::GetConstRegType(int index)
 {
 	s32 i;
-	std::list<param>::iterator it = m_lParameters.begin();
+	gfx::List<param>::iterator it = m_lParameters.begin();
 
 	for(;it!=m_lParameters.end();it++) {
 		for(i=0;i<it->count;i++) {

@@ -17,7 +17,6 @@
 
 #include "fp_assembler.h"
 
-#include <string>
 
 namespace gfx {
 
@@ -55,7 +54,7 @@ struct TevProgram {
 	u32 texCoords;  // texture coordinates read (bit per coordinate)
 	u32 colorChans; // rasterized color channels read (bit per channel)
 	bool alwaysKill; // the alpha test can never pass
-	std::string text;
+	Str text;
 };
 
 bool buildTevProgram(const TevKey& key, TevProgram& out, const char** error);
@@ -72,7 +71,7 @@ enum CopyMode {
 	COPY_MODE_COUNT,
 };
 // intensity: RGB converted to the luma (Y) value first.
-std::string copyProgramText(CopyMode mode, bool intensity);
+Str copyProgramText(CopyMode mode, bool intensity);
 
 } // namespace gfx
 

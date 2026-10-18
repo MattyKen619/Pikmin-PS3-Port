@@ -11,4 +11,8 @@ Changes for the port, marked "(PS3 port)":
   is built without exceptions, and must not quit over a bad program);
 - an unknown instruction or a texture lookup without a `texture[N]` unit is an error (it was dropped
   silently);
-- the parser frees its parameter values, and the compiler its instructions.
+- the parser frees its parameter values, and the compiler its instructions;
+- all memory comes from malloc (containers with `gfx::MallocAllocator`, see `../rsx_alloc.h`): the game
+  replaces the global operator new with its own heaps. The static tables hold `const char*` instead of
+  `std::string` (their constructors ran before `main` and crashed the game at start-up), and the parser
+  splits lines itself instead of using a `std::stringstream`.

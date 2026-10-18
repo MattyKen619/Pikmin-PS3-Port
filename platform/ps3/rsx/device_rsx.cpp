@@ -233,7 +233,7 @@ Texture* RsxDevice::createTexture(u32 width, u32 height)
 	if (!mem) {
 		return NULL;
 	}
-	Texture* t = new Texture;
+	Texture* t = create<Texture>();
 	t->width   = width;
 	t->height  = height;
 	t->pitch   = pitch;
@@ -248,7 +248,7 @@ void RsxDevice::destroyTexture(Texture* t)
 {
 	mLocalUsed -= t->bytes;
 	rsxFree(t->texels);
-	delete t;
+	destroy(t);
 }
 
 // ================================================================== targets

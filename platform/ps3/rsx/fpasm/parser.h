@@ -1,11 +1,8 @@
 #ifndef __PARSER_H__
 #define __PARSER_H__
 
-#include <list>
-#include <stack>
-#include <vector>
-#include <string>
-#include <sstream>
+// (PS3 port: containers and strings allocate with malloc, see ../rsx_alloc.h)
+#include "../rsx_alloc.h"
 
 #include "nv30_vertprog.h"
 #include "nv40_vertprog.h"
@@ -38,19 +35,19 @@ enum eparams { PARAM_BOOL = 0, PARAM_BOOL1, PARAM_BOOL2, PARAM_BOOL3, PARAM_BOOL
 
 typedef struct _jmpdst
 {
-	std::string ident;
+	gfx::Str ident;
 	u32 location;
 } jmpdst;
 
 typedef struct _paramtype
 {
-	std::string ident;
+	const char *ident; // (PS3 port: no constructors in static tables)
 	enum eparams type;
 } paramtype;
 
 typedef struct _param
 {
-	std::string name;
+	gfx::Str name;
 	u8 is_const;
 	u8 is_internal;
 	u8 type;
@@ -73,7 +70,7 @@ typedef struct _param
 
 typedef struct _ioset
 {
-	std::string name;
+	const char *name; // (PS3 port: no constructors in static tables)
 	int index;
 } ioset;
 
@@ -90,7 +87,7 @@ public:
 	int GetInstructionCount() const { return m_nInstructions; }
 	struct nvfx_insn* GetInstructions() const { return m_pInstructions; }
 
-	std::list<param> GetParameters() const {return m_lParameters;}
+	gfx::List<param> GetParameters() const {return m_lParameters;}
 	const char* GetError() const { return m_pError; } // (PS3 port) NULL if the program parsed
 
 	static void InitParameter(param *p);
@@ -128,10 +125,10 @@ protected:
 	int m_nInstructions;
 	struct nvfx_insn *m_pInstructions;
 
-	std::list<jmpdst> m_lJmpDst;
-	std::list<jmpdst> m_lIdent;
+	gfx::List<jmpdst> m_lJmpDst;
+	gfx::List<jmpdst> m_lIdent;
 
-	std::list<param> m_lParameters;
+	gfx::List<param> m_lParameters;
 
 	const char* m_pError; // (PS3 port)
 };

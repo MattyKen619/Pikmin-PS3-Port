@@ -23,8 +23,7 @@
 #include "device.h"
 #include "tev_program.h"
 
-#include <map>
-#include <vector>
+#include "rsx_alloc.h"
 
 namespace gfx {
 
@@ -143,15 +142,15 @@ private:
 	u32 mScratchSize;
 	u64 mHead, mTail, mLastMark;
 	u32 mFenceCounter;
-	std::vector<Marker> mMarkers;
-	std::vector<Retired> mRetired;
+	Vec<Marker> mMarkers;
+	Vec<Retired> mRetired;
 
 	// batch
 	struct Batch {
 		bool active;
 		u8* base;
 		u32 reserved, stride, texCoords, vertexCount;
-		std::vector<unsigned short> indices;
+		Vec<unsigned short> indices;
 	} mBatch;
 
 	// state
@@ -161,18 +160,18 @@ private:
 	RenderState mState;
 	bool mStateValid;
 	u32 mCull;
-	std::map<u32, std::vector<ProgramEntry*> > mPrograms;
+	Map<u32, Vec<ProgramEntry*> > mPrograms;
 	ProgramEntry* mProgram;
 	float mParams[NUM_TEV_PARAMS][4];
 	bool mProgramBound;
 	Bound mBound[8];
-	std::map<TexKey, TexEntry> mTextures;
-	std::map<u32, CopyEntry> mCopies;
+	Map<TexKey, TexEntry> mTextures;
+	Map<u32, CopyEntry> mCopies;
 	Texture* mMissing;
 	u32 mTextureBytes;
 	FragmentProgram mCopyPrograms[COPY_MODE_COUNT][2];
 	bool mCopyProgramReady[COPY_MODE_COUNT][2];
-	std::vector<u32> mStaging; // texels decoded before they are copied to device memory
+	Vec<u32> mStaging; // texels decoded before they are copied to device memory
 	// the transform set-up of the last draw (redone when XF memory or the vertex layout changes)
 	gpu::XfSetup mXf;
 	gpu::VertexLayout mXfLayout;

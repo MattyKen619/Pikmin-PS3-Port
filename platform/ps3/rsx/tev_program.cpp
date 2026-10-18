@@ -51,7 +51,7 @@ namespace {
 
 class Asm {
 public:
-	std::string text;
+	Str text;
 	void line(const char* fmt, ...)
 	{
 		char buf[256];
@@ -100,9 +100,9 @@ struct Gen {
 		u32 word = key.w[41 + table * 2 + (channel >> 1)];
 		return bits(word, (channel & 1) * 2, 2);
 	}
-	std::string swizzle(u32 table) const
+	Str swizzle(u32 table) const
 	{
-		std::string s(".");
+		Str s(".");
 		for (u32 c = 0; c < 4; c++) {
 			s += kSwz[swapTable(table, c)];
 		}
@@ -113,13 +113,13 @@ struct Gen {
 	static bool colorIsRegister(u32 in) { return in < 8; }
 	static bool alphaIsRegister(u32 in) { return in < 4; }
 
-	std::string colorOperand(u32 in) const
+	Str colorOperand(u32 in) const
 	{
 		static const char* const ops[16] = { "R0", "R0.wwww", "R1", "R1.wwww", "R2", "R2.wwww", "R3", "R3.wwww",
 			                                 "R6", "R6.wwww", "R7", "R7.wwww", "R4.zzzz", "R4.yyyy", "R5", "R4.xxxx" };
 		return ops[in & 15];
 	}
-	std::string alphaOperand(u32 in) const
+	Str alphaOperand(u32 in) const
 	{
 		static const char* const ops[8] = { "R0", "R1", "R2", "R3", "R6", "R7", "R5", "R4.xxxx" };
 		return ops[in & 7];
@@ -151,7 +151,7 @@ struct Gen {
 	}
 
 	// A constant's components for KCSEL/KASEL 16-31 (K0-K3 red, green, blue, alpha)
-	std::string konstLoad(u32 sel, bool alpha)
+	Str konstLoad(u32 sel, bool alpha)
 	{
 		const char* mask = alpha ? ".w" : ".xyz";
 		if (sel < 8) {
@@ -180,7 +180,7 @@ struct Gen {
 	}
 
 	// a, b and c take 8 bits of their input: register values (which may be out of range) are clamped.
-	std::string clampedOperand(const std::string& op, bool isRegister, int scratch, const char* mask)
+	Str clampedOperand(const Str& op, bool isRegister, int scratch, const char* mask)
 	{
 		if (!isRegister) {
 			return op;
@@ -204,10 +204,10 @@ struct Gen {
 		const u32 bias = bits(env, 16, 2), sub = bits(env, 18, 1), scale = bits(env, 20, 2);
 		const u32 zero = alpha ? 7 : 15;
 		const u32 one  = alpha ? 99 : 12; // (alpha has no ONE input)
-		std::string A = alpha ? alphaOperand(ia) : colorOperand(ia);
-		std::string B = alpha ? alphaOperand(ib) : colorOperand(ib);
-		std::string C = alpha ? alphaOperand(ic) : colorOperand(ic);
-		std::string D = alpha ? alphaOperand(id) : colorOperand(id);
+		Str A = alpha ? alphaOperand(ia) : colorOperand(ia);
+		Str B = alpha ? alphaOperand(ib) : colorOperand(ib);
+		Str C = alpha ? alphaOperand(ic) : colorOperand(ic);
+		Str D = alpha ? alphaOperand(id) : colorOperand(id);
 		const bool aReg = alpha ? alphaIsRegister(ia) : colorIsRegister(ia);
 		const bool bReg = alpha ? alphaIsRegister(ib) : colorIsRegister(ib);
 		const bool cReg = alpha ? alphaIsRegister(ic) : colorIsRegister(ic);
@@ -218,7 +218,7 @@ struct Gen {
 		}
 
 		// lerp = a + c * (b - a)
-		std::string lerp; // operand holding it ("" = zero)
+		Str lerp; // operand holding it ("" = zero)
 		if (ic == zero) {
 			lerp = ia == zero ? "" : A;
 		} else if (ic == one) {
@@ -226,16 +226,16 @@ struct Gen {
 		} else if (ia == zero && ib == zero) {
 			lerp = "";
 		} else {
-			std::string Cc = clampedOperand(C, cReg, 9, m);
+			Str Cc = clampedOperand(C, cReg, 9, m);
 			if (ia == zero) {
-				std::string Bc = clampedOperand(B, bReg, 10, m);
+				Str Bc = clampedOperand(B, bReg, 10, m);
 				a.line("MULR R8%s, %s, %s;", m, Bc.c_str(), Cc.c_str());
 			} else if (ib == zero) {
-				std::string Ac = clampedOperand(A, aReg, 10, m);
+				Str Ac = clampedOperand(A, aReg, 10, m);
 				a.line("MADR R8%s, -%s, %s, %s;", m, Ac.c_str(), Cc.c_str(), Ac.c_str());
 			} else {
-				std::string Ac = clampedOperand(A, aReg, 10, m);
-				std::string Bc = clampedOperand(B, bReg, 11, m);
+				Str Ac = clampedOperand(A, aReg, 10, m);
+				Str Bc = clampedOperand(B, bReg, 11, m);
 				a.line("ADDR R8%s, %s, -%s;", m, Bc.c_str(), Ac.c_str());
 				a.line("MADR R8%s, R8, %s, %s;", m, Cc.c_str(), Ac.c_str());
 			}
@@ -282,21 +282,21 @@ struct Gen {
 
 	// Comparison modes: d + (a > b or a == b ? c : 0), comparing one channel (R8), two (GR16), three
 	// (BGR24) as one number, or each channel (RGB8 / A8). Values are compared as 8-bit integers.
-	void compare(u32 env, bool alpha, const char* m, const std::string& A, const std::string& B, const std::string& C,
-	             const std::string& D, bool aReg, bool bReg, bool cReg)
+	void compare(u32 env, bool alpha, const char* m, const Str& A, const Str& B, const Str& C,
+	             const Str& D, bool aReg, bool bReg, bool cReg)
 	{
 		const u32 sub = bits(env, 18, 1), scale = bits(env, 20, 2);
 		const u32 mode = scale; // 0 R8, 1 GR16, 2 BGR24, 3 RGB8 (alpha: A8)
 		const bool eq  = sub;
 		// round a and b to integers: R9 = floor(a * 255 + 0.5), R10 likewise
-		std::string Ac = clampedOperand(A, aReg, 9, alpha ? ".w" : ".xyzw");
+		Str Ac = clampedOperand(A, aReg, 9, alpha ? ".w" : ".xyzw");
 		a.line("MADR R9, %s, c[%d].xxxx, R4.wwww;", Ac.c_str(), IMM_MATH);
 		a.line("FLRR R9, R9;");
-		std::string Bc = clampedOperand(B, bReg, 10, alpha ? ".w" : ".xyzw");
+		Str Bc = clampedOperand(B, bReg, 10, alpha ? ".w" : ".xyzw");
 		a.line("MADR R10, %s, c[%d].xxxx, R4.wwww;", Bc.c_str(), IMM_MATH);
 		a.line("FLRR R10, R10;");
 		const char* op = eq ? "SEQR" : "SGTR";
-		std::string sel; // the comparison result (0 or 1), as an operand
+		Str sel; // the comparison result (0 or 1), as an operand
 		if (alpha || mode == 3) {
 			a.line("%s R9%s, R9, R10;", op, m);
 			sel = "R9";
@@ -315,7 +315,7 @@ struct Gen {
 			a.line("%s R9.x, R9.xxxx, R10.xxxx;", op);
 			sel = "R9.xxxx";
 		}
-		std::string Cc = clampedOperand(C, cReg, 11, m);
+		Str Cc = clampedOperand(C, cReg, 11, m);
 		a.line("MADR R8%s, %s, %s, %s;", m, sel.c_str(), Cc.c_str(), D.c_str());
 	}
 
@@ -339,7 +339,7 @@ struct Gen {
 				texMaps |= 1u << map;
 				texCoords |= 1u << coord;
 				a.line("TXPR R6, f[TEX%u], texture[%u], 2D;", coord, map);
-				std::string sw = swizzle(bits(ae, 2, 2));
+				Str sw = swizzle(bits(ae, 2, 2));
 				if (sw != ".xyzw") {
 					a.line("MOVR R6, R6%s;", sw.c_str());
 				}
@@ -426,7 +426,7 @@ struct Gen {
 		a.line("KIL EQ.x;");
 	}
 
-	std::string generate(bool& alwaysKill)
+	Str generate(bool& alwaysKill)
 	{
 		const u32 n = stages();
 		for (u32 s = 0; s < n; s++) {
@@ -436,7 +436,7 @@ struct Gen {
 		alphaTest(alwaysKill);
 		a.line("MOVR o[COLR], R8;");
 		a.line("END");
-		std::string stagesText;
+		Str stagesText;
 		stagesText.swap(a.text);
 
 		// header: parameters and immediate constants, then the register set-up
@@ -486,7 +486,7 @@ bool buildTevProgram(const TevKey& key, TevProgram& out, const char** error)
 	return assembleFragmentProgram(out.text.c_str(), out.fp, error);
 }
 
-std::string copyProgramText(CopyMode mode, bool intensity)
+Str copyProgramText(CopyMode mode, bool intensity)
 {
 	Asm a;
 	a.line("!!FP2.0");

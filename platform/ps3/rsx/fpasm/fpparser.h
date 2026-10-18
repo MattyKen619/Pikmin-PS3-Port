@@ -9,7 +9,7 @@
 
 typedef struct _oparam
 {
-	std::string alias;
+	gfx::Str alias;
 	s32 index;
 	u8 is_fp16;
 } oparam;
@@ -45,7 +45,7 @@ private:
 	virtual s32 ConvertInputReg(const char *token);
 	virtual const char* ParseOutputMask(const char *token,u8 *mask);
 
-	std::list<oparam> m_lOParameters;
+	gfx::List<oparam> m_lOParameters;
 };
 
 #endif
