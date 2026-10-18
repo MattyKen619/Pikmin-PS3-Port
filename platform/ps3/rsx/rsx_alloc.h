@@ -33,7 +33,8 @@ struct MallocAllocator {
 	}
 	T* allocate(size_t n)
 	{
-		void* p = malloc(n * sizeof(T) ? n * sizeof(T) : 1);
+		const size_t bytes = n * sizeof(T);
+		void* p            = malloc(bytes != 0 ? bytes : 1);
 		if (!p) {
 			abort();
 		}

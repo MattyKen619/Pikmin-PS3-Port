@@ -201,6 +201,7 @@ public:
 	{
 		const gpu::u8* p = translate(address, size, kind);
 		if (p && ps3gx::traceRecording()) {
+			gpu::PhaseScope checks(gpu::GFX_CHECKS);
 			uptr q = (uptr)p;
 			if (sArenaLo && q >= sArenaLo && q < sArenaHi) {
 				ps3gx::traceMemory(address, size, kind, p, (const gpu::u8*)sArenaLo, (const gpu::u8*)sArenaHi);
@@ -294,6 +295,7 @@ public:
 	void draw(const gpu::DrawCall& call) override
 	{
 		if (sCheckFrame || ps3gx::traceRecording()) {
+			gpu::PhaseScope checks(gpu::GFX_CHECKS);
 			check(call);
 		}
 		if (sRenderer) {
@@ -480,11 +482,13 @@ bool ps3gx::currentBatch(const gpu::u8** data, gpu::u32* size, gpu::u64* base)
 static void interpret(const gpu::u8* p, u32 n)
 {
 	unsigned long long t0 = ps3b_timebase();
+	gpu::PhaseScope phase(gpu::GFX_COMMANDS);
 	sBatch                = p;
 	sBatchLen             = n;
 	sBatchBase            = sCp.received();
 	sCp.write(p, n);
 	if (ps3gx::traceRecording()) {
+		gpu::PhaseScope checks(gpu::GFX_CHECKS);
 		ps3gx::traceBatchDone();
 	}
 	sBatch = NULL;
@@ -607,6 +611,7 @@ static bool sStarted;
 static void start()
 {
 	sStarted = true;
+	ps3GfxPhaseSince = gpu::gfxClock();
 	sArenaLo = (uptr)OSGetArenaLo();
 	sArenaHi = (uptr)OSGetArenaHi();
 	sCp.setMemory(&sMemory);
@@ -763,3 +768,22 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 }
 
 extern "C" void ps3RsxStatus(char* buf, unsigned int size) { ps3rsx::status(buf, size); }
+
+// Time per frame in each phase of the graphics thread (gpu_cp.h), since the last report.
+extern "C" void ps3GfxPhaseStatus(char* buf, unsigned int size)
+{
+	static unsigned long long last[gpu::GFX_PHASE_COUNT];
+	static u32 lastFrames;
+	const u32 frames = sFrames - lastFrames;
+	lastFrames       = sFrames;
+	const unsigned long long freq = ps3b_timebase_freq();
+	int n = snprintf(buf, size, "graphics thread, ms per frame:");
+	for (int i = 0; i < gpu::GFX_PHASE_COUNT && n < (int)size; i++) {
+		const unsigned long long t = ps3GfxPhaseTicks[i];
+		const unsigned long long d = t - last[i];
+		last[i]                    = t;
+		const unsigned long long us = frames ? d * 1000000ULL / freq / frames : 0;
+		n += snprintf(buf + n, size - n, " %s %u.%u%s", gpu::kGfxPhaseNames[i], (unsigned)(us / 1000), (unsigned)(us % 1000 / 100),
+		              i + 1 < gpu::GFX_PHASE_COUNT ? "," : "");
+	}
+}

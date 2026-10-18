@@ -7,6 +7,7 @@
 #include "device_rsx.h"
 
 #include "../backend/ps3_backend.h"
+#include "../gpu/gpu_cp.h"
 
 #include <ppu-types.h>
 #include <stdint.h>
@@ -214,6 +215,7 @@ bool RsxDevice::waitLabel(u32 value, u32 timeoutUs)
 	}
 	rsxSetWriteBackendLabel(CTX, READ_LABEL, value);
 	rsxFlushBuffer(CTX);
+	gpu::PhaseScope wait(gpu::GFX_WAIT_RSX);
 	for (u32 t = 0; t < timeoutUs; t += 50) {
 		if (*(vu32*)gcmGetLabelAddress(READ_LABEL) == value) {
 			return true;
@@ -318,6 +320,7 @@ void RsxDevice::endDisplay()
 	gcmContextData* ctx = CTX;
 	if (mFlipped) {
 		// (the previous flip must have happened before another is queued)
+		gpu::PhaseScope wait(gpu::GFX_WAIT_RSX);
 		for (int spins = 0; gcmGetFlipStatus() != 0 && spins < 10000; spins++) {
 			ps3b_sleep_us(100);
 		}
@@ -448,12 +451,15 @@ void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 	checkStop();
 	gcmContextData* ctx = CTX;
 	const u32 o         = offsetOf(base);
+	// (the scratch ring reuses memory: what the chip's vertex cache holds from earlier batches is stale.
+	// PSL1GHT's draw calls do not invalidate it.)
+	rsxInvalidateVertexCache(ctx);
 	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0, o, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
-	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0, o + 16, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_U8, GCM_LOCATION_CELL);
-	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR1, 0, o + 20, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_U8, GCM_LOCATION_CELL);
+	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0, o + 16, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
+	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR1, 0, o + 32, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
 	for (u32 t = 0; t < texCoords; t++) {
-		rsxBindVertexArrayAttrib(ctx, (u8)(GCM_VERTEX_ATTRIB_TEX0 + t), 0, o + 24 + 12 * t, (u8)stride, 3, GCM_VERTEX_DATA_TYPE_F32,
-		                         GCM_LOCATION_CELL);
+		rsxBindVertexArrayAttrib(ctx, (u8)(GCM_VERTEX_ATTRIB_TEX0 + t), 0, o + VERTEX_BASE_BYTES + VERTEX_TEX_BYTES * t, (u8)stride, 3,
+		                         GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
 	}
 	for (u32 t = texCoords; t < mBoundTexCoords; t++) {
 		rsxBindVertexArrayAttrib(ctx, (u8)(GCM_VERTEX_ATTRIB_TEX0 + t), 0, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
@@ -559,22 +565,22 @@ void RsxDevice::selfTest()
 	// a quad from pixel (x0, y0) to (x1, y1) at depth z (0-1), with a color and texture coordinates 0-1
 	int quads = 0;
 	auto quad = [&](float x0, float y0, float x1, float y1, float z, u32 rgba) {
-		u8* v              = verts + quads * 4 * 36;
+		const u32 stride   = VERTEX_BASE_BYTES + VERTEX_TEX_BYTES;
+		u8* v              = verts + quads * 4 * stride;
 		const float xs[4]  = { x0, x1, x1, x0 }, ys[4] = { y0, y0, y1, y1 };
 		const float us[4]  = { 0, 1, 1, 0 }, vs[4] = { 0, 0, 1, 1 };
 		for (int i = 0; i < 4; i++) {
-			float* f = (float*)(v + i * 36);
+			float* f = (float*)(v + i * stride);
 			f[0]     = xs[i] / EFB_WIDTH * 2.0f - 1.0f;
 			f[1]     = 1.0f - ys[i] / EFB_HEIGHT * 2.0f;
 			f[2]     = z * 2.0f - 1.0f;
 			f[3]     = 1.0f;
-			u8* c    = v + i * 36 + 16;
-			c[0] = (u8)(rgba >> 24), c[1] = (u8)(rgba >> 16), c[2] = (u8)(rgba >> 8), c[3] = (u8)rgba;
-			c[4] = c[0], c[5] = c[1], c[6] = c[2], c[7] = c[3];
-			float* t = (float*)(v + i * 36 + 24);
-			t[0] = us[i], t[1] = vs[i], t[2] = 1.0f;
+			for (int k = 0; k < 4; k++) {
+				f[4 + k] = f[8 + k] = ((rgba >> (24 - 8 * k)) & 0xFF) / 255.0f;
+			}
+			f[12] = us[i], f[13] = vs[i], f[14] = 1.0f;
 		}
-		setVertices(v, 36, 1);
+		setVertices(v, stride, 1);
 		static const unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
 		drawTriangles(idx, 6);
 		quads++;

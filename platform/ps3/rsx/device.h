@@ -83,7 +83,9 @@ struct Sampler {
 	}
 };
 
-enum { VERTEX_BASE_BYTES = 24, VERTEX_TEX_BYTES = 12 };
+// Vertex layout (gpu::XfVertex's, cut after the texture coordinates a batch uses): position 4 floats,
+// color channels 0 and 1 as 4 floats each (0-1), then 3 floats (s, t, q) per texture coordinate.
+enum { VERTEX_BASE_BYTES = 48, VERTEX_TEX_BYTES = 12 };
 
 class Device {
 public:

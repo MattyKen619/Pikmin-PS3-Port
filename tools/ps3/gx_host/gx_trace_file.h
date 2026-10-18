@@ -236,7 +236,7 @@ struct TraceMemory : gpu::Memory {
 // interprets them), with the memory pages in place before the commands that read them.
 inline void replayTrace(const TraceFile& trace, gpu::CommandProcessor& cp, TraceMemory& mem)
 {
-	cp.state()   = trace.state;
+	cp.setState(trace.state);
 	gpu::u32 fed = 0;
 	for (size_t i = 0; i < trace.events.size() && fed < trace.fifoLimit; i++) {
 		const TraceEvent& e = trace.events[i];

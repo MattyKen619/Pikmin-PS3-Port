@@ -961,6 +961,7 @@ static const char* stateName(int s)
 extern "C" void ps3AudioStatus(char* buf, unsigned int size);
 extern "C" void ps3GxStatus(char* buf, unsigned int size);
 extern "C" void ps3RsxStatus(char* buf, unsigned int size);
+extern "C" void ps3GfxPhaseStatus(char* buf, unsigned int size);
 extern "C" unsigned int ps3FramesDrawn(void);
 
 static void logStack(int index, ThreadImpl* t)
@@ -1010,6 +1011,8 @@ static void reportThreads(const char* title)
 	ps3GxStatus(gfx, sizeof(gfx));
 	ps3Log("[ps3]   %s\n", gfx);
 	ps3RsxStatus(gfx, sizeof(gfx));
+	ps3Log("[ps3]   %s\n", gfx);
+	ps3GfxPhaseStatus(gfx, sizeof(gfx));
 	ps3Log("[ps3]   %s\n", gfx);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];

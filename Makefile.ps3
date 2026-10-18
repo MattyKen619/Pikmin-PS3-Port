@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 22
+TEST_BUILD := 23
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -64,6 +64,11 @@ PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(
 GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
 BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUILD) $(LIBPSL1GHT_INC)
+
+# The graphics code (command processor, transform, renderer): square roots as one instruction (no errno).
+GPU_OBJS := $(call objs_of,$(wildcard platform/ps3/gpu/*.cpp) $(RSX_CPP))
+$(GPU_OBJS): PLATFORM_CXXFLAGS += -fno-math-errno
+$(GPU_OBJS): BACKEND_CXXFLAGS += -fno-math-errno
 
 LIBS    := -laudio -lsysmodule -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
 LDFLAGS := $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map

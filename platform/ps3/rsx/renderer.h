@@ -33,6 +33,7 @@ struct RendererStats {
 	u64 draws, batches, triangles, culled, vertices, skippedDraws, lineDraws, pointDraws;
 	u64 programs, programErrors, programBinds, textureUploads, textureUploadBytes, missingTextures;
 	u64 copies, copyUses, presents, clears, fenceWaits;
+	u64 rsxBehind; // frames finished before the RSX had drawn the previous one
 	u32 textureBytes, textures;
 };
 
@@ -56,6 +57,9 @@ public:
 	void bpWritten(u32 reg, u32 value) override;
 
 	const RendererStats& stats() const { return mStats; }
+
+	// Parts of the state a BP register write can change (updateState redoes only those).
+	enum { D_STATE = 1, D_TEV = 2, D_PARAMS = 4, D_TEX = 8, D_ALL = 15 };
 	u32 framesPresented() const { return mFrame; }
 	// The fragment program text for the current TEV set-up (debugging).
 	const char* currentProgramText() const { return mProgram ? mProgram->prog.text.c_str() : ""; }
@@ -96,6 +100,10 @@ private:
 		Sampler sampler;
 		bool valid;
 	};
+	struct TlutHash {
+		u32 serial, tmem, bytes;
+		u64 hash;
+	};
 
 	void log(const char* fmt, ...);
 
@@ -135,13 +143,17 @@ private:
 	// TEV registers and constants (signed values), texture memory for palettes
 	int mTevReg[4][4];
 	int mKonst[4][4];
+	float mRegF[NUM_TEV_PARAMS][4]; // the program parameters: registers, constants, alpha test references
 	u8* mTmem;
+	u32 mTlutSerial; // palette loads so far
+	TlutHash mTlutCache[8];
 
 	// ring
 	u8* mScratch;
 	u32 mScratchSize;
 	u64 mHead, mTail, mLastMark;
 	u32 mFenceCounter;
+	u32 mFrameFence; // the fence after the last frame
 	Vec<Marker> mMarkers;
 	Vec<Retired> mRetired;
 
@@ -154,8 +166,9 @@ private:
 	} mBatch;
 
 	// state
-	bool mDirty;      // BP registers or the frame changed since the state was worked out
+	u32 mDirtyBits; // D_*: what changed since the state was worked out
 	bool mDrawable;
+	bool mStateOk; // the scissor leaves something to draw
 	u32 mViewport[6];
 	RenderState mState;
 	bool mStateValid;

@@ -44,7 +44,7 @@ int main(int argc, char** argv)
 	if (s0) r->skipDraws(s0, s1);
 	cp.setMemory(&mem);
 	cp.setListener(r);
-	cp.state() = trace.state;
+	cp.setState(trace.state);
 	r->begin();
 	replayTrace(trace, cp, mem);
 

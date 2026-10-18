@@ -17,6 +17,26 @@ static inline u32 bits(u32 v, u32 shift, u32 count) { return (v >> shift) & ((1u
 static const u8 kCompSize[8] = { 1, 1, 2, 2, 4, 4, 4, 4 };
 static const u8 kColorSize[8] = { 2, 3, 4, 2, 3, 4, 4, 4 };
 
+// Integer to float conversions by table: on the PS3's PPU a conversion goes through memory (a store and
+// a load of the same address, which stalls the pipeline for dozens of cycles). 16-bit values are the
+// sum of two exact parts: high byte * 256 + low byte.
+static float sU8Float[256], sS8Float[256], sU16Hi[256], sS16Hi[256], sPow2Inv[32];
+
+} // namespace gpu
+
+extern "C" {
+volatile unsigned int ps3GfxPhase;
+unsigned long long ps3GfxPhaseTicks[gpu::GFX_PHASE_COUNT];
+unsigned long long ps3GfxPhaseSince;
+}
+
+namespace gpu {
+const char* const kGfxPhaseNames[GFX_PHASE_COUNT] = { "idle", "commands", "decode", "state", "textures", "programs", "xf set-up",
+	                                                  "transform", "triangles", "rsx commands", "rsx waits", "copies", "checks" };
+}
+
+namespace gpu {
+
 CommandProcessor::CommandProcessor()
     : mMemory(NULL)
     , mListener(NULL)
@@ -35,6 +55,15 @@ CommandProcessor::CommandProcessor()
 	memset(&mState, 0, sizeof(mState));
 	memset(&mStats, 0, sizeof(mStats));
 	memset(mLayouts, 0, sizeof(mLayouts));
+	for (int i = 0; i < 256; i++) {
+		sU8Float[i] = (float)i;
+		sS8Float[i] = (float)(s8)i;
+		sU16Hi[i]   = (float)i * 256.0f;
+		sS16Hi[i]   = (float)(s8)i * 256.0f;
+	}
+	for (int i = 0; i < 32; i++) {
+		sPow2Inv[i] = 1.0f / (float)(1u << i);
+	}
 }
 
 CommandProcessor::~CommandProcessor()
@@ -271,6 +300,9 @@ void CommandProcessor::loadCp(u32 reg, u32 value)
 void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
 {
 	mStats.xfLoads++;
+	if (address + count > 0x600) {
+		mStats.xfSetupLoads++; // (lights or registers: not just matrices)
+	}
 	for (u32 i = 0; i < count; i++) {
 		u32 a = address + i;
 		if (a < sizeof(mState.xf) / sizeof(mState.xf[0])) {
@@ -288,6 +320,9 @@ void CommandProcessor::loadIndexed(u32 op, u32 word)
 	u32 index  = word >> 16;
 	u32 count  = ((word >> 12) & 0xF) + 1;
 	u32 xfAddr = word & 0xFFF;
+	if (xfAddr + count > 0x600) {
+		mStats.xfSetupLoads++;
+	}
 	u32 base   = mState.cp[0xA0 + array];
 	u32 stride = mState.cp[0xB0 + array];
 	const u8* src = mMemory ? mMemory->read(base + index * stride, count * 4, MEM_ARRAY) : NULL;
@@ -480,12 +515,17 @@ void CommandProcessor::layoutFor(u32 vat, VertexLayout& L) const
 static inline float readComp(const u8* p, u32 type, float scale)
 {
 	switch (type) {
-	case COMP_U8: return p[0] * scale;
-	case COMP_S8: return (s8)p[0] * scale;
-	case COMP_U16: return be16(p) * scale;
-	case COMP_S16: return (s16)be16(p) * scale;
+	case COMP_U8: return sU8Float[p[0]] * scale;
+	case COMP_S8: return sS8Float[p[0]] * scale;
+	case COMP_U16: return (sU16Hi[p[0]] + sU8Float[p[1]]) * scale;
+	case COMP_S16: return (sS16Hi[p[0]] + sU8Float[p[1]]) * scale;
 	default:
 	{
+#if defined(__BIG_ENDIAN__)
+		if (((size_t)p & 3) == 0) {
+			return *(const float*)p; // (aligned: straight into a floating-point register)
+		}
+#endif
 		union {
 			u32 u;
 			float f;
@@ -559,6 +599,7 @@ struct ArraySource {
 
 void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32 count, bool decode)
 {
+	PhaseScope phase(GFX_DECODE);
 	if (decode && count > mVertCap) {
 		u32 cap = mVertCap ? mVertCap : 256;
 		while (cap < count) {
@@ -666,11 +707,11 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 	// Pass 2: decode.
 	const u32 matA = mState.cp[0x30];
 	const u32 matB = mState.cp[0x40];
-	const float posScale = (L.posType == COMP_F32) ? 1.0f : 1.0f / (float)(1u << L.posFrac);
+	const float posScale = (L.posType == COMP_F32) ? 1.0f : sPow2Inv[L.posFrac & 31];
 	const float nrmScale = (L.nrmType == COMP_S8 || L.nrmType == COMP_U8) ? 1.0f / 64.0f : 1.0f / 16384.0f;
 	float texScale[8];
 	for (int i = 0; i < 8; i++) {
-		texScale[i] = (L.texType[i] == COMP_F32) ? 1.0f : 1.0f / (float)(1u << L.texFrac[i]);
+		texScale[i] = (L.texType[i] == COMP_F32) ? 1.0f : sPow2Inv[L.texFrac[i] & 31];
 	}
 
 	// (per draw: the default matrix indices, and which attributes are present)

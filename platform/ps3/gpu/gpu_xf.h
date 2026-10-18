@@ -42,7 +42,7 @@ struct XfSetup {
 	struct TexGen {
 		u32 type, row, from;
 		bool stq, abc1, normalize;
-		const u32* post; // post-transform matrix (dual), or NULL
+		const float* post; // post-transform matrix (dual), or NULL
 	} texgen[8];
 	bool emboss;     // an emboss (bump) texgen is used: approximated
 	// What xfTransform works out (xfPrepare: everything). A renderer that needs less can lower these.
@@ -50,7 +50,8 @@ struct XfSetup {
 	u32 texLimit;    // texture coordinates 0 .. texLimit-1 (others come out (0, 0, 1))
 };
 
-// Lowers the work to the channels and texture coordinates a draw uses.
+// Lowers the work to the channels and texture coordinates a draw uses. (An emboss texgen needs the
+// coordinates before it: texLimit can then come out higher than texCoords.)
 void xfLimit(XfSetup& setup, u32 chanMask, u32 texCoords);
 
 void xfPrepare(const u32* xf, const VertexLayout& layout, XfSetup& setup);

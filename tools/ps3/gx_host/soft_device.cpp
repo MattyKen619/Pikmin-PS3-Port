@@ -154,10 +154,10 @@ void SoftDevice::fetch(unsigned short index, Vert& v)
 	}
 	memset(v.in, 0, sizeof(v.in));
 	for (int k = 0; k < 4; k++) {
-		v.in[1][k] = p[16 + k] / 255.0f;
-		v.in[2][k] = p[20 + k] / 255.0f;
+		v.in[1][k] = f[4 + k];
+		v.in[2][k] = f[8 + k];
 	}
-	const float* tc = (const float*)(p + 24);
+	const float* tc = (const float*)(p + gfx::VERTEX_BASE_BYTES);
 	for (u32 t = 0; t < mTexCoords; t++) {
 		v.in[4 + t][0] = tc[t * 3];
 		v.in[4 + t][1] = tc[t * 3 + 1];

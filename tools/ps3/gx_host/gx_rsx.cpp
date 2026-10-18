@@ -50,7 +50,7 @@ int main(int argc, char** argv)
 		r->setLogger(logLine);
 		cp.setMemory(&mem);
 		cp.setListener(r);
-		cp.state() = trace.state;
+		cp.setState(trace.state);
 		r->begin();
 		replayTrace(trace, cp, mem);
 		r->flush();
@@ -90,7 +90,7 @@ int main(int argc, char** argv)
 		static swr::Renderer* ref = new swr::Renderer(cp, mem);
 		cp.setMemory(&mem);
 		cp.setListener(ref);
-		cp.state() = trace.state;
+		cp.setState(trace.state);
 		ref->begin();
 		replayTrace(trace, cp, mem);
 		if (!ref->framesCopied()) {

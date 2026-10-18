@@ -28,14 +28,9 @@ inline float asFloat(u32 w)
 }
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 inline u64 alignUp(u64 v, u32 a) { return (v + a - 1) & ~(u64)(a - 1); }
-inline u8 colorByte(float c)
-{
-	int v = (int)(c * 255.0f + 0.5f);
-	return (u8)(v < 0 ? 0 : v > 255 ? 255 : v);
-}
 
 enum {
-	BATCH_RESERVE   = 64 * 1024,
+	BATCH_RESERVE   = 256 * 1024,
 	TEXTURE_BUDGET  = 96 * 1024 * 1024, // device memory for decoded textures before old ones are evicted
 	MAX_BATCH_VERTS = 65535,
 };
@@ -64,6 +59,30 @@ void tevRegFromBp(int regs[4][4], int konst[4][4], u32 reg, u32 value)
 	}
 }
 
+// Which parts of the state a BP register affects (updateState redoes only those).
+u8 sBpDirty[256];
+bool sBpDirtyReady;
+
+void initBpDirty()
+{
+	enum { D_STATE = Renderer::D_STATE, D_TEV = Renderer::D_TEV, D_PARAMS = Renderer::D_PARAMS, D_TEX = Renderer::D_TEX };
+	if (sBpDirtyReady) {
+		return;
+	}
+	sBpDirty[0x00] = D_STATE | D_TEV;                       // gen mode: stages, culling
+	sBpDirty[0x20] = sBpDirty[0x21] = sBpDirty[0x59] = D_STATE; // scissor
+	for (u32 r = 0x40; r <= 0x43; r++) sBpDirty[r] = D_STATE; // depth, blending, pixel format
+	for (u32 r = 0x28; r <= 0x2F; r++) sBpDirty[r] = D_TEV | D_TEX; // stage orders (which maps)
+	for (u32 r = 0xC0; r <= 0xDF; r++) sBpDirty[r] = D_TEV; // combiners
+	for (u32 r = 0xF6; r <= 0xFD; r++) sBpDirty[r] = D_TEV; // constant selections, swap tables
+	sBpDirty[0xF3] = D_TEV | D_PARAMS;                       // alpha test
+	for (u32 r = 0xE0; r <= 0xE7; r++) sBpDirty[r] = D_PARAMS; // TEV registers
+	for (u32 r = 0x80; r <= 0x9B; r++) sBpDirty[r] = D_TEX; // texture maps 0-3
+	for (u32 r = 0xA0; r <= 0xBB; r++) sBpDirty[r] = D_TEX; // texture maps 4-7
+	sBpDirty[0x64] = sBpDirty[0x65] = D_TEX;                 // palettes
+	sBpDirtyReady = true;
+}
+
 } // namespace
 
 bool Renderer::TexKey::operator<(const TexKey& o) const
@@ -86,8 +105,10 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mTail(0)
     , mLastMark(0)
     , mFenceCounter(0)
-    , mDirty(true)
+    , mFrameFence(0)
+    , mDirtyBits(D_ALL)
     , mDrawable(false)
+    , mStateOk(false)
     , mStateValid(false)
     , mCull(0)
     , mProgram(NULL)
@@ -102,7 +123,11 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 	memset(mKonst, 0, sizeof(mKonst));
 	memset(mViewport, 0, sizeof(mViewport));
 	memset(mParams, 0, sizeof(mParams));
+	memset(mRegF, 0, sizeof(mRegF));
+	memset(mTlutCache, 0, sizeof(mTlutCache));
+	mTlutSerial = 1;
 	memset(&mState, 0, sizeof(mState));
+	initBpDirty();
 	mTmem = (u8*)calloc(1, 0x100000);
 	mScratch     = mDev.scratchBase();
 	mScratchSize = mDev.scratchSize();
@@ -143,10 +168,11 @@ void Renderer::begin()
 {
 	const gpu::State& S = mCp.state();
 	for (u32 r = 0xE0; r < 0xE8; r++) {
-		tevRegFromBp(mTevReg, mKonst, r, S.bp[r]);
+		bpWritten(r, S.bp[r]);
 	}
-	mDirty   = true;
-	mXfValid = false;
+	bpWritten(0xF3, S.bp[0xF3]);
+	mDirtyBits = D_ALL;
+	mXfValid   = false;
 }
 
 void Renderer::flush()
@@ -158,6 +184,7 @@ void Renderer::flush()
 
 bool Renderer::readEfb(u32* out, u32 x, u32 y, u32 width, u32 height)
 {
+	gpu::PhaseScope wait(gpu::GFX_WAIT_RSX);
 	flush();
 	return mDev.readTarget(out, x, y, width, height);
 }
@@ -193,6 +220,7 @@ void* Renderer::ringAlloc(u32 bytes, u32 align)
 		}
 		mDev.kick();
 		mStats.fenceWaits++;
+		gpu::PhaseScope wait(gpu::GFX_WAIT_RSX);
 		while (!mMarkers.empty() && (int)(mDev.fenceReached() - mMarkers.front().fence) < 0) {
 			mDev.pause();
 		}
@@ -246,6 +274,7 @@ void Renderer::retire(Texture* t)
 		if (mBound[i].tex == t) {
 			mBound[i].valid = false;
 			mBound[i].tex   = NULL;
+			mDirtyBits |= D_TEX;
 		}
 	}
 	Retired r;
@@ -290,6 +319,7 @@ void Renderer::flushBatch()
 	// The unused part of the reservation goes back to the ring (nothing was allocated after it).
 	mHead -= mBatch.reserved - mBatch.vertexCount * mBatch.stride;
 	if (!mBatch.indices.empty()) {
+		gpu::PhaseScope phase(gpu::GFX_RSX);
 		mDev.setVertices(mBatch.base, mBatch.stride, mBatch.texCoords);
 		mDev.drawTriangles(&mBatch.indices[0], (u32)mBatch.indices.size());
 		mStats.batches++;
@@ -311,11 +341,12 @@ void Renderer::invalidateDeviceState()
 	for (int i = 0; i < 8; i++) {
 		mBound[i].valid = false;
 	}
-	mDirty = true;
+	mDirtyBits = D_ALL;
 }
 
 void Renderer::bindProgram(const FragmentProgram& fp, const float (*params)[4])
 {
+	gpu::PhaseScope phase(gpu::GFX_RSX);
 	const u32 bytes = (u32)fp.ucode.size() * 4;
 	u32* dst        = (u32*)ringAlloc(bytes, 128);
 	memcpy(dst, &fp.ucode[0], bytes);
@@ -371,6 +402,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 		bool valid   = true;
 		if (c.memKnown && c.checkedFrame != mFrame) {
 			// (the game may have loaded something else there since)
+			gpu::PhaseScope phase(gpu::GFX_CHECKS);
 			u32 size      = gpu::CommandProcessor::textureSize(c.format, c.width, c.height, 1);
 			const u8* src = mMem.read(k.address, size, gpu::MEM_TEXTURE);
 			if (src && gpu::hashMemory(src, size) != c.memHash) {
@@ -396,13 +428,22 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 		if (tlut + bytes > 0x100000) {
 			bytes = 0x100000 - tlut;
 		}
-		k.tlutHash = gpu::hashMemory(mTmem + tlut, bytes);
+		// (texture memory changes only with palette loads: the hash is kept until the next one)
+		TlutHash& th = mTlutCache[map];
+		if (th.serial != mTlutSerial || th.tmem != tlut || th.bytes != bytes) {
+			th.serial = mTlutSerial;
+			th.tmem   = tlut;
+			th.bytes  = bytes;
+			th.hash   = gpu::hashMemory(mTmem + tlut, bytes);
+		}
+		k.tlutHash = th.hash;
 	}
 	TexEntry& e = mTextures[k];
 	if (e.tex && e.checkedFrame == mFrame) {
 		e.usedFrame = mFrame;
 		return e.tex;
 	}
+	gpu::PhaseScope phase(gpu::GFX_CHECKS);
 	const u32 size = gpu::CommandProcessor::textureSize(k.format, k.width, k.height, 1);
 	const u8* src  = k.address ? mMem.read(k.address, size, gpu::MEM_TEXTURE) : NULL;
 	if (!src) {
@@ -418,6 +459,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 		e.usedFrame    = mFrame;
 		return e.tex;
 	}
+	gpu::PhaseScope decode(gpu::GFX_TEXTURES);
 	Texture* t = mDev.createTexture(k.width, k.height);
 	if (!t) {
 		evictTextures();
@@ -445,7 +487,8 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	return t;
 }
 
-// Works out the device state, program and textures for the current registers. False: nothing to draw.
+// Works out the device state, program and textures for the current registers, redoing only what changed.
+// False: nothing to draw.
 bool Renderer::updateState()
 {
 	const gpu::State& S = mCp.state();
@@ -453,154 +496,159 @@ bool Renderer::updateState()
 	const u32* xf       = S.xf;
 	if (memcmp(mViewport, xf + 0x101A, sizeof(mViewport)) != 0) {
 		memcpy(mViewport, xf + 0x101A, sizeof(mViewport));
-		mDirty = true;
+		mDirtyBits |= D_STATE;
 	}
-	if (!mDirty) {
+	if (!mDirtyBits) {
 		return mDrawable;
 	}
-	mDirty    = false;
-	mDrawable = false;
+	gpu::PhaseScope phase(gpu::GFX_STATE);
+	const u32 dirty = mDirtyBits;
+	mDirtyBits      = 0;
 
 	// ---- device state: blending, depth, color mask, scissor, viewport
-	RenderState rs;
-	memset(&rs, 0, sizeof(rs));
-	const u32 zmode = bp[0x40], cm0 = bp[0x41], pe = bp[0x43];
-	const bool efbAlpha = bits(pe, 0, 3) == 1; // RGBA6_Z24: the frame buffer keeps alpha
-	if (bits(cm0, 11, 1)) {
-		rs.blend = 2;
-		rs.srcFactor = BLEND_ONE, rs.dstFactor = BLEND_ONE;
-	} else if (bits(cm0, 0, 1)) {
-		rs.blend     = 1;
-		rs.srcFactor = kBlendSrc[bits(cm0, 8, 3)];
-		rs.dstFactor = kBlendDst[bits(cm0, 5, 3)];
-	} else if (bits(cm0, 1, 1)) {
-		rs.logicEnable = 1;
-		rs.logicOp     = (u8)bits(cm0, 12, 4);
-	}
-	rs.depthTest  = (u8)bits(zmode, 0, 1);
-	rs.depthFunc  = (u8)bits(zmode, 1, 3);
-	rs.depthWrite = (u8)(bits(zmode, 0, 1) && bits(zmode, 4, 1));
-	rs.colorWrite = (u8)bits(cm0, 3, 1);
-	rs.alphaWrite = (u8)(efbAlpha && bits(cm0, 4, 1));
-	int sx0 = (int)bits(bp[0x20], 12, 11) - 342, sy0 = (int)bits(bp[0x20], 0, 11) - 342;
-	int sx1 = (int)bits(bp[0x21], 12, 11) - 342, sy1 = (int)bits(bp[0x21], 0, 11) - 342;
-	sx0 = clampi(sx0, 0, EFB_WIDTH), sy0 = clampi(sy0, 0, EFB_HEIGHT);
-	sx1 = clampi(sx1 + 1, 0, EFB_WIDTH), sy1 = clampi(sy1 + 1, 0, EFB_HEIGHT);
-	if (sx1 <= sx0 || sy1 <= sy0) {
-		return false;
-	}
-	rs.scissor[0] = (u16)sx0, rs.scissor[1] = (u16)sy0;
-	rs.scissor[2] = (u16)(sx1 - sx0), rs.scissor[3] = (u16)(sy1 - sy0);
-	rs.viewportScale[0]  = asFloat(xf[0x101A]);
-	rs.viewportScale[1]  = asFloat(xf[0x101B]);
-	rs.viewportScale[2]  = asFloat(xf[0x101C]) / 16777215.0f;
-	rs.viewportOffset[0] = asFloat(xf[0x101D]) - 342.0f;
-	rs.viewportOffset[1] = asFloat(xf[0x101E]) - 342.0f;
-	rs.viewportOffset[2] = asFloat(xf[0x101F]) / 16777215.0f;
-	if (!mStateValid || rs != mState) {
-		flushBatch();
-		mDev.setState(rs);
-		mState      = rs;
-		mStateValid = true;
-	}
-	mCull = bits(bp[0x00], 14, 2);
-	if (mCull == 3) {
-		return false;
+	if (dirty & D_STATE) {
+		RenderState rs;
+		memset(&rs, 0, sizeof(rs));
+		const u32 zmode = bp[0x40], cm0 = bp[0x41], pe = bp[0x43];
+		const bool efbAlpha = bits(pe, 0, 3) == 1; // RGBA6_Z24: the frame buffer keeps alpha
+		if (bits(cm0, 11, 1)) {
+			rs.blend = 2;
+			rs.srcFactor = BLEND_ONE, rs.dstFactor = BLEND_ONE;
+		} else if (bits(cm0, 0, 1)) {
+			rs.blend     = 1;
+			rs.srcFactor = kBlendSrc[bits(cm0, 8, 3)];
+			rs.dstFactor = kBlendDst[bits(cm0, 5, 3)];
+		} else if (bits(cm0, 1, 1)) {
+			rs.logicEnable = 1;
+			rs.logicOp     = (u8)bits(cm0, 12, 4);
+		}
+		rs.depthTest  = (u8)bits(zmode, 0, 1);
+		rs.depthFunc  = (u8)bits(zmode, 1, 3);
+		rs.depthWrite = (u8)(bits(zmode, 0, 1) && bits(zmode, 4, 1));
+		rs.colorWrite = (u8)bits(cm0, 3, 1);
+		rs.alphaWrite = (u8)(efbAlpha && bits(cm0, 4, 1));
+		int sx0 = (int)bits(bp[0x20], 12, 11) - 342, sy0 = (int)bits(bp[0x20], 0, 11) - 342;
+		int sx1 = (int)bits(bp[0x21], 12, 11) - 342, sy1 = (int)bits(bp[0x21], 0, 11) - 342;
+		sx0 = clampi(sx0, 0, EFB_WIDTH), sy0 = clampi(sy0, 0, EFB_HEIGHT);
+		sx1 = clampi(sx1 + 1, 0, EFB_WIDTH), sy1 = clampi(sy1 + 1, 0, EFB_HEIGHT);
+		mStateOk = sx1 > sx0 && sy1 > sy0;
+		rs.scissor[0] = (u16)sx0, rs.scissor[1] = (u16)sy0;
+		rs.scissor[2] = (u16)(sx1 - sx0), rs.scissor[3] = (u16)(sy1 - sy0);
+		const float* xff     = (const float*)xf;
+		rs.viewportScale[0]  = xff[0x101A];
+		rs.viewportScale[1]  = xff[0x101B];
+		rs.viewportScale[2]  = xff[0x101C] * (1.0f / 16777215.0f);
+		rs.viewportOffset[0] = xff[0x101D] - 342.0f;
+		rs.viewportOffset[1] = xff[0x101E] - 342.0f;
+		rs.viewportOffset[2] = xff[0x101F] * (1.0f / 16777215.0f);
+		if (mStateOk && (!mStateValid || rs != mState)) {
+			flushBatch();
+			gpu::PhaseScope rsx(gpu::GFX_RSX);
+			mDev.setState(rs);
+			mState      = rs;
+			mStateValid = true;
+		}
+		mCull = bits(bp[0x00], 14, 2);
 	}
 
 	// ---- fragment program for the TEV set-up
-	TevKey key;
-	makeTevKey(bp, key);
-	if (!mProgram || !(mProgram->key == key)) {
-		Vec<ProgramEntry*>& chain = mPrograms[key.hash()];
-		ProgramEntry* found               = NULL;
-		for (size_t i = 0; i < chain.size(); i++) {
-			if (chain[i]->key == key) {
-				found = chain[i];
-				break;
-			}
-		}
-		if (!found) {
-			found      = create<ProgramEntry>();
-			found->key = key;
-			const char* error;
-			found->ok = buildTevProgram(key, found->prog, &error);
-			mStats.programs++;
-			if (!found->ok) {
-				mStats.programErrors++;
-				if (mStats.programErrors <= 3) {
-					log("[rsx] FAILED to assemble a TEV program (%s):\n", error ? error : "?");
-					const Str& t = found->prog.text;
-					for (size_t at = 0; at < t.size(); at += 400) {
-						log("%s", t.substr(at, 400).c_str());
-					}
-					log("\n");
+	if (dirty & D_TEV) {
+		TevKey key;
+		makeTevKey(bp, key);
+		if (!mProgram || !(mProgram->key == key)) {
+			Vec<ProgramEntry*>& chain = mPrograms[key.hash()];
+			ProgramEntry* found       = NULL;
+			for (size_t i = 0; i < chain.size(); i++) {
+				if (chain[i]->key == key) {
+					found = chain[i];
+					break;
 				}
 			}
-			chain.push_back(found);
-		}
-		if (found != mProgram) {
-			mProgram      = found;
-			mProgramBound = false;
+			if (!found) {
+				gpu::PhaseScope programs(gpu::GFX_PROGRAMS);
+				found      = create<ProgramEntry>();
+				found->key = key;
+				const char* error;
+				found->ok = buildTevProgram(key, found->prog, &error);
+				mStats.programs++;
+				if (!found->ok) {
+					mStats.programErrors++;
+					if (mStats.programErrors <= 3) {
+						log("[rsx] FAILED to assemble a TEV program (%s):\n", error ? error : "?");
+						const Str& t = found->prog.text;
+						for (size_t at = 0; at < t.size(); at += 400) {
+							log("%s", t.substr(at, 400).c_str());
+						}
+						log("\n");
+					}
+				}
+				chain.push_back(found);
+			}
+			if (found != mProgram) {
+				mProgram      = found;
+				mProgramBound = false;
+			}
 		}
 	}
-	if (!mProgram->ok || mProgram->prog.alwaysKill) {
-		return false;
-	}
+	const bool programOk = mProgram && mProgram->ok && !mProgram->prog.alwaysKill;
 
-	// parameters: TEV registers, constants, alpha test references
-	float params[NUM_TEV_PARAMS][4];
-	for (int r = 0; r < 4; r++) {
-		for (int k = 0; k < 4; k++) {
-			params[r][k]     = mTevReg[r][k] / 255.0f;
-			params[4 + r][k] = mKonst[r][k] / 255.0f;
+	// ---- its parameters: TEV registers, constants, alpha test references (kept as floats by bpWritten)
+	if (programOk && (dirty & (D_TEV | D_PARAMS))) {
+		const u32 used = mProgram->prog.params;
+		for (u32 i = 0; i < NUM_TEV_PARAMS; i++) {
+			if ((used & (1u << i)) && memcmp(mRegF[i], mParams[i], sizeof(mParams[i])) != 0) {
+				memcpy(mParams[i], mRegF[i], sizeof(mParams[i]));
+				mProgramBound = false;
+			}
 		}
 	}
-	params[8][0] = (float)bits(bp[0xF3], 0, 8);
-	params[8][1] = (float)bits(bp[0xF3], 8, 8);
-	params[8][2] = params[8][3] = 0;
-	const u32 used = mProgram->prog.params;
-	for (u32 i = 0; i < NUM_TEV_PARAMS; i++) {
-		if ((used & (1u << i)) && memcmp(params[i], mParams[i], sizeof(params[i])) != 0) {
-			memcpy(mParams[i], params[i], sizeof(params[i]));
-			mProgramBound = false;
-		}
-	}
-	if (!mProgramBound) {
+	if (programOk && !mProgramBound) {
 		flushBatch();
 		bindProgram(mProgram->prog.fp, mParams);
 		mProgramBound = true;
 	}
 
 	// ---- textures
-	for (u32 m = 0; m < 8; m++) {
-		if (!(mProgram->prog.texMaps & (1u << m))) {
-			continue;
-		}
-		Sampler s;
-		const Texture* t = lookupTexture(m, s);
-		if (!mBound[m].valid || mBound[m].tex != t || !(mBound[m].sampler == s)) {
-			flushBatch();
-			mDev.setTexture(m, t, s);
-			mBound[m].tex     = t;
-			mBound[m].sampler = s;
-			mBound[m].valid   = true;
+	if (programOk && (dirty & (D_TEV | D_TEX))) {
+		for (u32 m = 0; m < 8; m++) {
+			if (!(mProgram->prog.texMaps & (1u << m))) {
+				continue;
+			}
+			Sampler s;
+			const Texture* t = lookupTexture(m, s);
+			if (!mBound[m].valid || mBound[m].tex != t || !(mBound[m].sampler == s)) {
+				flushBatch();
+				gpu::PhaseScope rsx(gpu::GFX_RSX);
+				mDev.setTexture(m, t, s);
+				mBound[m].tex     = t;
+				mBound[m].sampler = s;
+				mBound[m].valid   = true;
+			}
 		}
 	}
-	mDrawable = true;
-	return true;
+	mDrawable = programOk && mStateOk && mCull != 3;
+	return mDrawable;
 }
 
 void Renderer::bpWritten(u32 reg, u32 value)
 {
-	if (reg == 0x45 || reg == 0x47 || reg == 0x48 || reg == 0x52 || reg == 0xFE) {
-		return; // (synchronization and copies)
-	}
-	mDirty = true;
+	mDirtyBits |= sBpDirty[reg & 0xFF];
 	if (reg >= 0xE0 && reg < 0xE8) {
 		tevRegFromBp(mTevReg, mKonst, reg, value);
+		// (as floats for the program parameters: converted here, once per change)
+		const int n   = (int)(reg - 0xE0) >> 1;
+		const bool k  = (value >> 23) & 1;
+		const int* rv = k ? mKonst[n] : mTevReg[n];
+		float* f      = mRegF[k ? 4 + n : n];
+		for (int c = 0; c < 4; c++) {
+			f[c] = rv[c] * (1.0f / 255.0f);
+		}
+	} else if (reg == 0xF3) {
+		mRegF[8][0] = (float)bits(value, 0, 8);
+		mRegF[8][1] = (float)bits(value, 8, 8);
 	} else if (reg == 0x65) {
 		// TLUT load: from memory (BP 0x64) into texture memory
+		mTlutSerial++;
 		const u32* bp = mCp.state().bp;
 		u32 address   = bits(bp[0x64], 0, 21) << 5;
 		u32 tmem      = bits(value, 0, 10) << 9;
@@ -629,16 +677,32 @@ void Renderer::draw(const gpu::DrawCall& call)
 		mStats.pointDraws++;
 		return;
 	}
+	gpu::PhaseScope drawPhase(gpu::GFX_STATE);
 	if (!updateState()) {
 		mStats.skippedDraws++;
 		return;
 	}
 	const gpu::State& S = mCp.state();
-	u32 texCoords       = 0;
+	// (the transform set-up changes only with XF loads that reach lights or registers, or a new layout)
+	{
+		const u64 xfSerial = mCp.stats().xfSetupLoads;
+		if (!mXfValid || xfSerial != mXfSerial || memcmp(&mXfLayout, call.layout, sizeof(mXfLayout)) != 0) {
+			gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
+			mXfLayout = *call.layout;
+			gpu::xfPrepare(S.xf, mXfLayout, mXf);
+			mXfSerial = xfSerial;
+			mXfValid  = true;
+		}
+	}
+	u32 texCoords = 0;
 	for (u32 t = 0; t < 8; t++) {
 		if (mProgram->prog.texCoords & (1u << t)) {
 			texCoords = t + 1;
 		}
+	}
+	gpu::xfLimit(mXf, mProgram->prog.colorChans, texCoords);
+	if (mXf.texLimit > texCoords) {
+		texCoords = mXf.texLimit; // (an emboss texgen: the coordinates before it are worked out too)
 	}
 	u32 first;
 	u8* out = batchVertices(call.count, texCoords, &first);
@@ -648,33 +712,16 @@ void Renderer::draw(const gpu::DrawCall& call)
 	}
 	const u32 stride = mBatch.stride;
 
-	// (XF memory changes only with XF loads: the set-up is kept while there are none)
-	const gpu::Stats& cs = mCp.stats();
-	const u64 xfSerial   = cs.xfLoads + cs.indexedLoads;
-	if (!mXfValid || xfSerial != mXfSerial || memcmp(&mXfLayout, call.layout, sizeof(mXfLayout)) != 0) {
-		mXfLayout = *call.layout;
-		gpu::xfPrepare(S.xf, mXfLayout, mXf);
-		mXfSerial = xfSerial;
-		mXfValid  = true;
-	}
-	gpu::xfLimit(mXf, mProgram->prog.colorChans, texCoords);
-	const gpu::XfSetup& xs = mXf;
-	gpu::XfVertex v;
-	for (u32 i = 0; i < call.count; i++) {
-		gpu::xfTransform(xs, call.vertices[i], v);
-		u8* o    = out + i * stride;
-		float* f = (float*)o;
-		f[0] = v.pos[0], f[1] = v.pos[1], f[2] = v.pos[2], f[3] = v.pos[3];
-		o[16] = colorByte(v.color[0][0]), o[17] = colorByte(v.color[0][1]);
-		o[18] = colorByte(v.color[0][2]), o[19] = colorByte(v.color[0][3]);
-		o[20] = colorByte(v.color[1][0]), o[21] = colorByte(v.color[1][1]);
-		o[22] = colorByte(v.color[1][2]), o[23] = colorByte(v.color[1][3]);
-		float* tc = (float*)(o + 24);
-		for (u32 t = 0; t < texCoords; t++) {
-			tc[t * 3] = v.tex[t][0], tc[t * 3 + 1] = v.tex[t][1], tc[t * 3 + 2] = v.tex[t][2];
+	// Vertices go straight into the draw memory: the layout is XfVertex's, cut after texCoords coordinates.
+	{
+		gpu::PhaseScope phase(gpu::GFX_TRANSFORM);
+		const gpu::XfSetup& xs = mXf;
+		for (u32 i = 0; i < call.count; i++) {
+			gpu::xfTransform(xs, call.vertices[i], *(gpu::XfVertex*)(out + i * stride));
 		}
 	}
 	mStats.vertices += call.count;
+	gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
 
 	// Triangles, without those facing away (sign of the screen-space area, from the homogeneous positions:
 	// correct also for triangles that cross the camera plane).
@@ -772,9 +819,10 @@ void Renderer::drawQuad(u32 tw, u32 th, const float dst[4], const float uv[4], c
 		f[1] = 1.0f - y[i] / th * 2.0f;
 		f[2] = 0.0f;
 		f[3] = 1.0f;
-		memset(o + 16, 255, 8);
-		float* tc = (float*)(o + 24);
-		tc[0] = u[i], tc[1] = v[i], tc[2] = 1.0f;
+		for (int k = 4; k < 12; k++) {
+			f[k] = 1.0f; // (colors)
+		}
+		f[12] = u[i], f[13] = v[i], f[14] = 1.0f;
 	}
 	static const unsigned short quad[6] = { 0, 1, 2, 0, 2, 3 };
 	for (int i = 0; i < 6; i++) {
@@ -926,6 +974,7 @@ void Renderer::clearEfb(const gpu::CopyInfo& info)
 void Renderer::copy(const gpu::CopyInfo& info)
 {
 	flushBatch();
+	gpu::PhaseScope phase(gpu::GFX_COPIES);
 	if (info.toXfb) {
 		present(info);
 	} else {
@@ -941,9 +990,15 @@ void Renderer::copy(const gpu::CopyInfo& info)
 
 void Renderer::endFrame()
 {
+	// (has the RSX finished the previous frame by the time this one is submitted? If not, it is the
+	// slower of the two)
+	if (mFrameFence && (int)(mDev.fenceReached() - mFrameFence) < 0) {
+		mStats.rsxBehind++;
+	}
 	mFrame++;
-	mDirty = true;
+	mDirtyBits = D_ALL; // (textures are checked again once per frame)
 	mark();
+	mFrameFence = mFenceCounter;
 	mDev.kick();
 	release();
 	evictTextures();

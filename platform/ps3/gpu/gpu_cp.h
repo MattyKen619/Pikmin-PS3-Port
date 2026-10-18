@@ -101,6 +101,83 @@ enum MemKind {
 	MEM_KIND_COUNT,
 };
 
+// ---------------------------------------------------------------- what the graphics thread is doing
+//
+// The thread interpreting the commands notes what it is busy with (ps3GfxPhase) and adds up the time it
+// spends in each phase (ps3GfxPhaseTicks, in gfxClock ticks: the time base on the PS3); the PS3's status
+// report shows the time per frame of each.
+enum GfxPhase {
+	GFX_IDLE,      // waiting for commands
+	GFX_COMMANDS,  // command processor: parsing, register loads
+	GFX_DECODE,    // command processor: vertex decoding
+	GFX_STATE,     // renderer: working out the state for a draw
+	GFX_TEXTURES,  // renderer: texture decoding and uploads
+	GFX_PROGRAMS,  // renderer: generating and assembling fragment programs
+	GFX_XF_SETUP,  // renderer: transform set-up
+	GFX_TRANSFORM, // renderer: vertex transform and lighting
+	GFX_TRIANGLES, // renderer: triangles and back-face removal
+	GFX_RSX,       // renderer: writing RSX commands (includes waiting for room in the command buffer)
+	GFX_WAIT_RSX,  // renderer: waiting for the RSX (memory it still reads, the previous frame's flip)
+	GFX_COPIES,    // renderer: frame buffer copies, clears, showing frames
+	GFX_CHECKS,    // texture memory checks, command checks and frame trace recording
+	GFX_PHASE_COUNT,
+};
+
+} // namespace gpu
+
+extern "C" volatile unsigned int ps3GfxPhase;
+extern "C" unsigned long long ps3GfxPhaseTicks[gpu::GFX_PHASE_COUNT];
+extern "C" unsigned long long ps3GfxPhaseSince;
+
+namespace gpu {
+
+extern const char* const kGfxPhaseNames[GFX_PHASE_COUNT];
+
+inline unsigned long long gfxClock()
+{
+#if defined(__powerpc__) || defined(__powerpc64__) || defined(__PPU__)
+	// (an asm mftb in a loop crashes the PS3 compiler with -fmodulo-sched. The Cell's time base can read
+	// with its low word 0 for a moment: Linux reads it again then, CPU_FTR_CELL_TB_BUG.)
+	unsigned long long t;
+	do {
+		t = __builtin_ppc_get_timebase();
+	} while ((unsigned int)t == 0);
+	return t;
+#elif defined(__x86_64__) || defined(__i386__)
+	return __builtin_ia32_rdtsc();
+#else
+	return 0;
+#endif
+}
+
+inline void setGfxPhase(unsigned int phase)
+{
+	const unsigned long long now = gfxClock();
+	if (now > ps3GfxPhaseSince) {
+		ps3GfxPhaseTicks[ps3GfxPhase] += now - ps3GfxPhaseSince;
+		ps3GfxPhaseSince = now;
+	}
+	ps3GfxPhase = phase;
+}
+
+// Sets the phase for a scope, and back to the previous one after it.
+struct PhaseScope {
+	unsigned int prev;
+	explicit PhaseScope(unsigned int phase)
+	    : prev(ps3GfxPhase)
+	{
+		if (phase != prev) {
+			setGfxPhase(phase);
+		}
+	}
+	~PhaseScope()
+	{
+		if (ps3GfxPhase != prev) {
+			setGfxPhase(prev);
+		}
+	}
+};
+
 // ---------------------------------------------------------------- vertex layout and decoded vertices
 
 struct VertexLayout {
@@ -191,6 +268,7 @@ struct State {
 struct Stats {
 	u64 commands, draws, vertices, displayLists, displayListBytes;
 	u64 cpLoads, xfLoads, bpLoads, indexedLoads;
+	u64 xfSetupLoads; // XF loads that reached lights or registers (0x600 and up), not only matrices
 	u64 badCommands, memoryFailures, nestedDisplayLists, xfOutOfRange, vertexBufferOverflows;
 	u64 copiesToXfb, copiesToTexture, drawDones, tokens;
 	u32 primitives;  // bit (opcode >> 3) & 7 per primitive type seen
@@ -225,14 +303,13 @@ public:
 	u64 commandStart() const { return mCmdStart; }
 	u64 commandEnd() const { return mCmdEnd; }
 
-	// The register state. (Changing it through the non-const accessor is allowed: cached vertex layouts
-	// are recomputed.)
-	State& state()
-	{
-		mLayoutValid = 0;
-		return mState;
-	}
+	// The register state. Changing it goes through setState (cached vertex layouts are recomputed).
 	const State& state() const { return mState; }
+	void setState(const State& s)
+	{
+		mState       = s;
+		mLayoutValid = 0;
+	}
 	Stats& stats() { return mStats; }
 
 	// Vertex layout for a vertex format, from the current CP registers.

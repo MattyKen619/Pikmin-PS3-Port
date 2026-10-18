@@ -3,6 +3,7 @@
 #include "rsx_port.h"
 
 #include "device_rsx.h"
+#include "ppu_bench.h"
 #include "renderer.h"
 
 #include "../backend/ps3_backend.h"
@@ -30,6 +31,13 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 		return NULL;
 	}
 	sDev->selfTest();
+	{
+		gfx::Texture* t = sDev->createTexture(512, 512); // (1 MB of RSX memory to time copies with)
+		gfx::ppuBench(logLine, t ? t->texels : NULL, t ? t->bytes : 0);
+		if (t) {
+			sDev->destroyTexture(t);
+		}
+	}
 	sRenderer = gfx::create<gfx::Renderer>(cp, memory, *sDev);
 	sRenderer->setLogger(logLine);
 	sRenderer->begin();
@@ -90,11 +98,12 @@ void ps3rsx::status(char* buf, unsigned int size)
 	snprintf(buf, size,
 	         "RSX: %u frames shown; per frame %llu draws in %llu batches, %llu program changes, %llu culled of %llu triangles, "
 	         "%llu KB of textures uploaded; %llu programs (%llu failed), %u textures (%u KB), %llu skipped, %llu line/point "
-	         "draws, %llu missing textures, %llu copies, %llu waits; RSX memory %u KB",
+	         "draws, %llu missing textures, %llu copies, %llu waits; RSX memory %u KB; %llu of %u frames finished before the RSX "
+	         "had drawn the previous one",
 	         frames, (s.draws - last.draws) / n, (s.batches - last.batches) / n, (s.programBinds - last.programBinds) / n,
 	         (s.culled - last.culled) / n, (s.triangles - last.triangles) / n, ((s.textureUploadBytes - last.textureUploadBytes) >> 10) / n,
 	         s.programs, s.programErrors, s.textures, s.textureBytes >> 10, s.skippedDraws, s.lineDraws + s.pointDraws,
-	         s.missingTextures, s.copies, s.fenceWaits, sDev->localMemoryUsed() >> 10);
+	         s.missingTextures, s.copies, s.fenceWaits, sDev->localMemoryUsed() >> 10, s.rsxBehind - last.rsxBehind, frames - lastFrames);
 	last       = s;
 	lastFrames = frames;
 }

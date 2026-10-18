@@ -14,12 +14,35 @@ static inline float asFloat(u32 w)
 	x.u = w;
 	return x.f;
 }
-static inline float maxf(float a, float b) { return a > b ? a : b; }
-static inline float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+// a >= 0 ? b : c, without a branch on the PS3's processor (a mispredicted branch costs it ~20 cycles).
+// (NaN in a selects c, the same on every platform.)
+static inline float selectF(float a, float b, float c)
+{
+#if defined(__powerpc__) || defined(__powerpc64__)
+	float r;
+	__asm__("fsel %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(b), "f"(c));
+	return r;
+#else
+	return a >= 0 ? b : c;
+#endif
+}
+static inline float maxf(float a, float b) { return selectF(a - b, a, b); }
+
+// Byte values 0-255 as 0-1. (A table: on the PS3's processor, converting an integer to floating point
+// goes through memory and stalls; loading a float does not.)
+static float sUnit[256];
+static bool sUnitReady;
+static inline float clamp01(float v) { return selectF(v, selectF(v - 1.0f, 1.0f, v), 0.0f); }
 static inline float sqrtF(float v) { return __builtin_sqrtf(v); }
 
 void xfPrepare(const u32* xf, const VertexLayout& L, XfSetup& s)
 {
+	if (!sUnitReady) {
+		for (int i = 0; i < 256; i++) {
+			sUnit[i] = i / 255.0f;
+		}
+		sUnitReady = true;
+	}
 	s.xf     = xf;
 	s.layout = &L;
 	for (int i = 0; i < 6; i++) {
@@ -48,8 +71,8 @@ void xfPrepare(const u32* xf, const VertexLayout& L, XfSetup& s)
 			p.attn          = bits(ctrl, 9, 1);
 			p.spot          = bits(ctrl, 10, 1);
 			for (int k = 0; k < 4; k++) {
-				p.mat[k] = ((matR >> (24 - k * 8)) & 0xFF) / 255.0f;
-				p.amb[k] = ((ambR >> (24 - k * 8)) & 0xFF) / 255.0f;
+				p.mat[k] = sUnit[(matR >> (24 - k * 8)) & 0xFF];
+				p.amb[k] = sUnit[(ambR >> (24 - k * 8)) & 0xFF];
 			}
 			if (p.lighting && (u32)c < s.numChans) {
 				lights |= p.lightMask;
@@ -64,7 +87,7 @@ void xfPrepare(const u32* xf, const VertexLayout& L, XfSetup& s)
 		const u32* lt      = xf + 0x600 + l * 16;
 		XfSetup::Light& li = s.light[l];
 		for (int k = 0; k < 4; k++) {
-			li.color[k] = ((lt[3] >> (24 - k * 8)) & 0xFF) / 255.0f;
+			li.color[k] = sUnit[(lt[3] >> (24 - k * 8)) & 0xFF];
 		}
 		for (int k = 0; k < 3; k++) {
 			li.A[k]   = asFloat(lt[4 + k]);
@@ -93,7 +116,7 @@ void xfPrepare(const u32* xf, const VertexLayout& L, XfSetup& s)
 			if (s.dual && g.type == 0) {
 				const u32 post = xf[0x1050 + t];
 				g.normalize    = bits(post, 8, 1);
-				g.post         = xf + 0x500 + bits(post, 0, 6) * 4;
+				g.post         = (const float*)(xf + 0x500 + bits(post, 0, 6) * 4);
 			}
 		}
 	}
@@ -102,7 +125,7 @@ void xfPrepare(const u32* xf, const VertexLayout& L, XfSetup& s)
 void xfLimit(XfSetup& s, u32 chanMask, u32 texCoords)
 {
 	// (texture coordinates generated from colors need those channels; emboss ones need the others)
-	u32 limit = s.emboss ? s.numTexGens : texCoords;
+	u32 limit = s.emboss && s.numTexGens > texCoords ? s.numTexGens : texCoords;
 	for (u32 t = 0; t < limit && t < s.numTexGens; t++) {
 		if (s.texgen[t].type == 2) chanMask |= 1;
 		if (s.texgen[t].type == 3) chanMask |= 2;
@@ -113,14 +136,15 @@ void xfLimit(XfSetup& s, u32 chanMask, u32 texCoords)
 
 void xfTransform(const XfSetup& s, const Vertex& in, XfVertex& out)
 {
-	const u32* xf         = s.xf;
+	// (XF memory read as floats directly: matrices and light parameters are floats)
+	const float* xf       = (const float*)s.xf;
 	const VertexLayout& L = *s.layout;
 	const u32 idx         = in.pnmtx & 63;
-	const u32* m          = xf + idx * 4;
+	const float* m        = xf + idx * 4;
 	float pos[3]          = { in.pos[0], in.pos[1], L.posCount == 3 ? in.pos[2] : 0.0f };
 	float view[3];
 	for (int r = 0; r < 3; r++) {
-		view[r] = asFloat(m[r * 4]) * pos[0] + asFloat(m[r * 4 + 1]) * pos[1] + asFloat(m[r * 4 + 2]) * pos[2] + asFloat(m[r * 4 + 3]);
+		view[r] = m[r * 4] * pos[0] + m[r * 4 + 1] * pos[1] + m[r * 4 + 2] * pos[2] + m[r * 4 + 3];
 	}
 
 	// projection
@@ -140,13 +164,14 @@ void xfTransform(const XfSetup& s, const Vertex& in, XfVertex& out)
 	// normal
 	float nrm[3] = { 0, 0, 1 };
 	if (s.needNormal && L.nrmMode != ATTR_NONE) {
-		const u32* n = xf + 0x400 + (idx & 31) * 3;
+		const float* n = xf + 0x400 + (idx & 31) * 3;
 		for (int r = 0; r < 3; r++) {
-			nrm[r] = asFloat(n[r * 3]) * in.nrm[0] + asFloat(n[r * 3 + 1]) * in.nrm[1] + asFloat(n[r * 3 + 2]) * in.nrm[2];
+			nrm[r] = n[r * 3] * in.nrm[0] + n[r * 3 + 1] * in.nrm[1] + n[r * 3 + 2] * in.nrm[2];
 		}
 		float len = sqrtF(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
 		if (len > 0) {
-			nrm[0] /= len, nrm[1] /= len, nrm[2] /= len;
+			const float il = 1.0f / len;
+			nrm[0] *= il, nrm[1] *= il, nrm[2] *= il;
 		}
 	}
 
@@ -162,11 +187,11 @@ void xfTransform(const XfSetup& s, const Vertex& in, XfVertex& out)
 		float vtx[4] = { 1, 1, 1, 1 };
 		if (L.clrMode[c] != ATTR_NONE) {
 			for (int k = 0; k < 4; k++) {
-				vtx[k] = in.clr[c][k] * (1.0f / 255.0f);
+				vtx[k] = sUnit[in.clr[c][k]];
 			}
 		} else if (c == 1 && L.clrMode[0] != ATTR_NONE) {
 			for (int k = 0; k < 4; k++) {
-				vtx[k] = in.clr[0][k] * (1.0f / 255.0f);
+				vtx[k] = sUnit[in.clr[0][k]];
 			}
 		}
 		for (int part = 0; part < 2; part++) {
@@ -197,8 +222,9 @@ void xfTransform(const XfSetup& s, const Vertex& in, XfVertex& out)
 					float dir[3], attn = 1.0f;
 					if (pt.attn && !pt.spot) { // specular
 						float len = sqrtF(lt.pos[0] * lt.pos[0] + lt.pos[1] * lt.pos[1] + lt.pos[2] * lt.pos[2]);
+						float il  = len > 0 ? 1.0f / len : 0;
 						for (int k = 0; k < 3; k++) {
-							dir[k] = len > 0 ? lt.pos[k] / len : 0;
+							dir[k] = lt.pos[k] * il;
 						}
 						float nd   = nrm[0] * dir[0] + nrm[1] * dir[1] + nrm[2] * dir[2];
 						float a    = nd >= 0 ? maxf(0, nrm[0] * lt.dir[0] + nrm[1] * lt.dir[1] + nrm[2] * lt.dir[2]) : 0;
@@ -267,11 +293,11 @@ void xfTransform(const XfSetup& s, const Vertex& in, XfVertex& out)
 		}
 		float ss = 0, tt = 0, q = 1;
 		if (g.type == 0) {
-			const u32* tm = xf + (in.texmtx[t] & 63) * 4;
-			ss = asFloat(tm[0]) * src[0] + asFloat(tm[1]) * src[1] + asFloat(tm[2]) * src[2] + asFloat(tm[3]) * src[3];
-			tt = asFloat(tm[4]) * src[0] + asFloat(tm[5]) * src[1] + asFloat(tm[6]) * src[2] + asFloat(tm[7]) * src[3];
+			const float* tm = xf + (in.texmtx[t] & 63) * 4;
+			ss = tm[0] * src[0] + tm[1] * src[1] + tm[2] * src[2] + tm[3] * src[3];
+			tt = tm[4] * src[0] + tm[5] * src[1] + tm[6] * src[2] + tm[7] * src[3];
 			if (g.stq) {
-				q = asFloat(tm[8]) * src[0] + asFloat(tm[9]) * src[1] + asFloat(tm[10]) * src[2] + asFloat(tm[11]) * src[3];
+				q = tm[8] * src[0] + tm[9] * src[1] + tm[10] * src[2] + tm[11] * src[3];
 			}
 		} else if (g.type == 1) { // emboss: the source coordinate (the bump offset is not applied)
 			ss = out.tex[g.from][0], tt = out.tex[g.from][1], q = out.tex[g.from][2];
@@ -284,13 +310,14 @@ void xfTransform(const XfSetup& s, const Vertex& in, XfVertex& out)
 			if (g.normalize) {
 				float len = sqrtF(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 				if (len > 0) {
-					v[0] /= len, v[1] /= len, v[2] /= len;
+					const float il = 1.0f / len;
+					v[0] *= il, v[1] *= il, v[2] *= il;
 				}
 			}
-			const u32* pm = g.post;
-			ss = asFloat(pm[0]) * v[0] + asFloat(pm[1]) * v[1] + asFloat(pm[2]) * v[2] + asFloat(pm[3]);
-			tt = asFloat(pm[4]) * v[0] + asFloat(pm[5]) * v[1] + asFloat(pm[6]) * v[2] + asFloat(pm[7]);
-			q  = asFloat(pm[8]) * v[0] + asFloat(pm[9]) * v[1] + asFloat(pm[10]) * v[2] + asFloat(pm[11]);
+			const float* pm = g.post;
+			ss = pm[0] * v[0] + pm[1] * v[1] + pm[2] * v[2] + pm[3];
+			tt = pm[4] * v[0] + pm[5] * v[1] + pm[6] * v[2] + pm[7];
+			q  = pm[8] * v[0] + pm[9] * v[1] + pm[10] * v[2] + pm[11];
 		}
 		out.tex[t][0] = ss, out.tex[t][1] = tt, out.tex[t][2] = q;
 	}
