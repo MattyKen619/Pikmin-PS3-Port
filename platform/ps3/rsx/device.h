@@ -158,6 +158,10 @@ public:
 	// works (ATTRIB_U8, ATTRIB_U8_NORM or ATTRIB_F32), or 0 if relative addressing does not work.
 	virtual u32 vertexIndexType() = 0;
 	virtual void drawTriangles(const unsigned short* indices, u32 count) = 0;  // indices into the vertices
+	// The same with 32-bit indices that are in scratch memory (the chip reads them there): vertices anywhere
+	// in the renderer's vertex cache. Only if index32Works.
+	virtual void drawTriangles32(const u32* indices, u32 count) = 0;
+	virtual bool index32Works() = 0;
 	// Clears a rectangle of the current target (the scissor is not used).
 	virtual void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) = 0;
 

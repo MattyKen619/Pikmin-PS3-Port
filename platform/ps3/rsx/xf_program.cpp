@@ -20,7 +20,7 @@ enum {
 	                //   diffuse function, attenuation, spot
 	K_TEXCNT  = 33, // texture coordinates output
 	K_GENS    = 34, // 8 x 6 bytes: type (0xFF: none), row, stq, abc1, post, normalize
-	K_INDEX   = 90, // matrix index type (0: none, fixed matrices)
+	K_INDEX   = 90, // matrix index type (Device::vertexIndexType)
 	PART_SIZE = 7,
 	GEN_SIZE  = 6,
 };
@@ -48,6 +48,9 @@ u32 XfKey::hash() const
 
 bool makeXfKey(const gpu::XfSetup& s, const gpu::VertexLayout& L, u32 texCoords, u32 indexType, XfKey& key)
 {
+	if (indexType == 0) {
+		return false; // (the matrices are picked with relative addressing)
+	}
 	memset(&key, 0, sizeof(key));
 	key.b[K_INDEX] = (u8)indexType;
 	u32 texCount = texCoords > s.texLimit ? texCoords : s.texLimit;
@@ -131,7 +134,7 @@ using namespace vp;
 
 // temporaries
 enum {
-	R_IDX_A = 0, R_IDX_B = 1, R_IDX_C = 2, // index bytes + the palette's base
+	R_IDX_A = 0, R_IDX_B = 1, R_IDX_C = 2, // matrix indices (XF rows)
 	R_VIEW = 3, R_MODEL = 4, R_NRM = 5,    // view and model space positions (w = 1), normal
 	R_ACC = 6,                            // lighting sum
 	R_CHAN0 = 7,                          // channel colors (7, 8)
@@ -252,8 +255,7 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 	G.pos = 0;
 	off   = 12;
 	const u32 indexType = k[K_INDEX];
-	const bool direct   = indexType == 0;
-	if (!direct) {
+	{
 		const u32 group = indexType == ATTRIB_F32 ? 16 : 4; // (4 indices)
 		G.index         = (u16)off;
 		G.indexCount    = (u8)(1 + texCount);
@@ -291,12 +293,15 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 	}
 	F.stride      = off;
 	G.stride      = off;
-	info.posRows   = lightNrm ? 6 : 3;
+	info.normals   = lightNrm && nrmAttr;
 	info.indexType = indexType;
-	info.texCount = texCount;
+	info.texCount  = texCount;
 	for (u32 t = 0; t < texCount; t++) {
 		if (k[K_GENS + t * GEN_SIZE] == 0) {
 			info.texMatrices |= 1u << t;
+			if (k[K_GENS + t * GEN_SIZE + 2]) {
+				info.texRows3 |= 1u << t;
+			}
 		}
 	}
 
@@ -305,8 +310,8 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 	Builder& b = g.b;
 	const Src zero = C(XC_MISC0)("x"), one = C(XC_MISC0)("y");
 
-	// matrix indices: + the palette's base (bytes read as 0-1: * 255, and + 0.5 against rounding)
-	if (!direct) {
+	// matrix indices (bytes read as 0-1: * 255, and + 0.5 against rounding)
+	{
 		const int regs[3] = { R_IDX_A, R_IDX_B, R_IDX_C };
 		const int ins[3]  = { XA_IDX_A, XA_IDX_B, XA_IDX_C };
 		for (int i = 0; i < 3; i++) {
@@ -315,21 +320,17 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 			if (indexType == ATTRIB_U8_NORM) {
 				b.mad(DT(regs[i]), V(ins[i]), C(XC_MISC2)("x"), C(XC_MISC2)("y"));
 			} else {
-				b.add(DT(regs[i]), V(ins[i]), C(XC_MISC1)("y"));
+				b.mov(DT(regs[i]), V(ins[i]));
 			}
 		}
 	}
-	// a matrix row: from the palette (c[A0.x + row], A0 loaded with arl first) or a fixed constant
-	auto M = [&](int fixedBase, int row) -> Src { return direct ? C(fixedBase + row) : CRel(row); };
-	// position: model -> view -> clip
+	// position: model -> view -> clip (the position matrix: c[XC_MIRROR + index + row], A0 loaded with arl)
 	b.mov(DT(R_MODEL, M_XYZ), V(XA_POS));
 	b.mov(DT(R_MODEL, M_W), one);
-	if (!direct) {
-		b.arl(T(R_IDX_A)("x"));
-	}
-	b.dp4(DT(R_VIEW, M_X), M(XC_DIRECT_POS, 0), T(R_MODEL));
-	b.dp4(DT(R_VIEW, M_Y), M(XC_DIRECT_POS, 1), T(R_MODEL));
-	b.dp4(DT(R_VIEW, M_Z), M(XC_DIRECT_POS, 2), T(R_MODEL));
+	b.arl(T(R_IDX_A)("x"));
+	b.dp4(DT(R_VIEW, M_X), CRel(XC_MIRROR + 0), T(R_MODEL));
+	b.dp4(DT(R_VIEW, M_Y), CRel(XC_MIRROR + 1), T(R_MODEL));
+	b.dp4(DT(R_VIEW, M_Z), CRel(XC_MIRROR + 2), T(R_MODEL));
 	b.mov(DT(R_VIEW, M_W), one);
 	static const int kMask[4] = { M_X, M_Y, M_Z, M_W };
 	for (int r = 0; r < 4; r++) {
@@ -338,9 +339,9 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 	// normal (for lighting): the normal matrix, normalized; (0, 0, 1) without normals
 	if (lightNrm) {
 		if (nrmAttr) {
-			b.dp3(DT(R_NRM, M_X), M(XC_DIRECT_POS, 3), V(XA_NRM));
-			b.dp3(DT(R_NRM, M_Y), M(XC_DIRECT_POS, 4), V(XA_NRM));
-			b.dp3(DT(R_NRM, M_Z), M(XC_DIRECT_POS, 5), V(XA_NRM));
+			b.dp3(DT(R_NRM, M_X), CRel(XC_NMIRROR + 0), V(XA_NRM)); // (A0: still the position index)
+			b.dp3(DT(R_NRM, M_Y), CRel(XC_NMIRROR + 1), V(XA_NRM));
+			b.dp3(DT(R_NRM, M_Z), CRel(XC_NMIRROR + 2), V(XA_NRM));
 			b.dp3(DT(R_NSCR, M_X), T(R_NRM), T(R_NRM));
 			b.max(DT(R_NSCR, M_X), T(R_NSCR)("x"), C(XC_MISC1)("x"));
 			b.rsq(DT(R_NSCR, M_X), T(R_NSCR)("x"));
@@ -412,14 +413,11 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 			// the texture matrix
 			const int reg  = t < 3 ? R_IDX_A : t < 7 ? R_IDX_B : R_IDX_C;
 			const int comp = t < 3 ? (int)t + 1 : t < 7 ? (int)t - 3 : 0;
-			const int base = XC_DIRECT_TEX + (int)t * 3;
-			if (!direct) {
-				b.arl(T(reg)(kComp[comp]));
-			}
-			b.dp4(DT(R_TC, M_X), M(base, 0), T(R_TSRC));
-			b.dp4(DT(R_TC, M_Y), M(base, 1), T(R_TSRC));
+			b.arl(T(reg)(kComp[comp]));
+			b.dp4(DT(R_TC, M_X), CRel(XC_MIRROR + 0), T(R_TSRC));
+			b.dp4(DT(R_TC, M_Y), CRel(XC_MIRROR + 1), T(R_TSRC));
 			if (gk[2]) {
-				b.dp4(DT(R_TC, M_Z), M(base, 2), T(R_TSRC));
+				b.dp4(DT(R_TC, M_Z), CRel(XC_MIRROR + 2), T(R_TSRC));
 			} else {
 				b.mov(DT(R_TC, M_Z), one);
 			}
@@ -458,8 +456,8 @@ void xfSetupConstants(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
 {
 	memset(out, 0, sizeof(float) * 4 * XC_SETUP_COUNT);
 	out[XC_MISC0][0] = 0, out[XC_MISC0][1] = 1, out[XC_MISC0][2] = 0.5f, out[XC_MISC0][3] = 2;
-	out[XC_MISC1][0] = 1e-30f, out[XC_MISC1][1] = (float)XC_PALETTE, out[XC_MISC1][2] = 0, out[XC_MISC1][3] = 1;
-	out[XC_MISC2][0] = 255.0f, out[XC_MISC2][1] = (float)XC_PALETTE + 0.5f;
+	out[XC_MISC1][0] = 1e-30f, out[XC_MISC1][1] = 0, out[XC_MISC1][2] = 0, out[XC_MISC1][3] = 1;
+	out[XC_MISC2][0] = 255.0f, out[XC_MISC2][1] = 0.5f;
 	const float* p = s.proj;
 	float* r0 = out[XC_PROJ];
 	float* r1 = out[XC_PROJ + 1];

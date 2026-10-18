@@ -17,7 +17,7 @@ using gfx::u8;
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 SoftDevice::SoftDevice()
-    : mScratch(16 * 1024 * 1024)
+    : mScratch(32 * 1024 * 1024)
     , mFence(0)
     , mEfb(gfx::EFB_WIDTH * gfx::EFB_HEIGHT, 0xFF000000)
     , mDepth(gfx::EFB_WIDTH * gfx::EFB_HEIGHT, 0xFFFFFF)
@@ -138,7 +138,7 @@ void SoftDevice::setVertexFormat(const void* base, const gfx::VertexFormat& form
 
 // ---- vertex programs: an interpreter for the NV40 microcode (fields: platform/ps3/rsx/fpasm/nv40_vertprog.h)
 
-void SoftDevice::fetchRaw(unsigned short index, Vert& v)
+void SoftDevice::fetchRaw(u32 index, Vert& v)
 {
 	float in[16][4];
 	const u8* p = mVerts + index * mStride;
@@ -337,7 +337,7 @@ bool SoftDevice::readTarget(u32* out, u32 x, u32 y, u32 width, u32 height)
 
 // ================================================================== vertices and triangles
 
-void SoftDevice::fetch(unsigned short index, Vert& v)
+void SoftDevice::fetch(u32 index, Vert& v)
 {
 	const u8* p    = mVerts + index * mStride;
 	const float* f = (const float*)p;
@@ -358,7 +358,8 @@ void SoftDevice::fetch(unsigned short index, Vert& v)
 	}
 }
 
-void SoftDevice::drawTriangles(const unsigned short* indices, u32 count)
+template <typename I>
+void SoftDevice::drawIndexed(const I* indices, u32 count)
 {
 	for (u32 i = 0; i + 2 < count; i += 3) {
 		Vert a, b, c;
@@ -374,6 +375,10 @@ void SoftDevice::drawTriangles(const unsigned short* indices, u32 count)
 		triangle(a, b, c);
 	}
 }
+
+void SoftDevice::drawTriangles(const unsigned short* indices, u32 count) { drawIndexed(indices, count); }
+
+void SoftDevice::drawTriangles32(const u32* indices, u32 count) { drawIndexed(indices, count); }
 
 static void lerpVert(const SoftDevice* /*unused*/, const float* a, const float* b, float t, float* out, size_t n)
 {

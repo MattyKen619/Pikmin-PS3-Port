@@ -3,11 +3,16 @@
 //
 // The command processor (platform/ps3/gpu/gpu_cp.h) reports each draw. The renderer
 //   - has the RSX transform and light the vertices: the XF set-up becomes a vertex program
-//     (xf_program.h), the matrices the vertices use go into a palette of vertex program constants, and the
-//     CPU only unpacks the vertices into the RSX's memory (CommandProcessor::gatherVertices). Set-ups the
-//     vertex programs do not cover (emboss texture coordinates), or a device whose vertex programs failed
-//     the start-up self-test, are transformed on the CPU instead (gpu_xf.h, the same code as the host's
-//     reference renderer), with back faces removed the way the GameCube does;
+//     (xf_program.h), XF matrix memory is copied into vertex program constants (the rows the draws use,
+//     when they change), and the CPU only unpacks the vertices into the RSX's memory
+//     (CommandProcessor::gatherVertices). Set-ups the vertex programs do not cover (emboss texture
+//     coordinates), or a device whose vertex programs failed the start-up self-test, are transformed on the
+//     CPU instead (gpu_xf.h, the same code as the host's reference renderer), with back faces removed the
+//     way the GameCube does;
+//   - keeps the unpacked vertices of display list draws (the vertex cache): the game draws the same
+//     display lists frame after frame, so a draw whose display list bytes, vertex format and vertex arrays
+//     are unchanged is drawn from what was unpacked before (the arrays' memory is re-checked from time to
+//     time, the way textures are);
 //   - turns the pixel pipeline set-up (TEV, alpha test) into a fragment program (tev_program.h), the
 //     blending, depth and scissor settings into device state, and the textures the stages sample into
 //     device textures (decoded on the CPU, cached, re-checked once per frame);
@@ -37,7 +42,9 @@ struct RendererStats {
 	u64 draws, batches, triangles, culled, vertices, skippedDraws, lineDraws, pointDraws;
 	u64 programs, programErrors, programBinds, textureUploads, textureUploadBytes, missingTextures;
 	u64 copies, copyUses, presents, clears, fenceWaits;
-	u64 gpuDraws, cpuDraws, xfPrograms, xfProgramErrors, paletteRows, setupUploads, vertexProgramLoads;
+	u64 gpuDraws, cpuDraws, xfPrograms, xfProgramErrors, matrixRows, setupUploads, vertexProgramLoads;
+	u64 cacheHits, cacheFills, cacheUncached, cacheResets, regionChecks, regionChanges;
+	u32 cacheBytes, cacheEntries;
 	u64 rsxBehind; // frames finished before the RSX had drawn the previous one
 	u32 textureBytes, textures;
 };
@@ -56,14 +63,20 @@ public:
 
 	void setLogger(void (*log)(const char* text)) { mLog = log; }
 
-	// (with the transform on the RSX, vertices are unpacked straight into its memory: no decoding)
-	gpu::VertexDetail vertexDetail() override { return mGpuXf ? gpu::VERTICES_ARRAYS : gpu::VERTICES_DECODED; }
+	// (with the transform on the RSX, vertices are unpacked straight into its memory, the vertex arrays
+	// worked out only for draws that are not in the vertex cache: nothing asked of the command processor)
+	gpu::VertexDetail vertexDetail() override { return mGpuXf ? gpu::VERTICES_NONE : gpu::VERTICES_DECODED; }
 	void draw(const gpu::DrawCall& call) override;
 	void xfWritten(u32 address, u32 count) override;
 	// Transform on the RSX when it can (the default when the device's vertex programs work), or always on
 	// the CPU.
-	void setGpuTransform(bool on) { mGpuXf = on && mDev.vertexProgramsWork() && mDev.frontFaceSign() != 0; }
+	void setGpuTransform(bool on);
 	bool gpuTransform() const { return mGpuXf; }
+	// The vertex cache (on by default with the transform on the RSX, if the device draws 32-bit indices).
+	void setVertexCache(bool on);
+	bool vertexCache() const { return mCacheOn; }
+	// Starts the vertex cache over at the end of the frame (from any thread).
+	void requestCacheReset() { mResetRequest = 1; }
 	void copy(const gpu::CopyInfo& info) override;
 	void bpWritten(u32 reg, u32 value) override;
 
@@ -124,13 +137,41 @@ private:
 		XfInfo info;
 		bool ok;
 	};
-	struct Slot {
-		u32 lap, serial;
-		u8 offset, rows;
+	// rows of the copy of XF matrix memory in the constants: 0-63 (lo), 64-65 (hi)
+	struct Rows {
+		u64 lo;
+		u32 hi;
 	};
-	struct FixedSlot {
-		bool valid;
-		u32 row, rows, serial;
+	// Vertex arrays as the vertex cache knows them: the range its draws read, its hash, and a version that
+	// changes when the memory does.
+	struct ArrayRegion {
+		u32 base, stride, lo, hi;
+		u64 hash;
+		bool hashValid;
+		u32 version, checkedFrame;
+		u8 interval;
+	};
+	enum { CACHE_ARRAYS = 6 };
+	struct CacheArray {
+		ArrayRegion* region;
+		u32 base, version;
+		u8 array, stride;
+	};
+	// A display list draw in the vertex cache: its vertices unpacked into the cache memory (from
+	// firstVertex), its triangles (32-bit indices into the cache memory, at indexAt in the index memory:
+	// the entries filled one after another have their triangles one after another, and draws in that order
+	// are drawn as one), and what it was unpacked from.
+	struct CacheEntry {
+		const u8* data;       // the draw's vertices in the display list
+		CacheEntry* next;     // other entries for the same data (other programs)
+		XfProgramEntry* xp;
+		u8* bytes;            // a copy of the display list's vertex bytes (count * layout size)
+		u32 count, size, indexAt, indexCount, gen, firstVertex, block;
+		u32 cp[7];            // vertex descriptor, the format's VAT A/B/C, MATINDEX A/B
+		Rows rows, nrows;     // the rows of the matrices the vertices use
+		u8 prim, arrays, refills;
+		bool cached;          // (false: changes too often, drawn from the ring)
+		CacheArray arr[CACHE_ARRAYS];
 	};
 
 	void log(const char* fmt, ...);
@@ -158,10 +199,20 @@ private:
 	bool drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp); // false: not possible, use drawCpu
 	void drawCpu(const gpu::DrawCall& call, u32 texCoords);
 	XfProgramEntry* xfProgramFor(u32 texCoords);
-	u8 paletteSlot(Slot* slots, u32 row, u32 rows);
-	void fixedMatrix(FixedSlot& f, u32 base, u32 row, u32 rows);
-	void matrixRows(u32 row, u32 rows, float data[6][4]);
+	void uploadSetup();
+	void matrixRowsUsed(const gpu::DrawCall& call, const XfInfo& info, Rows* rows, Rows* nrows);
+	void uploadMatrices(const Rows& rows, const Rows& nrows);
 	void setDeviceCull(u8 cull);
+
+	// the vertex cache
+	CacheEntry* cacheLookup(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry** reuse);
+	CacheEntry* cacheFill(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry* e);
+	bool cacheValid(CacheEntry* e, const gpu::DrawCall& call);
+	void checkRegion(ArrayRegion& r);
+	ArrayRegion* regionFor(u32 array, u32 base, u32 stride);
+	void* poolAlloc(u32 bytes);
+	void cacheReset();
+	void batchCached(CacheEntry* e, XfProgramEntry* xp);
 
 	// internal drawing
 	void drawQuad(u32 targetWidth, u32 targetHeight, const float dst[4], const float uv[4], const Texture* source, bool linear,
@@ -199,10 +250,13 @@ private:
 	// batch
 	struct Batch {
 		bool active;
+		bool cached;   // vertices in the vertex cache (32-bit indices), not in the ring
 		u8* base;
 		u32 reserved, stride, texCoords, vertexCount;
 		XfProgramEntry* xp; // the vertex program (NULL: vertices transformed on the CPU)
 		Vec<unsigned short> indices;
+		u32 at32, count32; // (vertex cache batches: their triangles, in the index memory)
+		Rows rows, nrows; // the matrix rows its draws read (they must not change before it is drawn)
 	} mBatch;
 
 	// state
@@ -245,14 +299,24 @@ private:
 	bool mBoundXpValid;
 	float mSetup[XC_SETUP_COUNT][4]; // set-up constants on the device
 	bool mSetupValid, mSetupDirty;
-	// the matrix palette: XF matrix rows copied into constants, found again while unchanged
+	// XF matrix memory in the constants (xf_program.h): the XF load each row was copied from
 	u32 mXfWrites;      // XF loads so far
-	u32 mRowWrite[64];  // the last load that reached each matrix row (XF 0x000-0x0FF, 4 words a row)
-	u32 mNrmWrite[48];  // the same for the normal matrices (XF 0x400-0x45F, 3 words a row)
-	Slot mPosSlot[64], mTexSlot[64];
-	u32 mPalHead, mPalLap; // rows used, times the palette was started again
-	u8 mPosMap[64], mTexMap[64];
-	FixedSlot mFixedPos, mFixedTex[8]; // (without relative addressing)
+	Rows mStale, mNStale; // rows of the copy that XF loads have changed since they were copied
+	u8 mIdentity[64];   // (the vertices keep the GameCube's matrix indices)
+
+	// the vertex cache
+	bool mCacheOn;
+	volatile int mResetRequest;
+	u32 mChainLength;   // (entries for the display list address of the last lookup)
+	u8* mArena;         // cache memory for vertices (the end of the scratch memory)
+	u32 mArenaSize, mArenaHead, mArenaGen;
+	u32* mIdx;          // ... and for their triangles
+	u32 mIdxSize, mIdxHead; // (indices)
+	CacheEntry** mTable; // by display list address (open addressing)
+	u32 mTableSlots, mTableUsed;
+	Vec<u8*> mPool;      // CPU memory for entries (freed together by cacheReset)
+	u32 mPoolUsed, mPoolBytes;
+	Map<u64, ArrayRegion*> mRegions;
 };
 
 } // namespace gfx

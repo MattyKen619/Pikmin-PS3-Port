@@ -584,6 +584,11 @@ void GameFlow::hardReset(BaseApp* baseApp)
 	mIsNintendoLoadLogo = TRUE;
 
 	PRINT("starting loading\n");
+#if defined(TARGET_PS3)
+	// (the Nintendo logo shows while the game loads from here: frames of it are recorded)
+	ps3Report("[game] section: boot logo (loading screen)\n");
+	ps3GxNoteSection("boot logo");
+#endif
 	gsys->startLoading(&mGameLoadIdler, true, 0);
 	PRINT("done starting loading\n");
 

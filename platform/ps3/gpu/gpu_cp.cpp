@@ -1085,6 +1085,12 @@ const Vertex* CommandProcessor::decodeDraw(const DrawCall& call)
 	return call.count <= mVertCap ? mVerts : NULL;
 }
 
+const VertexArray* CommandProcessor::resolveArrays(const DrawCall& call)
+{
+	decodeVertices(*call.layout, call.data, call.count, false);
+	return mArrays;
+}
+
 void CommandProcessor::drawCommand(const u8* data, bool inDisplayList)
 {
 	const u8 op           = data[0];

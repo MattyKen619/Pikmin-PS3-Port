@@ -188,8 +188,13 @@ u64 hashMemory(const u8* p, u32 size)
 	u64 h       = 0x9E3779B97F4A7C15ULL ^ size;
 	const u64 k = 0xFF51AFD7ED558CCDULL;
 	u32 i       = 0;
-	if (((size_t)p & 7) == 0) {
-		const u64* w = (const u64*)p;
+	// (bytes up to an 8-byte boundary, then words: vertex arrays start anywhere)
+	for (; i < size && ((size_t)(p + i) & 7) != 0; i++) {
+		h = (h ^ p[i]) * k;
+		h ^= h >> 29;
+	}
+	{
+		const u64* w = (const u64*)(p + i);
 		for (; i + 32 <= size; i += 32, w += 4) {
 			h = (h ^ w[0]) * k;
 			h = (h ^ w[1]) * k;

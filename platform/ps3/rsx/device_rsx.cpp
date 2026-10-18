@@ -77,6 +77,7 @@ RsxDevice::RsxDevice()
     , mFrontFaceSign(0)
     , mVertexProgramsWork(false)
     , mVertexIndexType(0)
+    , mIndex32Works(false)
 {
 	memset(&mState, 0, sizeof(mState));
 	memset(&mEfbTexture, 0, sizeof(mEfbTexture));
@@ -540,6 +541,18 @@ void RsxDevice::drawTriangles(const unsigned short* indices, u32 count)
 		mInvalidateTextures = false;
 	}
 	rsxDrawInlineIndexArray16(ctx, GCM_TYPE_TRIANGLES, 0, count, indices);
+}
+
+void RsxDevice::drawTriangles32(const u32* indices, u32 count)
+{
+	checkStop();
+	gcmContextData* ctx = CTX;
+	if (mInvalidateTextures) {
+		rsxSetWaitForIdle(ctx);
+		rsxInvalidateTextureCache(ctx, GCM_INVALIDATE_TEXTURE);
+		mInvalidateTextures = false;
+	}
+	rsxDrawIndexArray(ctx, GCM_TYPE_TRIANGLES, offsetOf(indices), count, GCM_INDEX_TYPE_32B, GCM_LOCATION_CELL);
 }
 
 void RsxDevice::clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo)
@@ -1058,6 +1071,33 @@ void RsxDevice::testVertexPrograms(u8* mem, const RenderState& rs)
 		NOTE(", culling ");
 		if (mFrontFaceSign) NOTE("ok (front faces %s)", mFrontFaceSign > 0 ? "positive" : "negative");
 		else NOTE("WRONG (%08x %08x)", seen[0], seen[1]);
+	}
+	// j. 32-bit indices read from memory: vertices far into the memory (the renderer's vertex cache draws
+	// them that way)
+	mIndex32Works = false;
+	if (plain) {
+		const u32 far = 70000; // (beyond 16 bits)
+		u8* vbase     = mem + ((used + 127) & ~127u);
+		u8* v         = vbase + far * 32;
+		memset(v, 0, 4 * 32);
+		const float xs[4] = { x0, x0 + 40, x0 + 40, x0 }, ys[4] = { y0, y0, y0 + 30, y0 + 30 };
+		for (int i = 0; i < 4; i++) {
+			float* fv = (float*)(v + i * 32);
+			fv[0]     = xs[i] / EFB_WIDTH * 2.0f - 1.0f;
+			fv[1]     = 1.0f - ys[i] / EFB_HEIGHT * 2.0f;
+			fv[2]     = 0.0f;
+		}
+		setState(rs);
+		setVertexProgram(plain);
+		setVertexFormat(vbase, f3);
+		u32* qi32 = (u32*)(v + 4 * 32 + 128); // (the chip reads the indices from memory)
+		qi32[0] = far, qi32[1] = far + 1, qi32[2] = far + 2, qi32[3] = far, qi32[4] = far + 2, qi32[5] = far + 3;
+		drawTriangles32(qi32, 6);
+		u32 px        = pixel((u32)x0 + 20, (u32)y0 + 15);
+		mIndex32Works = px == 0xFF00FF00;
+		NOTE(", 32-bit indices %s", mIndex32Works ? "ok" : "WRONG");
+		if (!mIndex32Works) NOTE(" (%08x)", px);
+		x0 += 50;
 	}
 	mVertexProgramsWork = basic && constants && float3 && arith && order && mFrontFaceSign != 0;
 	setVertexProgram(NULL);

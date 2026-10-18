@@ -23,6 +23,7 @@
 
 #include "../backend/ps3_backend.h"
 #include "gx_internal.h"
+#include "../rsx/rsx_port.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -471,6 +472,7 @@ extern "C" void ps3GxNoteSection(const char* name)
 		const char* label;
 		unsigned delay;
 	} kPlan[] = {
+		{ "boot logo", "boot_logo", 6 },          { "boot logo", "boot_logo_later", 30 },
 		{ "Nintendo logo", "nintendo_logo", 30 }, { "title screen", "title", 240 }, { "movie (h4m)", "movie", 300 },
 		{ "file select", "file_select", 90 },     { "intro", "cutscene", 600 },    { "gameplay", "gameplay", 300 },
 		{ "gameplay", "gameplay_later", 1500 },
@@ -480,5 +482,6 @@ extern "C" void ps3GxNoteSection(const char* name)
 			ps3gx::traceSchedule(kPlan[i].label, kPlan[i].delay);
 		}
 	}
+	ps3rsx::sectionChanged();
 	ps3ProfileSection(name);
 }

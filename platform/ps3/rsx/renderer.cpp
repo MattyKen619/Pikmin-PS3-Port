@@ -8,9 +8,14 @@
 #include "../gpu/gpu_tex.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef RSX_VERTEX_CACHE_BYTES
+#define RSX_VERTEX_CACHE_BYTES (8 * 1024 * 1024)
+#endif
 
 namespace gfx {
 
@@ -34,7 +39,61 @@ enum {
 	TEXTURE_BUDGET  = 96 * 1024 * 1024, // device memory for decoded textures before old ones are evicted
 	MAX_BATCH_VERTS = 65535,
 	TEXTURE_CHECK_FRAMES = 8,
+	ARENA_BYTES     = RSX_VERTEX_CACHE_BYTES, // vertex cache memory (at most a third of the scratch memory)
+	CACHE_ENTRIES   = 32768,           // entries before the vertex cache starts over
+	POOL_CHUNK      = 1024 * 1024,
+	POOL_MAX        = 12 * 1024 * 1024, // CPU memory for the entries before the vertex cache starts over
 };
+
+// The triangles of a draw's primitive as indices (first: the index of its first vertex). Returns the count.
+template <typename I>
+u32 triangleIndices(u32 prim, u32 n, u32 first, I* ix)
+{
+	I* const start = ix;
+	switch (prim) {
+	case gpu::PRIM_QUADS:
+	case gpu::PRIM_QUADS_2:
+		for (u32 i = 0; i + 3 < n; i += 4, ix += 6) {
+			ix[0] = (I)(first + i), ix[1] = (I)(first + i + 1), ix[2] = (I)(first + i + 2);
+			ix[3] = (I)(first + i), ix[4] = (I)(first + i + 2), ix[5] = (I)(first + i + 3);
+		}
+		break;
+	case gpu::PRIM_TRIANGLES:
+		for (u32 i = 0; i + 2 < n; i += 3, ix += 3) {
+			ix[0] = (I)(first + i), ix[1] = (I)(first + i + 1), ix[2] = (I)(first + i + 2);
+		}
+		break;
+	case gpu::PRIM_TRI_STRIP:
+		for (u32 i = 0; i + 2 < n; i++, ix += 3) {
+			if (i & 1) {
+				ix[0] = (I)(first + i + 1), ix[1] = (I)(first + i);
+			} else {
+				ix[0] = (I)(first + i), ix[1] = (I)(first + i + 1);
+			}
+			ix[2] = (I)(first + i + 2);
+		}
+		break;
+	case gpu::PRIM_TRI_FAN:
+		for (u32 i = 1; i + 1 < n; i++, ix += 3) {
+			ix[0] = (I)first, ix[1] = (I)(first + i), ix[2] = (I)(first + i + 1);
+		}
+		break;
+	default: break;
+	}
+	return (u32)(ix - start);
+}
+
+u32 triangleCount(u32 prim, u32 n)
+{
+	switch (prim) {
+	case gpu::PRIM_QUADS:
+	case gpu::PRIM_QUADS_2: return (n / 4) * 2;
+	case gpu::PRIM_TRIANGLES: return n / 3;
+	case gpu::PRIM_TRI_STRIP:
+	case gpu::PRIM_TRI_FAN: return n >= 3 ? n - 2 : 0;
+	default: return 0;
+	}
+}
 
 const u8 kBlendSrc[8] = { BLEND_ZERO, BLEND_ONE, BLEND_DST_COLOR, BLEND_INV_DST_COLOR, BLEND_SRC_ALPHA, BLEND_INV_SRC_ALPHA, BLEND_DST_ALPHA, BLEND_INV_DST_ALPHA };
 const u8 kBlendDst[8] = { BLEND_ZERO, BLEND_ONE, BLEND_SRC_COLOR, BLEND_INV_SRC_COLOR, BLEND_SRC_ALPHA, BLEND_INV_SRC_ALPHA, BLEND_DST_ALPHA, BLEND_INV_DST_ALPHA };
@@ -150,19 +209,28 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mSetupValid(false)
     , mSetupDirty(true)
     , mXfWrites(1)
-    , mPalHead(0)
-    , mPalLap(1)
+    , mCacheOn(false)
+    , mResetRequest(0)
+    , mChainLength(0)
+    , mArena(NULL)
+    , mArenaSize(0)
+    , mArenaHead(0)
+    , mArenaGen(1)
+    , mIdx(NULL)
+    , mIdxSize(0)
+    , mIdxHead(0)
+    , mTable(NULL)
+    , mTableSlots(0)
+    , mTableUsed(0)
+    , mPoolUsed(0)
+    , mPoolBytes(0)
 {
-	mGpuXf = mDev.vertexProgramsWork() && mDev.frontFaceSign() != 0;
 	memset(mSetup, 0, sizeof(mSetup));
-	memset(mRowWrite, 0, sizeof(mRowWrite));
-	memset(mNrmWrite, 0, sizeof(mNrmWrite));
-	memset(mPosSlot, 0, sizeof(mPosSlot));
-	memset(mTexSlot, 0, sizeof(mTexSlot));
-	memset(mPosMap, 0, sizeof(mPosMap));
-	memset(&mFixedPos, 0, sizeof(mFixedPos));
-	memset(mFixedTex, 0, sizeof(mFixedTex));
-	memset(mTexMap, 0, sizeof(mTexMap));
+	mStale.lo = mNStale.lo = ~0ULL;
+	mStale.hi = mNStale.hi = 3;
+	for (int i = 0; i < 64; i++) {
+		mIdentity[i] = (u8)i;
+	}
 	memset(&mStats, 0, sizeof(mStats));
 	memset(mTevReg, 0, sizeof(mTevReg));
 	memset(mKonst, 0, sizeof(mKonst));
@@ -176,20 +244,58 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 	mTmem = (u8*)calloc(1, 0x100000);
 	mScratch     = mDev.scratchBase();
 	mScratchSize = mDev.scratchSize();
+	// the vertex cache's memory: the end of the scratch memory (the ring keeps the rest), 3/4 for vertices
+	// and 1/4 for their triangles
+	u32 cacheBytes = (mScratchSize / 3) & ~127u;
+	if (cacheBytes > (u32)ARENA_BYTES) {
+		cacheBytes = ARENA_BYTES;
+	}
+	mScratchSize = (mScratchSize - cacheBytes) & ~127u;
+	mArena       = mScratch + mScratchSize;
+	mArenaSize   = (cacheBytes / 4 * 3) & ~127u;
+	mIdx         = (u32*)(mArena + mArenaSize);
+	mIdxSize     = (cacheBytes - mArenaSize) / 4;
 	mBatch.active = false;
+	mBatch.cached = false;
 	mBatch.base   = NULL;
 	mBatch.reserved = mBatch.stride = mBatch.texCoords = mBatch.vertexCount = 0;
 	mBatch.xp       = NULL;
+	mBatch.rows.lo = mBatch.nrows.lo = 0;
+	mBatch.rows.hi = mBatch.nrows.hi = 0;
+	mBatch.at32 = mBatch.count32 = 0;
 	for (int i = 0; i < 8; i++) {
 		mBound[i].valid = false;
 		mBound[i].tex   = NULL;
 	}
 	memset(mCopyProgramReady, 0, sizeof(mCopyProgramReady));
+	mTableSlots = 1 << 16;
+	mTable      = (CacheEntry**)calloc(mTableSlots, sizeof(CacheEntry*));
+	setGpuTransform(true);
+}
+
+void Renderer::setGpuTransform(bool on)
+{
+	flushBatch();
+	mGpuXf   = on && mDev.vertexProgramsWork() && mDev.frontFaceSign() != 0 && mDev.vertexIndexType() != 0;
+	mCacheOn = mGpuXf && mDev.index32Works() && mTable && mArenaSize >= 1024 * 1024;
+}
+
+void Renderer::setVertexCache(bool on)
+{
+	flushBatch();
+	mCacheOn = on && mGpuXf && mDev.index32Works() && mTable && mArenaSize >= 1024 * 1024;
 }
 
 Renderer::~Renderer()
 {
 	free(mTmem);
+	free(mTable);
+	for (size_t i = 0; i < mPool.size(); i++) {
+		free(mPool[i]);
+	}
+	for (Map<u64, ArrayRegion*>::iterator it = mRegions.begin(); it != mRegions.end(); ++it) {
+		destroy(it->second);
+	}
 	for (Map<u32, Vec<ProgramEntry*> >::iterator it = mPrograms.begin(); it != mPrograms.end(); ++it) {
 		for (size_t i = 0; i < it->second.size(); i++) {
 			destroy(it->second[i]);
@@ -222,11 +328,10 @@ void Renderer::begin()
 	mXfLookupValid = false;
 	mXfLimitFp     = NULL;
 	mSetupDirty    = true;
-	mPalLap++; // (XF memory came from somewhere else: no palette slot is known to be current)
-	mFixedPos.valid = false;
-	for (int t = 0; t < 8; t++) {
-		mFixedTex[t].valid = false;
-	}
+	// (XF memory came from somewhere else: no row of the copy in the constants is known to be current)
+	flushBatch();
+	mStale.lo = mNStale.lo = ~0ULL;
+	mStale.hi = mNStale.hi = 3;
 }
 
 void Renderer::flush()
@@ -342,8 +447,8 @@ void Renderer::retire(Texture* t)
 u8* Renderer::batchVertices(u32 count, u32 stride, u32 texCoords, XfProgramEntry* xp, u32* first)
 {
 	if (mBatch.active
-	    && (xp != mBatch.xp || stride != mBatch.stride || texCoords != mBatch.texCoords || mBatch.vertexCount + count > MAX_BATCH_VERTS
-	        || (mBatch.vertexCount + count) * stride > mBatch.reserved)) {
+	    && (mBatch.cached || xp != mBatch.xp || stride != mBatch.stride || texCoords != mBatch.texCoords
+	        || mBatch.vertexCount + count > MAX_BATCH_VERTS || (mBatch.vertexCount + count) * stride > mBatch.reserved)) {
 		flushBatch();
 	}
 	if (!mBatch.active) {
@@ -360,14 +465,61 @@ u8* Renderer::batchVertices(u32 count, u32 stride, u32 texCoords, XfProgramEntry
 		mBatch.vertexCount = 0;
 		mBatch.indices.clear();
 		mBatch.active = true;
+		mBatch.cached = false;
 	}
 	*first = mBatch.vertexCount;
 	return mBatch.base + mBatch.vertexCount * stride;
 }
 
+// Draws from the vertex cache go into a batch of their own kind: all of the cache memory is one vertex
+// array per vertex format (32-bit indices), so draws with the same program join whatever their position.
+void Renderer::batchCached(CacheEntry* e, XfProgramEntry* xp)
+{
+	if (mBatch.active && (!mBatch.cached || xp != mBatch.xp || e->indexAt != mBatch.at32 + mBatch.count32)) {
+		flushBatch();
+	}
+	if (!mBatch.active) {
+		mBatch.active      = true;
+		mBatch.cached      = true;
+		mBatch.base        = mArena;
+		mBatch.reserved    = 0;
+		mBatch.stride      = xp->info.format.stride;
+		mBatch.texCoords   = 0;
+		mBatch.xp          = xp;
+		mBatch.vertexCount = 0;
+		mBatch.at32        = e->indexAt;
+		mBatch.count32     = 0;
+	}
+	mBatch.count32 += e->indexCount;
+	mBatch.vertexCount += e->count;
+}
+
 void Renderer::flushBatch()
 {
 	if (!mBatch.active) {
+		return;
+	}
+	if (mBatch.cached) {
+		if (mBatch.count32) {
+			gpu::PhaseScope phase(gpu::GFX_RSX);
+			if (mBatch.xp != mBoundXp || !mBoundXpValid) {
+				mStats.vertexProgramLoads++;
+				mBoundXp      = mBatch.xp;
+				mBoundXpValid = true;
+			}
+			mDev.setVertexProgram(&mBatch.xp->prog);
+			mDev.setVertexFormat(mArena, mBatch.xp->info.format);
+			mDev.drawTriangles32(mIdx + mBatch.at32, mBatch.count32);
+			mStats.batches++;
+			if ((mStats.batches & 31) == 0) {
+				mDev.kick(); // (the RSX starts on them while more are made)
+			}
+		}
+		mBatch.active  = false;
+		mBatch.cached  = false;
+		mBatch.count32 = 0;
+		mBatch.rows.lo = mBatch.nrows.lo = 0;
+		mBatch.rows.hi = mBatch.nrows.hi = 0;
 		return;
 	}
 	// The unused part of the reservation goes back to the ring (nothing was allocated after it).
@@ -391,6 +543,8 @@ void Renderer::flushBatch()
 	}
 	mBatch.active = false;
 	mBatch.indices.clear();
+	mBatch.rows.lo = mBatch.nrows.lo = 0;
+	mBatch.rows.hi = mBatch.nrows.hi = 0;
 	if (mHead - mLastMark > mScratchSize / 8) {
 		mark();
 		mDev.kick();
@@ -543,6 +697,10 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	mDev.texturesChanged();
 	mTextureBytes += t->bytes;
 	mStats.textureUploads++;
+	if (mFrame < 300 && mStats.textureUploads <= 24) {
+		log("[rsx] frame %u: texture %ux%u, format %u, at 0x%07x, decoded (%s)\n", mFrame, k.width, k.height, k.format, k.address,
+		    e.tex ? "changed" : "new");
+	}
 	mStats.textureUploadBytes += t->bytes;
 	const bool replaced = e.tex != NULL;
 	retire(e.tex);
@@ -743,7 +901,7 @@ void Renderer::bpWritten(u32 reg, u32 value)
 void Renderer::draw(const gpu::DrawCall& call)
 {
 	mStats.draws++;
-	if (!call.count || (!call.vertices && !call.arrays)) {
+	if (!call.count || !call.data) {
 		return;
 	}
 	const u32 prim = call.primitive;
@@ -786,7 +944,7 @@ void Renderer::draw(const gpu::DrawCall& call)
 		gpu::xfLimit(mXf, mProgram->prog.colorChans, texCoords);
 		mXfLimitFp = mProgram;
 	}
-	XfProgramEntry* xp = mGpuXf && call.arrays ? xfProgramFor(texCoords) : NULL;
+	XfProgramEntry* xp = mGpuXf ? xfProgramFor(texCoords) : NULL;
 	if (!xp || !drawGpu(call, xp)) {
 		drawCpu(call, texCoords);
 	}
@@ -850,14 +1008,21 @@ void Renderer::setDeviceCull(u8 cull)
 
 void Renderer::xfWritten(u32 address, u32 count)
 {
-	const u32 serial = ++mXfWrites;
-	const u32 end    = address + count;
-	for (u32 a = address; a < end && a < 0x100; a += 4) {
-		mRowWrite[a >> 2] = serial;
+	const u32 end = address + count;
+	if (address < 0x100) {
+		// matrix rows (4 words each): out of date in the copy
+		const u32 r0 = address >> 2, r1 = ((end < 0x100 ? end : 0x100) - 1) >> 2;
+		const u64 hiBits = r1 >= 63 ? ~0ULL : ((1ULL << (r1 + 1)) - 1);
+		mStale.lo |= hiBits & ~((1ULL << r0) - 1);
 	}
-	if (end > 0x400 && address < 0x478) {
-		for (u32 a = address < 0x400 ? 0x400 : address; a < end && a < 0x478; a++) {
-			mNrmWrite[(a - 0x400) / 3] = serial;
+	if (end > 0x400 && address < 0x460) {
+		// normal rows (3 words each): copied at j, j + 32 (and j + 64)
+		const u32 a0 = address < 0x400 ? 0x400 : address, a1 = (end < 0x460 ? end : 0x460) - 1;
+		for (u32 n = (a0 - 0x400) / 3; n <= (a1 - 0x400) / 3; n++) {
+			mNStale.lo |= (1ULL << n) | (1ULL << (n + 32));
+			if (n < 2) {
+				mNStale.hi |= 1u << n;
+			}
 		}
 	}
 	if (end > 0x500) {
@@ -865,108 +1030,145 @@ void Renderer::xfWritten(u32 address, u32 count)
 	}
 }
 
-// A palette slot holding XF matrix row `row` (and, with 6 rows, the normal matrix that goes with it).
-// Returns its offset in the palette.
-u8 Renderer::paletteSlot(Slot* slots, u32 row, u32 rows)
-{
-	Slot& s      = slots[row];
-	u32 newest   = 0;
-	for (u32 k = 0; k < 3 && row + k < 64; k++) {
-		newest = mRowWrite[row + k] > newest ? mRowWrite[row + k] : newest;
-	}
-	if (rows > 3) {
-		const u32 n = row & 31;
-		for (u32 k = 0; k < 3; k++) {
-			newest = mNrmWrite[n + k] > newest ? mNrmWrite[n + k] : newest;
-		}
-	}
-	if (s.lap == mPalLap && s.rows >= rows && s.serial >= newest) {
-		return s.offset;
-	}
-	if (mPalHead + rows > XC_PALETTE_ROWS) {
-		flushBatch(); // (the pending draws read slots that are about to be reused)
-		mPalLap++;
-		mPalHead = 0;
-	}
-	float data[6][4];
-	matrixRows(row, rows, data);
-	{
-		gpu::PhaseScope rsx(gpu::GFX_RSX);
-		mDev.setVertexConstants(XC_PALETTE + mPalHead, rows, &data[0][0]);
-	}
-	mStats.paletteRows += rows;
-	s.lap    = mPalLap;
-	s.serial = mXfWrites;
-	s.offset = (u8)mPalHead;
-	s.rows   = (u8)rows;
-	mPalHead += rows;
-	return s.offset;
-}
+// ---- the copy of XF matrix memory in the constants
+//
+// Row r of XF matrix memory is c[XC_MIRROR + r], the normal matrix rows at c[XC_NMIRROR + j] (row j & 31).
+// A draw loads the rows its matrices cover when the copy is older than the last XF load that reached them.
+// The pending batch's draws read the copy when the batch is drawn, so before a row they read is loaded
+// again, the batch is drawn.
 
-// Without relative addressing: XF matrix row `row` (with its normal matrix when rows is 6) at fixed
-// constants, loaded when it is not already there (after the draws that used the old values).
-void Renderer::fixedMatrix(FixedSlot& f, u32 base, u32 row, u32 rows)
+void Renderer::uploadSetup()
 {
-	u32 newest = 0;
-	for (u32 k = 0; k < 3 && row + k < 64; k++) {
-		newest = mRowWrite[row + k] > newest ? mRowWrite[row + k] : newest;
-	}
-	if (rows > 3) {
-		const u32 n = row & 31;
-		for (u32 k = 0; k < 3; k++) {
-			newest = mNrmWrite[n + k] > newest ? mNrmWrite[n + k] : newest;
-		}
-	}
-	if (f.valid && f.row == row && f.rows >= rows && f.serial >= newest) {
+	if (!mSetupDirty && mSetupValid) {
 		return;
 	}
-	flushBatch();
-	float data[6][4];
-	matrixRows(row, rows, data);
-	gpu::PhaseScope rsx(gpu::GFX_RSX);
-	mDev.setVertexConstants(base, rows, &data[0][0]);
-	mStats.paletteRows += rows;
-	f.valid  = true;
-	f.row    = row;
-	f.rows   = rows;
-	f.serial = mXfWrites;
+	float setup[XC_SETUP_COUNT][4];
+	xfSetupConstants(mXf, setup);
+	if (!mSetupValid || memcmp(setup, mSetup, sizeof(setup)) != 0) {
+		flushBatch();
+		gpu::PhaseScope rsx(gpu::GFX_RSX);
+		// (only the rows that changed, in runs)
+		for (u32 r = 0; r < XC_SETUP_COUNT;) {
+			if (mSetupValid && memcmp(setup[r], mSetup[r], sizeof(setup[r])) == 0) {
+				r++;
+				continue;
+			}
+			u32 e = r + 1;
+			while (e < XC_SETUP_COUNT && (!mSetupValid || memcmp(setup[e], mSetup[e], sizeof(setup[e])) != 0)) {
+				e++;
+			}
+			mDev.setVertexConstants(r, e - r, &setup[r][0]);
+			r = e;
+		}
+		memcpy(mSetup, setup, sizeof(setup));
+		mSetupValid = true;
+		mStats.setupUploads++;
+	}
+	mSetupDirty = false;
 }
 
-// XF matrix row `row` .. row + 2 as constants, and with rows 6 the normal matrix that goes with it.
-void Renderer::matrixRows(u32 row, u32 rows, float data[6][4])
+namespace {
+
+// The rows covered by matrices starting at the bits of `starts`, n rows each (2 or 3).
+inline void cover(u64 starts, u32 n, u64* lo, u32* hi)
 {
+	if (n == 3) {
+		*lo |= starts | (starts << 1) | (starts << 2);
+		*hi |= (u32)((starts >> 62) | (starts >> 63));
+	} else {
+		*lo |= starts | (starts << 1);
+		*hi |= (u32)(starts >> 63);
+	}
+}
+
+} // namespace
+
+// The rows of the copy a draw's vertices read: position matrices (and their normal matrices), texture
+// matrices of 2 and of 3 rows.
+void Renderer::matrixRowsUsed(const gpu::DrawCall& call, const XfInfo& info, Rows* rows, Rows* nrows)
+{
+	u64 pos, texRows[8];
+	mCp.matrixRows(call, info.texCount, &pos, texRows);
+	Rows r = { 0, 0 }, n = { 0, 0 };
+	cover(pos, 3, &r.lo, &r.hi);
+	for (u32 t = 0; t < info.texCount; t++) {
+		if (info.texMatrices & (1u << t)) {
+			cover(texRows[t], (info.texRows3 & (1u << t)) ? 3 : 2, &r.lo, &r.hi);
+		}
+	}
+	if (info.normals) {
+		cover(pos, 3, &n.lo, &n.hi);
+	}
+	*rows  = r;
+	*nrows = n;
+}
+
+void Renderer::uploadMatrices(const Rows& need, const Rows& nneed)
+{
+	// the rows whose copy is out of date
+	const Rows stale  = { need.lo & mStale.lo, need.hi & mStale.hi };
+	const Rows nstale = { nneed.lo & mNStale.lo, nneed.hi & mNStale.hi };
+	if (!(stale.lo | stale.hi | nstale.lo | nstale.hi)) {
+		return;
+	}
+	if ((stale.lo & mBatch.rows.lo) || (stale.hi & mBatch.rows.hi) || (nstale.lo & mBatch.nrows.lo) || (nstale.hi & mBatch.nrows.hi)) {
+		flushBatch(); // (its draws read the old values)
+	}
+	gpu::PhaseScope rsx(gpu::GFX_RSX);
 	const float* xf = (const float*)mCp.state().xf;
-	for (u32 k = 0; k < 3; k++) {
-		for (u32 i = 0; i < 4; i++) {
-			data[k][i] = row + k < 64 ? xf[(row + k) * 4 + i] : 0.0f;
+	// matrix rows, in runs (straight from XF memory: 4 floats a row)
+	for (u64 m = stale.lo; m;) {
+		const u32 r = (u32)__builtin_ctzll(m);
+		u32 e       = r + 1;
+		while (e < 64 && ((m >> e) & 1)) {
+			e++;
+		}
+		mDev.setVertexConstants(XC_MIRROR + r, e - r, xf + r * 4);
+		mStats.matrixRows += e - r;
+		m &= e >= 64 ? 0 : ~((1ULL << e) - 1);
+	}
+	for (u32 r = 64; r < XC_MIRROR_ROWS; r++) {
+		if (stale.hi & (1u << (r - 64))) {
+			static const float zero[4] = { 0, 0, 0, 0 };
+			mDev.setVertexConstants(XC_MIRROR + r, 1, zero);
+			mStats.matrixRows++;
 		}
 	}
-	if (rows > 3) {
-		const float* n = xf + 0x400 + (row & 31) * 3;
-		for (u32 k = 0; k < 3; k++) {
-			data[3 + k][0] = n[k * 3], data[3 + k][1] = n[k * 3 + 1], data[3 + k][2] = n[k * 3 + 2], data[3 + k][3] = 0.0f;
+	mStale.lo &= ~stale.lo;
+	mStale.hi &= ~stale.hi;
+	// normal rows (3 floats each in XF memory)
+	for (u32 j = 0; j < XC_MIRROR_ROWS;) {
+		const bool st = j < 64 ? ((nstale.lo >> j) & 1) != 0 : ((nstale.hi >> (j - 64)) & 1) != 0;
+		if (!st) {
+			if (j < 64 && !(nstale.lo >> j)) {
+				j = 64; // (none left below 64)
+			} else {
+				j++;
+			}
+			continue;
 		}
+		u32 e = j + 1;
+		while (e < XC_MIRROR_ROWS && e - j < 16
+		       && (e < 64 ? ((nstale.lo >> e) & 1) != 0 : ((nstale.hi >> (e - 64)) & 1) != 0)) {
+			e++;
+		}
+		float data[16][4];
+		for (u32 k = j; k < e; k++) {
+			const float* n = xf + 0x400 + (k & 31) * 3;
+			float* d       = data[k - j];
+			d[0] = n[0], d[1] = n[1], d[2] = n[2], d[3] = 0.0f;
+		}
+		mDev.setVertexConstants(XC_NMIRROR + j, e - j, &data[0][0]);
+		mStats.matrixRows += e - j;
+		j = e;
 	}
+	mNStale.lo &= ~nstale.lo;
+	mNStale.hi &= ~nstale.hi;
 }
 
 bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 {
 	const XfInfo& info = xp->info;
-	// the matrices the vertices use
-	u64 posRows, texRows[8];
-	mCp.matrixRows(call, info.texCount, &posRows, texRows);
-	u64 texAll = 0;
-	for (u32 t = 0; t < info.texCount; t++) {
-		if (info.texMatrices & (1u << t)) {
-			texAll |= texRows[t];
-			if (!info.indexType && (texRows[t] & (texRows[t] - 1))) {
-				return false; // (fixed matrices: one per texture coordinate)
-			}
-		}
-	}
-	if (!info.indexType && (posRows & (posRows - 1))) {
-		return false; // (fixed matrices: one position matrix)
-	}
 	mStats.gpuDraws++;
 	const int sign = mDev.frontFaceSign();
 	u8 cull        = CULL_NONE;
@@ -978,56 +1180,41 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 	setDeviceCull(cull);
 	{
 		gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
-		// set-up constants
-		if (mSetupDirty || !mSetupValid) {
-			float setup[XC_SETUP_COUNT][4];
-			xfSetupConstants(mXf, setup);
-			if (!mSetupValid || memcmp(setup, mSetup, sizeof(setup)) != 0) {
-				flushBatch();
-				gpu::PhaseScope rsx(gpu::GFX_RSX);
-				// (only the rows that changed, in runs)
-				for (u32 r = 0; r < XC_SETUP_COUNT;) {
-					if (mSetupValid && memcmp(setup[r], mSetup[r], sizeof(setup[r])) == 0) {
-						r++;
-						continue;
-					}
-					u32 e = r + 1;
-					while (e < XC_SETUP_COUNT && (!mSetupValid || memcmp(setup[e], mSetup[e], sizeof(setup[e])) != 0)) {
-						e++;
-					}
-					mDev.setVertexConstants(r, e - r, &setup[r][0]);
-					r = e;
-				}
-				memcpy(mSetup, setup, sizeof(setup));
-				mSetupValid = true;
-				mStats.setupUploads++;
-			}
-			mSetupDirty = false;
+		uploadSetup();
+	}
+
+	// a display list draw: from the vertex cache
+	if (mCacheOn && call.inDisplayList) {
+		CacheEntry* reuse = NULL;
+		CacheEntry* e     = cacheLookup(call, xp, &reuse);
+		if (!e) {
+			e = cacheFill(call, xp, reuse);
 		}
-		if (!info.indexType) {
-			// fixed matrices
-			fixedMatrix(mFixedPos, XC_DIRECT_POS, (u32)__builtin_ctzll(posRows), info.posRows);
-			for (u32 t = 0; t < info.texCount; t++) {
-				if (info.texMatrices & (1u << t)) {
-					fixedMatrix(mFixedTex[t], XC_DIRECT_TEX + t * 3, (u32)__builtin_ctzll(texRows[t]), 3);
-				}
+		if (e) {
+			{
+				gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
+				uploadMatrices(e->rows, e->nrows);
 			}
+			gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
+			batchCached(e, xp);
+			mBatch.rows.lo |= e->rows.lo, mBatch.rows.hi |= e->rows.hi;
+			mBatch.nrows.lo |= e->nrows.lo, mBatch.nrows.hi |= e->nrows.hi;
+			mStats.triangles += e->indexCount / 3;
+			mStats.vertices += call.count;
+			return true;
 		}
-		// matrices into the palette (again from an empty palette if it filled up on the way)
-		for (int attempt = 0; attempt < 2 && info.indexType; attempt++) {
-			const u32 lap = mPalLap;
-			for (u64 m = posRows; m; m &= m - 1) {
-				const u32 r = (u32)__builtin_ctzll(m);
-				mPosMap[r]  = paletteSlot(mPosSlot, r, info.posRows);
-			}
-			for (u64 m = texAll; m; m &= m - 1) {
-				const u32 r = (u32)__builtin_ctzll(m);
-				mTexMap[r]  = paletteSlot(mTexSlot, r, 3);
-			}
-			if (mPalLap == lap) {
-				break;
-			}
-		}
+	}
+
+	// unpacked into the ring
+	gpu::DrawCall c = call;
+	if (!c.arrays) {
+		c.arrays = mCp.resolveArrays(call);
+	}
+	Rows rows, nrows;
+	{
+		gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
+		matrixRowsUsed(c, info, &rows, &nrows);
+		uploadMatrices(rows, nrows);
 	}
 	u32 first;
 	u8* out = batchVertices(call.count, info.format.stride, 0, xp, &first);
@@ -1035,61 +1222,327 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 		mStats.skippedDraws++;
 		return true;
 	}
+	mBatch.rows.lo |= rows.lo, mBatch.rows.hi |= rows.hi;
+	mBatch.nrows.lo |= nrows.lo, mBatch.nrows.hi |= nrows.hi;
 	gpu::GatherSpec G = info.gather;
-	G.posMap          = mPosMap;
-	G.texMap          = mTexMap;
-	mCp.gatherVertices(call, G, out);
+	G.posMap          = mIdentity;
+	G.texMap          = mIdentity;
+	mCp.gatherVertices(c, G, out);
 	mStats.vertices += call.count;
 
 	gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
-	const u32 n = call.count;
-	u32 tris    = 0;
-	switch (call.primitive) {
-	case gpu::PRIM_QUADS:
-	case gpu::PRIM_QUADS_2: tris = (n / 4) * 2; break;
-	case gpu::PRIM_TRIANGLES: tris = n / 3; break;
-	case gpu::PRIM_TRI_STRIP:
-	case gpu::PRIM_TRI_FAN: tris = n >= 3 ? n - 2 : 0; break;
-	default: break;
-	}
+	const u32 tris           = triangleCount(call.primitive, call.count);
 	Vec<unsigned short>& ixv = mBatch.indices;
 	const size_t at          = ixv.size();
 	ixv.resize(at + tris * 3);
-	unsigned short* ix = tris ? &ixv[at] : NULL;
-	const unsigned short f = (unsigned short)first;
-	switch (call.primitive) {
-	case gpu::PRIM_QUADS:
-	case gpu::PRIM_QUADS_2:
-		for (u32 i = 0; i + 3 < n; i += 4, ix += 6) {
-			ix[0] = (unsigned short)(f + i), ix[1] = (unsigned short)(f + i + 1), ix[2] = (unsigned short)(f + i + 2);
-			ix[3] = (unsigned short)(f + i), ix[4] = (unsigned short)(f + i + 2), ix[5] = (unsigned short)(f + i + 3);
-		}
-		break;
-	case gpu::PRIM_TRIANGLES:
-		for (u32 i = 0; i + 2 < n; i += 3, ix += 3) {
-			ix[0] = (unsigned short)(f + i), ix[1] = (unsigned short)(f + i + 1), ix[2] = (unsigned short)(f + i + 2);
-		}
-		break;
-	case gpu::PRIM_TRI_STRIP:
-		for (u32 i = 0; i + 2 < n; i++, ix += 3) {
-			if (i & 1) {
-				ix[0] = (unsigned short)(f + i + 1), ix[1] = (unsigned short)(f + i);
-			} else {
-				ix[0] = (unsigned short)(f + i), ix[1] = (unsigned short)(f + i + 1);
-			}
-			ix[2] = (unsigned short)(f + i + 2);
-		}
-		break;
-	case gpu::PRIM_TRI_FAN:
-		for (u32 i = 1; i + 1 < n; i++, ix += 3) {
-			ix[0] = f, ix[1] = (unsigned short)(f + i), ix[2] = (unsigned short)(f + i + 1);
-		}
-		break;
-	default: break;
+	if (tris) {
+		triangleIndices<unsigned short>(call.primitive, call.count, first, &ixv[at]);
 	}
 	mStats.triangles += tris;
 	mBatch.vertexCount += call.count;
 	return true;
+}
+
+// ---- the vertex cache
+
+void* Renderer::poolAlloc(u32 bytes)
+{
+	bytes = (bytes + 15) & ~15u;
+	if (bytes > POOL_CHUNK) {
+		return NULL;
+	}
+	const u32 chunk = mPoolUsed / POOL_CHUNK, at = mPoolUsed % POOL_CHUNK;
+	if (at + bytes > POOL_CHUNK || chunk >= mPool.size()) {
+		// (the next chunk)
+		const u32 next = at == 0 && chunk >= mPool.size() ? chunk : chunk + 1;
+		if (next >= mPool.size()) {
+			if ((next + 1) * (u32)POOL_CHUNK > (u32)POOL_MAX) {
+				return NULL;
+			}
+			u8* m = (u8*)malloc(POOL_CHUNK);
+			if (!m) {
+				return NULL;
+			}
+			mPool.push_back(m);
+		}
+		mPoolUsed = next * POOL_CHUNK;
+	}
+	u8* p = mPool[mPoolUsed / POOL_CHUNK] + mPoolUsed % POOL_CHUNK;
+	mPoolUsed += bytes;
+	return p;
+}
+
+// Starts the vertex cache over (its memory or its entries ran out): once the RSX has drawn everything that
+// reads the cache memory.
+void Renderer::cacheReset()
+{
+	flushBatch();
+	// (a fence of its own: the draws from the cache allocate nothing in the ring, so the last marker may be
+	// older than them)
+	const u32 fence = ++mFenceCounter;
+	mDev.writeFence(fence);
+	mDev.kick();
+	{
+		gpu::PhaseScope wait(gpu::GFX_WAIT_RSX);
+		while ((int)(mDev.fenceReached() - fence) < 0) {
+			mDev.pause();
+		}
+	}
+	release();
+	memset(mTable, 0, mTableSlots * sizeof(CacheEntry*));
+	mTableUsed = 0;
+	mPoolUsed  = 0;
+	mArenaHead = 0;
+	mIdxHead   = 0;
+	mArenaGen++;
+	for (Map<u64, ArrayRegion*>::iterator it = mRegions.begin(); it != mRegions.end(); ++it) {
+		destroy(it->second);
+	}
+	mRegions.clear();
+	mStats.cacheResets++;
+}
+
+namespace {
+
+inline u32 tableSlot(const u8* data, u32 slots)
+{
+	const u64 a = (u64)(uintptr_t)data;
+	return (u32)(((a >> 2) ^ (a >> 17)) * 2654435761u) & (slots - 1);
+}
+
+} // namespace
+
+// The vertex cache's entry for a display list draw, if it is still what the draw would unpack. NULL: not
+// there, or out of date (then *reuse: the entry to fill again).
+Renderer::CacheEntry* Renderer::cacheLookup(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry** reuse)
+{
+	u32 i = tableSlot(call.data, mTableSlots);
+	CacheEntry* head = NULL;
+	while (mTable[i]) {
+		if (mTable[i]->data == call.data) {
+			head = mTable[i];
+			break;
+		}
+		i = (i + 1) & (mTableSlots - 1);
+	}
+	mChainLength = 0;
+	for (CacheEntry* e = head; e; e = e->next) {
+		mChainLength++;
+		if (e->xp != xp || e->count != call.count || e->prim != call.primitive || e->size != call.layout->size) {
+			continue;
+		}
+		*reuse = e;
+		if (!e->cached) {
+			return NULL;
+		}
+		// (the entry filled after this one, right after its bytes, is usually the next draw's)
+		__builtin_prefetch(e->bytes + ((e->count * e->size + 15) & ~15u));
+		return cacheValid(e, call) ? (mStats.cacheHits++, e) : NULL;
+	}
+	return NULL;
+}
+
+bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
+{
+	if (e->gen != mArenaGen) {
+		return false;
+	}
+	const u32* cp = mCp.state().cp;
+	const u32 vat = call.vat;
+	if (e->cp[0] != cp[0x50] || e->cp[1] != cp[0x60] || e->cp[2] != cp[0x70 + vat] || e->cp[3] != cp[0x80 + vat]
+	    || e->cp[4] != cp[0x90 + vat] || e->cp[5] != cp[0x30] || e->cp[6] != cp[0x40]) {
+		return false;
+	}
+	if (memcmp(call.data, e->bytes, e->count * e->size) != 0) {
+		return false;
+	}
+	for (u32 k = 0; k < e->arrays; k++) {
+		const CacheArray& a = e->arr[k];
+		if (cp[0xA0 + a.array] != a.base || (cp[0xB0 + a.array] & 0xFF) != a.stride) {
+			return false;
+		}
+		ArrayRegion& r = *a.region;
+		if (mFrame - r.checkedFrame >= r.interval) {
+			checkRegion(r);
+		}
+		if (r.version != a.version) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Hashes a vertex array's range (when due): a new version if it changed.
+void Renderer::checkRegion(ArrayRegion& r)
+{
+	gpu::PhaseScope phase(gpu::GFX_CHECKS);
+	mStats.regionChecks++;
+	const u32 bytes = (r.hi - r.lo) * r.stride + r.stride;
+	const u8* p     = mMem.read(r.base + r.lo * r.stride, bytes, gpu::MEM_ARRAY);
+	const u64 h     = p ? gpu::hashMemory(p, bytes) : 0;
+	bool changed    = false;
+	if (!r.hashValid) {
+		r.hashValid = true; // (a new range: nothing to compare with)
+	} else if (h != r.hash) {
+		changed = true;
+		r.version++;
+		mStats.regionChanges++;
+	}
+	r.hash = h;
+	checked(r.checkedFrame, r.interval, changed, r.base);
+}
+
+Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
+{
+	const u64 key = ((u64)base << 16) | ((u64)stride << 4) | array;
+	Map<u64, ArrayRegion*>::iterator it = mRegions.find(key);
+	if (it != mRegions.end()) {
+		return it->second;
+	}
+	ArrayRegion* r  = create<ArrayRegion>();
+	r->base         = base;
+	r->stride       = stride ? stride : 1;
+	r->lo           = 0xFFFFFFFF;
+	r->hi           = 0;
+	r->hash         = 0;
+	r->hashValid    = false;
+	r->version      = 1;
+	r->checkedFrame = mFrame;
+	r->interval     = 1;
+	mRegions[key]   = r;
+	return r;
+}
+
+// Unpacks a display list draw into the vertex cache (into e: an out of date entry for it, or NULL for a new
+// one). NULL: not cached (it changes too often, or does not fit); the draw goes through the ring instead.
+Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry* e)
+{
+	if (e && !e->cached) {
+		mStats.cacheUncached++;
+		return NULL;
+	}
+	if (e && ++e->refills >= 4) {
+		e->cached = false; // (what it reads changes too often: from the ring from now on)
+		mStats.cacheUncached++;
+		return NULL;
+	}
+	if (!e && mChainLength >= 4) {
+		// (a display list address drawn in many different ways: probably made anew each frame)
+		mStats.cacheUncached++;
+		return NULL;
+	}
+	const gpu::VertexLayout& L = *call.layout;
+	const u32 stride           = xp->info.format.stride;
+	const u32 indexCount       = triangleCount(call.primitive, call.count) * 3;
+	const u32 dataBytes        = call.count * L.size;
+	const u32 vertexBytes      = call.count * stride;
+	const u32 entryBytes       = (sizeof(CacheEntry) + 15) & ~15u;
+	if (!stride || vertexBytes > mArenaSize / 4 || indexCount > mIdxSize / 4 || dataBytes > POOL_CHUNK / 4
+	    || L.indexedCount > CACHE_ARRAYS) {
+		mStats.cacheUncached++;
+		return NULL;
+	}
+	// room: in the cache memory (vertices at a multiple of the stride from its start, for the indices), the
+	// index memory, the table and the entries' memory
+	u32 off = (mArenaHead + stride - 1) / stride * stride;
+	if (off + vertexBytes > mArenaSize || mIdxHead + indexCount > mIdxSize || mTableUsed >= (u32)CACHE_ENTRIES
+	    || mTableUsed * 2 >= mTableSlots || mPoolUsed + entryBytes + dataBytes + 32 > (u32)(POOL_MAX - 2 * POOL_CHUNK)) {
+		cacheReset();
+		e   = NULL;
+		off = 0;
+	}
+	u8* bytes;
+	const bool fresh = e == NULL;
+	if (fresh) {
+		u8* block = (u8*)poolAlloc(entryBytes + dataBytes);
+		if (!block) {
+			mStats.cacheUncached++;
+			return NULL;
+		}
+		e = (CacheEntry*)block;
+		memset(e, 0, sizeof(*e));
+		e->data   = call.data;
+		e->xp     = xp;
+		e->count  = call.count;
+		e->prim   = (u8)call.primitive;
+		e->size   = L.size;
+		e->cached = true;
+		bytes     = block + entryBytes;
+	} else {
+		bytes = (u8*)poolAlloc(dataBytes);
+		if (!bytes) {
+			mStats.cacheUncached++;
+			return NULL;
+		}
+	}
+	const gpu::VertexArray* arrays = call.arrays ? call.arrays : mCp.resolveArrays(call);
+	gpu::DrawCall c = call;
+	c.arrays        = arrays;
+	e->bytes = bytes;
+	memcpy(e->bytes, call.data, dataBytes);
+	const u32* cp = mCp.state().cp;
+	e->cp[0] = cp[0x50], e->cp[1] = cp[0x60], e->cp[2] = cp[0x70 + call.vat], e->cp[3] = cp[0x80 + call.vat];
+	e->cp[4] = cp[0x90 + call.vat], e->cp[5] = cp[0x30], e->cp[6] = cp[0x40];
+	// the arrays it reads, and the ranges
+	e->arrays = 0;
+	for (u32 k = 0; k < L.indexedCount; k++) {
+		const u32 id              = L.indexed[k].array;
+		const gpu::VertexArray& A = arrays[id];
+		if (!A.used) {
+			continue;
+		}
+		bool dup = false;
+		for (u32 j = 0; j < e->arrays; j++) {
+			dup |= e->arr[j].array == id;
+		}
+		if (dup) {
+			continue;
+		}
+		CacheArray& ca = e->arr[e->arrays++];
+		ca.array       = (u8)id;
+		ca.base        = cp[0xA0 + id];
+		ca.stride      = (u8)(cp[0xB0 + id] & 0xFF);
+		ArrayRegion* r = regionFor(id, ca.base, ca.stride);
+		if (A.minIndex < r->lo || A.maxIndex > r->hi) {
+			r->lo           = A.minIndex < r->lo ? A.minIndex : r->lo;
+			r->hi           = A.maxIndex > r->hi ? A.maxIndex : r->hi;
+			r->hashValid    = false; // (hashed at its next check: soon)
+			r->interval     = 1;
+			r->checkedFrame = mFrame;
+		}
+		ca.region  = r;
+		ca.version = r->version;
+	}
+	// the vertices, unpacked into the cache memory, and the triangles
+	{
+		gpu::GatherSpec G = xp->info.gather;
+		G.posMap          = mIdentity;
+		G.texMap          = mIdentity;
+		mCp.gatherVertices(c, G, mArena + off);
+	}
+	e->firstVertex = off / stride;
+	e->indexAt     = mIdxHead;
+	e->indexCount  = triangleIndices<u32>(call.primitive, call.count, e->firstVertex, mIdx + mIdxHead);
+	mIdxHead += e->indexCount;
+	matrixRowsUsed(c, xp->info, &e->rows, &e->nrows);
+	mArenaHead = off + vertexBytes;
+	e->gen     = mArenaGen;
+	if (fresh) {
+		// into the table (after the entries for the same data, if any)
+		u32 i = tableSlot(call.data, mTableSlots);
+		while (mTable[i] && mTable[i]->data != call.data) {
+			i = (i + 1) & (mTableSlots - 1);
+		}
+		if (mTable[i]) {
+			e->next         = mTable[i]->next;
+			mTable[i]->next = e;
+		} else {
+			mTable[i] = e;
+			mTableUsed++;
+		}
+	}
+	mStats.cacheFills++;
+	return e;
 }
 
 // ---- draws transformed on the CPU (gpu_xf.cpp), culled on the CPU
@@ -1404,6 +1857,22 @@ void Renderer::endFrame()
 		mStats.rsxBehind++;
 	}
 	mFrame++;
+	if (mResetRequest) {
+		mResetRequest = 0;
+		if (mTableUsed) {
+			cacheReset();
+		}
+	}
+	if (mFrame <= 300 && mFrame % 10 == 0) {
+		// (the first frames, the loading screens' among them: what was drawn)
+		static RendererStats early;
+		log("[rsx] frames %u-%u: %llu draws (%llu skipped, %llu on the CPU), %llu triangles, %llu batches, %llu textures uploaded (%llu KB), "
+		    "%llu clears\n",
+		    mFrame - 9, mFrame, mStats.draws - early.draws, mStats.skippedDraws - early.skippedDraws, mStats.cpuDraws - early.cpuDraws,
+		    mStats.triangles - early.triangles, mStats.batches - early.batches, mStats.textureUploads - early.textureUploads,
+		    (mStats.textureUploadBytes - early.textureUploadBytes) >> 10, mStats.clears - early.clears);
+		early = mStats;
+	}
 	mDirtyBits = D_ALL; // (textures are checked again once per frame)
 	mark();
 	mFrameFence = mFenceCounter;
@@ -1412,6 +1881,8 @@ void Renderer::endFrame()
 	evictTextures();
 	mStats.textureBytes = mTextureBytes;
 	mStats.textures     = (u32)mTextures.size();
+	mStats.cacheBytes   = mArenaHead;
+	mStats.cacheEntries = mTableUsed;
 }
 
 // Textures not used in the last two frames go when the decoded textures take more than the budget.

@@ -371,8 +371,11 @@ public:
 	// Decodes a draw's vertices now (for a listener that asked for less: call from Listener::draw). NULL if
 	// the decode buffer could not grow.
 	const Vertex* decodeDraw(const DrawCall& call);
+	// The vertex arrays a draw indexes (DrawCall::arrays), worked out now for a listener that asked for
+	// VERTICES_NONE (call from Listener::draw; valid until the next draw).
+	const VertexArray* resolveArrays(const DrawCall& call);
 	// The matrix rows a draw's vertices use: bit per row (0-63) for the position matrix and for texture
-	// coordinate n's matrix (n < texCount). Needs DrawCall::arrays (any detail but VERTICES_NONE).
+	// coordinate n's matrix (n < texCount).
 	void matrixRows(const DrawCall& call, u32 texCount, u64* pos, u64* tex) const;
 	// Writes a draw's vertices as the spec says (to out, call.count * spec.stride bytes).
 	void gatherVertices(const DrawCall& call, const GatherSpec& spec, u8* out) const;

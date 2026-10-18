@@ -44,6 +44,8 @@ public:
 	gfx::u32 vertexIndexType() override { return mIndexType; }
 	void setVertexIndexType(gfx::u32 t) { mIndexType = t; } // (to try each kind of the renderer's programs)
 	void drawTriangles(const unsigned short* indices, gfx::u32 count) override;
+	void drawTriangles32(const gfx::u32* indices, gfx::u32 count) override;
+	bool index32Works() override { return true; }
 	void clear(const gfx::u16 rect[4], gfx::u32 argb, gfx::u32 depth, bool color, bool alpha, bool depthToo) override;
 	bool readTarget(gfx::u32* out, gfx::u32 x, gfx::u32 y, gfx::u32 width, gfx::u32 height) override;
 
@@ -64,8 +66,9 @@ private:
 		float pos[4];
 		float in[16][4]; // fragment program inputs: 1 COL0, 2 COL1, 4-11 TEX0-7
 	};
-	void fetch(unsigned short index, Vert& v);
-	void fetchRaw(unsigned short index, Vert& v);
+	void fetch(gfx::u32 index, Vert& v);
+	void fetchRaw(gfx::u32 index, Vert& v);
+	template <typename I> void drawIndexed(const I* indices, gfx::u32 count);
 	void runVertexProgram(const float in[16][4], float out[16][4]);
 	void triangle(const Vert& a, const Vert& b, const Vert& c);
 	void rasterize(const Vert* v[3]);

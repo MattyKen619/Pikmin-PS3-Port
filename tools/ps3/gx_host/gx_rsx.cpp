@@ -4,6 +4,8 @@
 //   gx_rsx TRACE OUT.png [--ref REF.png] [--diff DIFF.png] [--efb EFB.png] [--cpu-xf 1]
 //
 // --cpu-xf 1: vertices transformed on the CPU (as without working vertex programs on the PS3).
+// --repeat N: the frame N times through the same renderer (from the second time on, display list draws come
+// out of the vertex cache); the last one is written and compared. --no-cache 1: without the vertex cache.
 // --index-type N: matrix indices as the device would take them (Device::vertexIndexType): 7 bytes, 4 bytes
 // read as 0-1, 2 floats, 0 none (fixed matrices).
 //
@@ -35,10 +37,14 @@ int main(int argc, char** argv)
 	const char* diffPath = NULL;
 	const char* efbPath  = NULL;
 	bool cpuXf           = false;
+	bool noCache         = false;
 	int indexType        = -1;
+	int repeat           = 1;
 	for (int i = 3; i + 1 < argc; i += 2) {
 		if (!strcmp(argv[i], "--index-type")) indexType = atoi(argv[i + 1]);
 		if (!strcmp(argv[i], "--cpu-xf")) cpuXf = atoi(argv[i + 1]) != 0;
+		if (!strcmp(argv[i], "--no-cache")) noCache = atoi(argv[i + 1]) != 0;
+		if (!strcmp(argv[i], "--repeat")) repeat = atoi(argv[i + 1]);
 		if (!strcmp(argv[i], "--ref")) refPath = argv[i + 1];
 		if (!strcmp(argv[i], "--diff")) diffPath = argv[i + 1];
 		if (!strcmp(argv[i], "--efb")) efbPath = argv[i + 1];
@@ -60,12 +66,17 @@ int main(int argc, char** argv)
 		sRenderer        = r;
 		r->setLogger(logLine);
 		r->setGpuTransform(!cpuXf);
+		if (noCache) {
+			r->setVertexCache(false);
+		}
 		cp.setMemory(&mem);
 		cp.setListener(r);
-		cp.setState(trace.state);
-		r->begin();
-		replayTrace(trace, cp, mem);
-		r->flush();
+		for (int rep = 0; rep < (repeat > 0 ? repeat : 1); rep++) {
+			cp.setState(trace.state);
+			r->begin();
+			replayTrace(trace, cp, mem);
+			r->flush();
+		}
 		const gfx::RendererStats& st = r->stats();
 		printf("%s: frame %u (%s)\n", argv[1], trace.frame, trace.label);
 		printf("  renderer: %llu draws (%llu skipped, %llu line, %llu point), %llu batches, %llu triangles (%llu culled), "
@@ -76,7 +87,11 @@ int main(int argc, char** argv)
 		       st.copyUses, st.presents, st.clears);
 		printf("  transform: %llu draws by vertex programs, %llu on the CPU; %llu vertex programs (%llu failed), %llu loads; %llu matrix "
 		       "rows and %llu set-ups loaded\n",
-		       st.gpuDraws, st.cpuDraws, st.xfPrograms, st.xfProgramErrors, st.vertexProgramLoads, st.paletteRows, st.setupUploads);
+		       st.gpuDraws, st.cpuDraws, st.xfPrograms, st.xfProgramErrors, st.vertexProgramLoads, st.matrixRows, st.setupUploads);
+		printf("  vertex cache: %s; %llu draws from it, %llu unpacked into it, %llu not cached; %llu array checks (%llu changed), "
+		       "started over %llu times\n",
+		       r->vertexCache() ? "on" : "off", st.cacheHits, st.cacheFills, st.cacheUncached, st.regionChecks, st.regionChanges,
+		       st.cacheResets);
 		const SoftDevice::Stats& ds = dev->stats();
 		printf("  soft RSX: %llu triangles (%llu culled), %llu pixels (%llu killed, %llu written), %llu bad instructions, %llu "
 		       "vertices through programs (%llu bad instructions)\n",

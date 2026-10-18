@@ -19,6 +19,11 @@ void captureFrame(const gpu::CopyInfo& info, const char* name);
 // One line for the heartbeat.
 void status(char* buf, unsigned int size);
 
+// The game changes sections (a new area is loaded: what is at the vertex cache's display list and vertex
+// array addresses may be something else now): the cache starts over at the end of the frame. From any
+// thread.
+void sectionChanged();
+
 } // namespace ps3rsx
 
 #endif

@@ -294,6 +294,7 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 	(void)info;
 	(void)name;
 }
+void ps3rsx::sectionChanged() { }
 void ps3rsx::status(char* buf, unsigned int size)
 {
 	if (size) {

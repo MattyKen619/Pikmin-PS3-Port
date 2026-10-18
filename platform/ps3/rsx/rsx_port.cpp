@@ -94,6 +94,13 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 	ps3b_log_write(line);
 }
 
+void ps3rsx::sectionChanged()
+{
+	if (sRenderer) {
+		sRenderer->requestCacheReset();
+	}
+}
+
 void ps3rsx::status(char* buf, unsigned int size)
 {
 	if (!sRenderer) {
@@ -115,11 +122,23 @@ void ps3rsx::status(char* buf, unsigned int size)
 	         s.programs, s.programErrors, s.textures, s.textureBytes >> 10, s.skippedDraws, s.lineDraws + s.pointDraws,
 	         s.missingTextures, s.copies, s.fenceWaits, sDev->localMemoryUsed() >> 10, s.rsxBehind - last.rsxBehind, frames - lastFrames);
 	if (at > 0 && at < (int)size) {
-		snprintf(buf + at, size - at,
-		         "; transform: per frame %llu draws on the RSX, %llu on the CPU, %llu matrix rows and %llu set-ups loaded; %llu vertex "
-		         "programs (%llu failed)",
-		         (s.gpuDraws - last.gpuDraws) / n, (s.cpuDraws - last.cpuDraws) / n, (s.paletteRows - last.paletteRows) / n,
-		         (s.setupUploads - last.setupUploads) / n, s.xfPrograms, s.xfProgramErrors);
+		at += snprintf(buf + at, size - at,
+		               "; transform: per frame %llu draws on the RSX, %llu on the CPU, %llu matrix rows and %llu set-ups loaded; %llu vertex "
+		               "programs (%llu failed)",
+		               (s.gpuDraws - last.gpuDraws) / n, (s.cpuDraws - last.cpuDraws) / n, (s.matrixRows - last.matrixRows) / n,
+		               (s.setupUploads - last.setupUploads) / n, s.xfPrograms, s.xfProgramErrors);
+	}
+	if (at > 0 && at < (int)size) {
+		if (sRenderer->vertexCache()) {
+			snprintf(buf + at, size - at,
+			         "; vertex cache: per frame %llu draws from it, %llu unpacked into it, %llu not cached; %u entries, %u KB; "
+			         "%llu array checks (%llu changed), started over %llu times",
+			         (s.cacheHits - last.cacheHits) / n, (s.cacheFills - last.cacheFills) / n, (s.cacheUncached - last.cacheUncached) / n,
+			         s.cacheEntries, s.cacheBytes >> 10, (s.regionChecks - last.regionChecks) / n, s.regionChanges - last.regionChanges,
+			         s.cacheResets);
+		} else {
+			snprintf(buf + at, size - at, "; vertex cache off");
+		}
 	}
 	last       = s;
 	lastFrames = frames;
