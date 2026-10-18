@@ -6,9 +6,13 @@
 //   - Render targets and textures are 32-bit A8R8G8B8 (texels written by the CPU as 0xAARRGGBB words),
 //     linear (not swizzled), rows `pitch` bytes apart.
 //   - The embedded frame buffer (EFB) is 640 x 528 with a 24-bit depth buffer, origin at the top left.
-//   - Vertices: position (4 floats, clip space) at offset 0, color 0 and color 1 (4 bytes each, R G B A,
-//     0-255 = 0-1) at 16 and 20, texture coordinate n (3 floats: s, t, q) at 24 + 12n. The vertex program
-//     passes them through; texture coordinates reach the fragment program as (s, t, q, q).
+//   - Vertices come in two kinds:
+//       * transformed (setVertices; the device's built-in pass-through vertex program): position (4
+//         floats, clip space), color 0 and color 1 (4 floats each, 0-1), texture coordinate n (3 floats:
+//         s, t, q) at VERTEX_BASE_BYTES + VERTEX_TEX_BYTES * n. Texture coordinates reach the fragment
+//         program as (s, t, q, q).
+//       * raw, for a vertex program of the renderer's (setVertexProgram, setVertexConstants and
+//         setVertexFormat): attributes as the format describes them.
 //   - Draw data (vertices, fragment program microcode) is placed by the renderer in the device's scratch
 //     memory; fences tell it when the chip is done with it.
 //
@@ -18,6 +22,7 @@
 #define PS3_RSX_DEVICE_H
 
 #include "fp_assembler.h"
+#include "vp_builder.h"
 
 namespace gfx {
 
@@ -58,6 +63,7 @@ struct RenderState {
 	u8 colorWrite, alphaWrite;
 	u16 scissor[4];    // x, y, width, height (inside the target)
 	float viewportScale[3], viewportOffset[3];
+	u8 cullFace;       // 0 none, CULL_FRONT or CULL_BACK (the device's front faces: see Device::frontFaceSign)
 
 	bool operator==(const RenderState& o) const
 	{
@@ -67,10 +73,12 @@ struct RenderState {
 		    && scissor[0] == o.scissor[0] && scissor[1] == o.scissor[1] && scissor[2] == o.scissor[2]
 		    && scissor[3] == o.scissor[3] && viewportScale[0] == o.viewportScale[0] && viewportScale[1] == o.viewportScale[1]
 		    && viewportScale[2] == o.viewportScale[2] && viewportOffset[0] == o.viewportOffset[0]
-		    && viewportOffset[1] == o.viewportOffset[1] && viewportOffset[2] == o.viewportOffset[2];
+		    && viewportOffset[1] == o.viewportOffset[1] && viewportOffset[2] == o.viewportOffset[2] && cullFace == o.cullFace;
 	}
 	bool operator!=(const RenderState& o) const { return !(*this == o); }
 };
+
+enum { CULL_NONE = 0, CULL_FRONT = 1, CULL_BACK = 2 };
 
 enum Wrap { WRAP_CLAMP = 0, WRAP_REPEAT = 1, WRAP_MIRROR = 2 };
 
@@ -86,6 +94,22 @@ struct Sampler {
 // Vertex layout (gpu::XfVertex's, cut after the texture coordinates a batch uses): position 4 floats,
 // color channels 0 and 1 as 4 floats each (0-1), then 3 floats (s, t, q) per texture coordinate.
 enum { VERTEX_BASE_BYTES = 48, VERTEX_TEX_BYTES = 12 };
+
+// Raw vertices for the renderer's vertex programs: up to 16 attributes (the vertex program's inputs).
+enum AttribType {
+	ATTRIB_F32     = 2, // 32-bit floats
+	ATTRIB_U8_NORM = 4, // bytes, 0-255 read as 0-1
+	ATTRIB_U8      = 7, // bytes, read as 0-255
+};
+struct VertexAttrib {
+	u8 components; // 1-4; 0: not used (the program reads (0, 0, 0, 1))
+	u8 type;       // AttribType
+	u16 offset;    // in the vertex
+};
+struct VertexFormat {
+	VertexAttrib attr[16];
+	u32 stride;
+};
 
 class Device {
 public:
@@ -117,6 +141,19 @@ public:
 	virtual void setProgram(const void* ucode, const FragmentProgram& fp) = 0; // microcode in scratch memory
 	virtual void setTexture(u32 unit, const Texture* t, const Sampler& s) = 0;
 	virtual void setVertices(const void* base, u32 stride, u32 texCoords) = 0; // in scratch memory
+	// A vertex program of the renderer's (NULL: the pass-through program setVertices needs). The program
+	// must stay unchanged while it is set.
+	virtual void setVertexProgram(const VertexProgram* program) = 0;
+	// Vertex program constants c[first .. first + count - 1] (4 floats each). In order with the draws:
+	// draws submitted before keep the values they were drawn with.
+	virtual void setVertexConstants(u32 first, u32 count, const float* values) = 0;
+	virtual void setVertexFormat(const void* base, const VertexFormat& format) = 0; // in scratch memory
+	// Which triangles the device calls front-facing, by the sign of their screen area as the GameCube
+	// computes it (the homogeneous determinant of the clip-space positions times the viewport's x and y
+	// scales): +1 positive, -1 negative, 0 unknown (the renderer then removes back faces itself).
+	virtual int frontFaceSign() = 0;
+	// The renderer's vertex programs work on this device (checked at start-up on the PS3).
+	virtual bool vertexProgramsWork() = 0;
 	virtual void drawTriangles(const unsigned short* indices, u32 count) = 0;  // indices into the vertices
 	// Clears a rectangle of the current target (the scissor is not used).
 	virtual void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) = 0;

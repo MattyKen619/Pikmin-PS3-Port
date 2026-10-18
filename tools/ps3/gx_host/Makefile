@@ -38,7 +38,8 @@ $(BUILD)/gx_render: gx_render.cpp sw_render.cpp sw_render.h gx_trace_file.h $(SH
 
 # Draws frame traces with the PS3 renderer (platform/ps3/rsx) on a software RSX, compared with gx_render
 RSX_DIR := $(ROOT)/platform/ps3/rsx
-RSX_SRC := $(RSX_DIR)/renderer.cpp $(RSX_DIR)/tev_program.cpp $(RSX_DIR)/fp_assembler.cpp $(RSX_DIR)/fpasm/parser.cpp \
+RSX_SRC := $(RSX_DIR)/renderer.cpp $(RSX_DIR)/tev_program.cpp $(RSX_DIR)/fp_assembler.cpp $(RSX_DIR)/vp_builder.cpp \
+           $(RSX_DIR)/xf_program.cpp $(RSX_DIR)/fpasm/parser.cpp \
            $(RSX_DIR)/fpasm/fpparser.cpp $(RSX_DIR)/fpasm/compilerfp.cpp
 RSX_HDR := $(wildcard $(RSX_DIR)/*.h) $(wildcard $(RSX_DIR)/fpasm/*.h)
 $(BUILD)/gx_rsx: gx_rsx.cpp soft_device.cpp soft_device.h sw_render.cpp sw_render.h gx_trace_file.h $(SHARED_GPU) $(SHARED_HDR) $(RSX_SRC) $(RSX_HDR)

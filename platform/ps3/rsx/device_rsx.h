@@ -43,6 +43,11 @@ public:
 	void setProgram(const void* ucode, const FragmentProgram& fp) override;
 	void setTexture(u32 unit, const Texture* t, const Sampler& s) override;
 	void setVertices(const void* base, u32 stride, u32 texCoords) override;
+	void setVertexProgram(const VertexProgram* program) override;
+	void setVertexConstants(u32 first, u32 count, const float* values) override;
+	void setVertexFormat(const void* base, const VertexFormat& format) override;
+	int frontFaceSign() override { return mFrontFaceSign; }
+	bool vertexProgramsWork() override { return mVertexProgramsWork; }
 	void drawTriangles(const unsigned short* indices, u32 count) override;
 	void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) override;
 	bool readTarget(u32* out, u32 x, u32 y, u32 width, u32 height) override;
@@ -83,6 +88,10 @@ private:
 	bool mInvalidateTextures;
 	u32 mReadLabelValue;
 	u32 mLocalUsed;
+	const VertexProgram* mVertexProgram; // bound (NULL: the pass-through program)
+	bool mVertexProgramValid;
+	int mFrontFaceSign;       // (self-test)
+	bool mVertexProgramsWork; // (self-test)
 };
 
 } // namespace gfx

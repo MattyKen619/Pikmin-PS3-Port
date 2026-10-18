@@ -287,7 +287,8 @@ public:
 	gpu::VertexDetail vertexDetail() override
 	{
 		if (sRenderer) {
-			return gpu::VERTICES_DECODED;
+			gpu::VertexDetail d = sRenderer->vertexDetail();
+			return d == gpu::VERTICES_NONE && (sCheckFrame || ps3gx::traceRecording()) ? gpu::VERTICES_ARRAYS : d;
 		}
 		return (sCheckFrame || ps3gx::traceRecording()) ? gpu::VERTICES_ARRAYS : gpu::VERTICES_NONE;
 	}
@@ -360,6 +361,13 @@ public:
 				sTextureFailures++;
 				memoryFailed(address, size, gpu::MEM_TEXTURE);
 			}
+		}
+	}
+
+	void xfWritten(gpu::u32 address, gpu::u32 count) override
+	{
+		if (sRenderer) {
+			sRenderer->xfWritten(address, count);
 		}
 	}
 

@@ -33,6 +33,7 @@ enum {
 	BATCH_RESERVE   = 256 * 1024,
 	TEXTURE_BUDGET  = 96 * 1024 * 1024, // device memory for decoded textures before old ones are evicted
 	MAX_BATCH_VERTS = 65535,
+	TEXTURE_CHECK_FRAMES = 8,
 };
 
 const u8 kBlendSrc[8] = { BLEND_ZERO, BLEND_ONE, BLEND_DST_COLOR, BLEND_INV_DST_COLOR, BLEND_SRC_ALPHA, BLEND_INV_SRC_ALPHA, BLEND_DST_ALPHA, BLEND_INV_DST_ALPHA };
@@ -85,6 +86,10 @@ void initBpDirty()
 
 } // namespace
 
+// Texture memory is checked for changes (hashed) once every TEXTURE_CHECK_FRAMES frames, each texture in
+// its own frame of the cycle (by its address), so the checks are spread out.
+bool Renderer::checkDue(u32 address) const { return ((mFrame + (address >> 5)) % TEXTURE_CHECK_FRAMES) == 0; }
+
 bool Renderer::TexKey::operator<(const TexKey& o) const
 {
 	if (address != o.address) return address < o.address;
@@ -117,7 +122,30 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mTextureBytes(0)
     , mXfSerial(0)
     , mXfValid(false)
+    , mGpuXf(false)
+    , mXfLookup(NULL)
+    , mXfLookupValid(false)
+    , mXfLookupFp(NULL)
+    , mXfLookupTexCoords(0)
+    , mXfLayoutAt(NULL)
+    , mXfLayoutVersion(0)
+    , mXfLimitFp(NULL)
+    , mBoundXp(NULL)
+    , mBoundXpValid(false)
+    , mSetupValid(false)
+    , mSetupDirty(true)
+    , mXfWrites(1)
+    , mPalHead(0)
+    , mPalLap(1)
 {
+	mGpuXf = mDev.vertexProgramsWork() && mDev.frontFaceSign() != 0;
+	memset(mSetup, 0, sizeof(mSetup));
+	memset(mRowWrite, 0, sizeof(mRowWrite));
+	memset(mNrmWrite, 0, sizeof(mNrmWrite));
+	memset(mPosSlot, 0, sizeof(mPosSlot));
+	memset(mTexSlot, 0, sizeof(mTexSlot));
+	memset(mPosMap, 0, sizeof(mPosMap));
+	memset(mTexMap, 0, sizeof(mTexMap));
 	memset(&mStats, 0, sizeof(mStats));
 	memset(mTevReg, 0, sizeof(mTevReg));
 	memset(mKonst, 0, sizeof(mKonst));
@@ -134,6 +162,7 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 	mBatch.active = false;
 	mBatch.base   = NULL;
 	mBatch.reserved = mBatch.stride = mBatch.texCoords = mBatch.vertexCount = 0;
+	mBatch.xp       = NULL;
 	for (int i = 0; i < 8; i++) {
 		mBound[i].valid = false;
 		mBound[i].tex   = NULL;
@@ -173,6 +202,10 @@ void Renderer::begin()
 	bpWritten(0xF3, S.bp[0xF3]);
 	mDirtyBits = D_ALL;
 	mXfValid   = false;
+	mXfLookupValid = false;
+	mXfLimitFp     = NULL;
+	mSetupDirty    = true;
+	mPalLap++; // (XF memory came from somewhere else: no palette slot is known to be current)
 }
 
 void Renderer::flush()
@@ -285,11 +318,10 @@ void Renderer::retire(Texture* t)
 
 // ================================================================== batches
 
-u8* Renderer::batchVertices(u32 count, u32 texCoords, u32* first)
+u8* Renderer::batchVertices(u32 count, u32 stride, u32 texCoords, XfProgramEntry* xp, u32* first)
 {
-	const u32 stride = VERTEX_BASE_BYTES + VERTEX_TEX_BYTES * texCoords;
 	if (mBatch.active
-	    && (texCoords != mBatch.texCoords || mBatch.vertexCount + count > MAX_BATCH_VERTS
+	    && (xp != mBatch.xp || stride != mBatch.stride || texCoords != mBatch.texCoords || mBatch.vertexCount + count > MAX_BATCH_VERTS
 	        || (mBatch.vertexCount + count) * stride > mBatch.reserved)) {
 		flushBatch();
 	}
@@ -303,6 +335,7 @@ u8* Renderer::batchVertices(u32 count, u32 texCoords, u32* first)
 		mBatch.reserved = reserve;
 		mBatch.stride   = stride;
 		mBatch.texCoords = texCoords;
+		mBatch.xp       = xp;
 		mBatch.vertexCount = 0;
 		mBatch.indices.clear();
 		mBatch.active = true;
@@ -320,7 +353,18 @@ void Renderer::flushBatch()
 	mHead -= mBatch.reserved - mBatch.vertexCount * mBatch.stride;
 	if (!mBatch.indices.empty()) {
 		gpu::PhaseScope phase(gpu::GFX_RSX);
-		mDev.setVertices(mBatch.base, mBatch.stride, mBatch.texCoords);
+		if (mBatch.xp != mBoundXp || !mBoundXpValid) {
+			mStats.vertexProgramLoads++;
+			mBoundXp      = mBatch.xp;
+			mBoundXpValid = true;
+		}
+		if (mBatch.xp) {
+			mDev.setVertexProgram(&mBatch.xp->prog);
+			mDev.setVertexFormat(mBatch.base, mBatch.xp->info.format);
+		} else {
+			mDev.setVertexProgram(NULL);
+			mDev.setVertices(mBatch.base, mBatch.stride, mBatch.texCoords);
+		}
 		mDev.drawTriangles(&mBatch.indices[0], (u32)mBatch.indices.size());
 		mStats.batches++;
 	}
@@ -400,7 +444,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	if (ci != mCopies.end()) {
 		CopyEntry& c = ci->second;
 		bool valid   = true;
-		if (c.memKnown && c.checkedFrame != mFrame) {
+		if (c.memKnown && c.checkedFrame != mFrame && checkDue(k.address)) {
 			// (the game may have loaded something else there since)
 			gpu::PhaseScope phase(gpu::GFX_CHECKS);
 			u32 size      = gpu::CommandProcessor::textureSize(c.format, c.width, c.height, 1);
@@ -439,7 +483,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 		k.tlutHash = th.hash;
 	}
 	TexEntry& e = mTextures[k];
-	if (e.tex && e.checkedFrame == mFrame) {
+	if (e.tex && (e.checkedFrame == mFrame || !checkDue(k.address))) {
 		e.usedFrame = mFrame;
 		return e.tex;
 	}
@@ -541,6 +585,7 @@ bool Renderer::updateState()
 		rs.viewportOffset[0] = xff[0x101D] - 342.0f;
 		rs.viewportOffset[1] = xff[0x101E] - 342.0f;
 		rs.viewportOffset[2] = xff[0x101F] * (1.0f / 16777215.0f);
+		rs.cullFace          = mState.cullFace; // (set per draw: drawGpu, drawCpu)
 		if (mStateOk && (!mStateValid || rs != mState)) {
 			flushBatch();
 			gpu::PhaseScope rsx(gpu::GFX_RSX);
@@ -570,6 +615,12 @@ bool Renderer::updateState()
 				found->key = key;
 				const char* error;
 				found->ok = buildTevProgram(key, found->prog, &error);
+				found->texCoordCount = 0;
+				for (u32 t = 0; t < 8; t++) {
+					if (found->prog.texCoords & (1u << t)) {
+						found->texCoordCount = t + 1;
+					}
+				}
 				mStats.programs++;
 				if (!found->ok) {
 					mStats.programErrors++;
@@ -665,7 +716,7 @@ void Renderer::bpWritten(u32 reg, u32 value)
 void Renderer::draw(const gpu::DrawCall& call)
 {
 	mStats.draws++;
-	if (!call.vertices || !call.count) {
+	if (!call.count || (!call.vertices && !call.arrays)) {
 		return;
 	}
 	const u32 prim = call.primitive;
@@ -686,26 +737,304 @@ void Renderer::draw(const gpu::DrawCall& call)
 	// (the transform set-up changes only with XF loads that reach lights or registers, or a new layout)
 	{
 		const u64 xfSerial = mCp.stats().xfSetupLoads;
-		if (!mXfValid || xfSerial != mXfSerial || memcmp(&mXfLayout, call.layout, sizeof(mXfLayout)) != 0) {
+		const bool sameLayout = (call.layout == mXfLayoutAt && mCp.layoutVersion() == mXfLayoutVersion)
+		                     || memcmp(&mXfLayout, call.layout, sizeof(mXfLayout)) == 0;
+		if (!mXfValid || xfSerial != mXfSerial || !sameLayout) {
 			gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
 			mXfLayout = *call.layout;
 			gpu::xfPrepare(S.xf, mXfLayout, mXf);
-			mXfSerial = xfSerial;
-			mXfValid  = true;
+			if (xfSerial != mXfSerial) {
+				mSetupDirty = true; // (the set-up constants do not depend on the layout)
+			}
+			mXfSerial      = xfSerial;
+			mXfValid       = true;
+			mXfLookupValid = false;
+			mXfLimitFp     = NULL;
+		}
+		mXfLayoutAt      = call.layout;
+		mXfLayoutVersion = mCp.layoutVersion();
+	}
+	const u32 texCoords = mProgram->texCoordCount;
+	if (mXfLimitFp != mProgram) {
+		gpu::xfLimit(mXf, mProgram->prog.colorChans, texCoords);
+		mXfLimitFp = mProgram;
+	}
+	XfProgramEntry* xp = mGpuXf && call.arrays ? xfProgramFor(texCoords) : NULL;
+	if (xp) {
+		drawGpu(call, xp);
+	} else {
+		drawCpu(call, texCoords);
+	}
+}
+
+// The vertex program for the current set-up (cached until the set-up, the layout or the fragment program's
+// needs change). NULL: transform on the CPU.
+Renderer::XfProgramEntry* Renderer::xfProgramFor(u32 texCoords)
+{
+	if (mXfLookupValid && mXfLookupFp == mProgram && mXfLookupTexCoords == texCoords) {
+		return mXfLookup;
+	}
+	gpu::PhaseScope phase(gpu::GFX_PROGRAMS);
+	mXfLookupValid     = true;
+	mXfLookupFp        = mProgram;
+	mXfLookupTexCoords = texCoords;
+	mXfLookup          = NULL;
+	XfKey key;
+	if (!makeXfKey(mXf, mXfLayout, texCoords, key)) {
+		return NULL;
+	}
+	Vec<XfProgramEntry*>& chain = mXfPrograms[key.hash()];
+	for (size_t i = 0; i < chain.size(); i++) {
+		if (chain[i]->key == key) {
+			mXfLookup = chain[i]->ok ? chain[i] : NULL;
+			return mXfLookup;
 		}
 	}
-	u32 texCoords = 0;
-	for (u32 t = 0; t < 8; t++) {
-		if (mProgram->prog.texCoords & (1u << t)) {
-			texCoords = t + 1;
+	XfProgramEntry* e = create<XfProgramEntry>();
+	e->key            = key;
+	const char* error = NULL;
+	e->ok             = buildXfProgram(key, e->prog, e->info, &error);
+	mStats.xfPrograms++;
+	if (!e->ok) {
+		mStats.xfProgramErrors++;
+		if (mStats.xfProgramErrors <= 3) {
+			log("[rsx] FAILED to build a vertex program (%s)\n", error ? error : "?");
 		}
 	}
-	gpu::xfLimit(mXf, mProgram->prog.colorChans, texCoords);
+	chain.push_back(e);
+	mXfLookup = e->ok ? e : NULL;
+	return mXfLookup;
+}
+
+// The device's culling for the draws it transforms: the GameCube's front faces have negative screen areas
+// (GX_CULL_FRONT removes those), the device's are what frontFaceSign says.
+void Renderer::setDeviceCull(u8 cull)
+{
+	if (mState.cullFace == cull) {
+		return;
+	}
+	flushBatch();
+	mState.cullFace = cull;
+	if (mStateValid) {
+		gpu::PhaseScope rsx(gpu::GFX_RSX);
+		mDev.setState(mState);
+	}
+}
+
+// ---- draws transformed by the RSX
+
+void Renderer::xfWritten(u32 address, u32 count)
+{
+	const u32 serial = ++mXfWrites;
+	const u32 end    = address + count;
+	for (u32 a = address; a < end && a < 0x100; a += 4) {
+		mRowWrite[a >> 2] = serial;
+	}
+	if (end > 0x400 && address < 0x478) {
+		for (u32 a = address < 0x400 ? 0x400 : address; a < end && a < 0x478; a++) {
+			mNrmWrite[(a - 0x400) / 3] = serial;
+		}
+	}
+	if (end > 0x500) {
+		mSetupDirty = true; // (post-transform matrices, lights, registers)
+	}
+}
+
+// A palette slot holding XF matrix row `row` (and, with 6 rows, the normal matrix that goes with it).
+// Returns its offset in the palette.
+u8 Renderer::paletteSlot(Slot* slots, u32 row, u32 rows)
+{
+	Slot& s      = slots[row];
+	u32 newest   = 0;
+	for (u32 k = 0; k < 3 && row + k < 64; k++) {
+		newest = mRowWrite[row + k] > newest ? mRowWrite[row + k] : newest;
+	}
+	if (rows > 3) {
+		const u32 n = row & 31;
+		for (u32 k = 0; k < 3; k++) {
+			newest = mNrmWrite[n + k] > newest ? mNrmWrite[n + k] : newest;
+		}
+	}
+	if (s.lap == mPalLap && s.rows >= rows && s.serial >= newest) {
+		return s.offset;
+	}
+	if (mPalHead + rows > XC_PALETTE_ROWS) {
+		flushBatch(); // (the pending draws read slots that are about to be reused)
+		mPalLap++;
+		mPalHead = 0;
+	}
+	float data[6][4];
+	const float* xf = (const float*)mCp.state().xf;
+	for (u32 k = 0; k < 3; k++) {
+		for (u32 i = 0; i < 4; i++) {
+			data[k][i] = row + k < 64 ? xf[(row + k) * 4 + i] : 0.0f;
+		}
+	}
+	if (rows > 3) {
+		const float* n = xf + 0x400 + (row & 31) * 3;
+		for (u32 k = 0; k < 3; k++) {
+			data[3 + k][0] = n[k * 3], data[3 + k][1] = n[k * 3 + 1], data[3 + k][2] = n[k * 3 + 2], data[3 + k][3] = 0.0f;
+		}
+	}
+	{
+		gpu::PhaseScope rsx(gpu::GFX_RSX);
+		mDev.setVertexConstants(XC_PALETTE + mPalHead, rows, &data[0][0]);
+	}
+	mStats.paletteRows += rows;
+	s.lap    = mPalLap;
+	s.serial = mXfWrites;
+	s.offset = (u8)mPalHead;
+	s.rows   = (u8)rows;
+	mPalHead += rows;
+	return s.offset;
+}
+
+void Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
+{
+	mStats.gpuDraws++;
+	const int sign = mDev.frontFaceSign();
+	u8 cull        = CULL_NONE;
+	if (mCull == 1) {
+		cull = sign > 0 ? CULL_BACK : CULL_FRONT; // (remove negative areas)
+	} else if (mCull == 2) {
+		cull = sign > 0 ? CULL_FRONT : CULL_BACK;
+	}
+	setDeviceCull(cull);
+	const XfInfo& info = xp->info;
+	{
+		gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
+		// set-up constants
+		if (mSetupDirty || !mSetupValid) {
+			float setup[XC_SETUP_COUNT][4];
+			xfSetupConstants(mXf, setup);
+			if (!mSetupValid || memcmp(setup, mSetup, sizeof(setup)) != 0) {
+				flushBatch();
+				gpu::PhaseScope rsx(gpu::GFX_RSX);
+				// (only the rows that changed, in runs)
+				for (u32 r = 0; r < XC_SETUP_COUNT;) {
+					if (mSetupValid && memcmp(setup[r], mSetup[r], sizeof(setup[r])) == 0) {
+						r++;
+						continue;
+					}
+					u32 e = r + 1;
+					while (e < XC_SETUP_COUNT && (!mSetupValid || memcmp(setup[e], mSetup[e], sizeof(setup[e])) != 0)) {
+						e++;
+					}
+					mDev.setVertexConstants(r, e - r, &setup[r][0]);
+					r = e;
+				}
+				memcpy(mSetup, setup, sizeof(setup));
+				mSetupValid = true;
+				mStats.setupUploads++;
+			}
+			mSetupDirty = false;
+		}
+		// matrices into the palette (again from an empty palette if it filled up on the way)
+		u64 posRows, texRows[8];
+		mCp.matrixRows(call, info.texCount, &posRows, texRows);
+		u64 texAll = 0;
+		for (u32 t = 0; t < info.texCount; t++) {
+			if (info.texMatrices & (1u << t)) {
+				texAll |= texRows[t];
+			}
+		}
+		for (int attempt = 0; attempt < 2; attempt++) {
+			const u32 lap = mPalLap;
+			for (u64 m = posRows; m; m &= m - 1) {
+				const u32 r = (u32)__builtin_ctzll(m);
+				mPosMap[r]  = paletteSlot(mPosSlot, r, info.posRows);
+			}
+			for (u64 m = texAll; m; m &= m - 1) {
+				const u32 r = (u32)__builtin_ctzll(m);
+				mTexMap[r]  = paletteSlot(mTexSlot, r, 3);
+			}
+			if (mPalLap == lap) {
+				break;
+			}
+		}
+	}
+	u32 first;
+	u8* out = batchVertices(call.count, info.format.stride, 0, xp, &first);
+	if (!out) {
+		mStats.skippedDraws++;
+		return;
+	}
+	gpu::GatherSpec G = info.gather;
+	G.posMap          = mPosMap;
+	G.texMap          = mTexMap;
+	mCp.gatherVertices(call, G, out);
+	mStats.vertices += call.count;
+
+	gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
+	const u32 n = call.count;
+	u32 tris    = 0;
+	switch (call.primitive) {
+	case gpu::PRIM_QUADS:
+	case gpu::PRIM_QUADS_2: tris = (n / 4) * 2; break;
+	case gpu::PRIM_TRIANGLES: tris = n / 3; break;
+	case gpu::PRIM_TRI_STRIP:
+	case gpu::PRIM_TRI_FAN: tris = n >= 3 ? n - 2 : 0; break;
+	default: break;
+	}
+	Vec<unsigned short>& ixv = mBatch.indices;
+	const size_t at          = ixv.size();
+	ixv.resize(at + tris * 3);
+	unsigned short* ix = tris ? &ixv[at] : NULL;
+	const unsigned short f = (unsigned short)first;
+	switch (call.primitive) {
+	case gpu::PRIM_QUADS:
+	case gpu::PRIM_QUADS_2:
+		for (u32 i = 0; i + 3 < n; i += 4, ix += 6) {
+			ix[0] = (unsigned short)(f + i), ix[1] = (unsigned short)(f + i + 1), ix[2] = (unsigned short)(f + i + 2);
+			ix[3] = (unsigned short)(f + i), ix[4] = (unsigned short)(f + i + 2), ix[5] = (unsigned short)(f + i + 3);
+		}
+		break;
+	case gpu::PRIM_TRIANGLES:
+		for (u32 i = 0; i + 2 < n; i += 3, ix += 3) {
+			ix[0] = (unsigned short)(f + i), ix[1] = (unsigned short)(f + i + 1), ix[2] = (unsigned short)(f + i + 2);
+		}
+		break;
+	case gpu::PRIM_TRI_STRIP:
+		for (u32 i = 0; i + 2 < n; i++, ix += 3) {
+			if (i & 1) {
+				ix[0] = (unsigned short)(f + i + 1), ix[1] = (unsigned short)(f + i);
+			} else {
+				ix[0] = (unsigned short)(f + i), ix[1] = (unsigned short)(f + i + 1);
+			}
+			ix[2] = (unsigned short)(f + i + 2);
+		}
+		break;
+	case gpu::PRIM_TRI_FAN:
+		for (u32 i = 1; i + 1 < n; i++, ix += 3) {
+			ix[0] = f, ix[1] = (unsigned short)(f + i), ix[2] = (unsigned short)(f + i + 1);
+		}
+		break;
+	default: break;
+	}
+	mStats.triangles += tris;
+	mBatch.vertexCount += call.count;
+}
+
+// ---- draws transformed on the CPU (gpu_xf.cpp), culled on the CPU
+
+void Renderer::drawCpu(const gpu::DrawCall& call, u32 texCoords)
+{
+	mStats.cpuDraws++;
+	setDeviceCull(CULL_NONE);
+	const gpu::Vertex* vertices = call.vertices;
+	if (!vertices) {
+		gpu::PhaseScope phase(gpu::GFX_DECODE);
+		vertices = mCp.decodeDraw(call);
+		if (!vertices) {
+			mStats.skippedDraws++;
+			return;
+		}
+	}
 	if (mXf.texLimit > texCoords) {
 		texCoords = mXf.texLimit; // (an emboss texgen: the coordinates before it are worked out too)
 	}
 	u32 first;
-	u8* out = batchVertices(call.count, texCoords, &first);
+	u8* out = batchVertices(call.count, VERTEX_BASE_BYTES + VERTEX_TEX_BYTES * texCoords, texCoords, NULL, &first);
 	if (!out) {
 		mStats.skippedDraws++;
 		return;
@@ -717,11 +1046,12 @@ void Renderer::draw(const gpu::DrawCall& call)
 		gpu::PhaseScope phase(gpu::GFX_TRANSFORM);
 		const gpu::XfSetup& xs = mXf;
 		for (u32 i = 0; i < call.count; i++) {
-			gpu::xfTransform(xs, call.vertices[i], *(gpu::XfVertex*)(out + i * stride));
+			gpu::xfTransform(xs, vertices[i], *(gpu::XfVertex*)(out + i * stride));
 		}
 	}
 	mStats.vertices += call.count;
 	gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
+	const u32 prim = call.primitive;
 
 	// Triangles, without those facing away (sign of the screen-space area, from the homogeneous positions:
 	// correct also for triangles that cross the camera plane).
@@ -804,7 +1134,7 @@ void Renderer::drawQuad(u32 tw, u32 th, const float dst[4], const float uv[4], c
 	mDev.setTexture(0, source, s);
 
 	u32 first;
-	u8* out = batchVertices(4, 1, &first);
+	u8* out = batchVertices(4, VERTEX_BASE_BYTES + VERTEX_TEX_BYTES, 1, NULL, &first);
 	if (!out) {
 		return;
 	}

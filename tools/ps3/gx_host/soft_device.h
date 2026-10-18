@@ -36,6 +36,11 @@ public:
 	void setProgram(const void* ucode, const gfx::FragmentProgram& fp) override;
 	void setTexture(gfx::u32 unit, const gfx::Texture* t, const gfx::Sampler& s) override;
 	void setVertices(const void* base, gfx::u32 stride, gfx::u32 texCoords) override;
+	void setVertexProgram(const gfx::VertexProgram* program) override { mVp = program; }
+	void setVertexConstants(gfx::u32 first, gfx::u32 count, const float* values) override;
+	void setVertexFormat(const void* base, const gfx::VertexFormat& format) override;
+	int frontFaceSign() override { return +1; } // (rasterize: front faces have positive window areas)
+	bool vertexProgramsWork() override { return true; }
 	void drawTriangles(const unsigned short* indices, gfx::u32 count) override;
 	void clear(const gfx::u16 rect[4], gfx::u32 argb, gfx::u32 depth, bool color, bool alpha, bool depthToo) override;
 	bool readTarget(gfx::u32* out, gfx::u32 x, gfx::u32 y, gfx::u32 width, gfx::u32 height) override;
@@ -48,7 +53,7 @@ public:
 	const gfx::u32* efb() const { return &mEfb[0]; }
 
 	struct Stats {
-		unsigned long long triangles, pixels, killed, written, programErrors;
+		unsigned long long triangles, pixels, killed, written, programErrors, culled, programVertices, badVpInstructions;
 	};
 	const Stats& stats() const { return mStats; }
 
@@ -58,6 +63,8 @@ private:
 		float in[16][4]; // fragment program inputs: 1 COL0, 2 COL1, 4-11 TEX0-7
 	};
 	void fetch(unsigned short index, Vert& v);
+	void fetchRaw(unsigned short index, Vert& v);
+	void runVertexProgram(const float in[16][4], float out[16][4]);
 	void triangle(const Vert& a, const Vert& b, const Vert& c);
 	void rasterize(const Vert* v[3]);
 	bool runProgram(const float in[16][4], float out[4]);
@@ -82,6 +89,11 @@ private:
 	gfx::Sampler mSampler[16];
 	const gfx::u8* mVerts;
 	gfx::u32 mStride, mTexCoords;
+	// vertex programs
+	const gfx::VertexProgram* mVp;
+	bool mRaw; // the vertices are raw (setVertexFormat), for mVp
+	gfx::VertexFormat mFormat;
+	float mVpConst[256][4];
 	Stats mStats;
 };
 

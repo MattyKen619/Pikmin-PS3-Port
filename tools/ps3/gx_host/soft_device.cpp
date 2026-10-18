@@ -27,7 +27,11 @@ SoftDevice::SoftDevice()
     , mVerts(NULL)
     , mStride(0)
     , mTexCoords(0)
+    , mVp(NULL)
+    , mRaw(false)
 {
+	memset(&mFormat, 0, sizeof(mFormat));
+	memset(mVpConst, 0, sizeof(mVpConst));
 	mEfbTexture.width  = gfx::EFB_WIDTH;
 	mEfbTexture.height = gfx::EFB_HEIGHT;
 	mEfbTexture.pitch  = gfx::EFB_WIDTH * 4;
@@ -113,6 +117,193 @@ void SoftDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 	mVerts     = (const u8*)base;
 	mStride    = stride;
 	mTexCoords = texCoords;
+	mRaw       = false;
+}
+
+void SoftDevice::setVertexConstants(u32 first, u32 count, const float* values)
+{
+	for (u32 i = 0; i < count && first + i < 256; i++) {
+		memcpy(mVpConst[first + i], values + i * 4, 16);
+	}
+}
+
+void SoftDevice::setVertexFormat(const void* base, const gfx::VertexFormat& format)
+{
+	mVerts  = (const u8*)base;
+	mFormat = format;
+	mStride = format.stride;
+	mRaw    = true;
+}
+
+// ---- vertex programs: an interpreter for the NV40 microcode (fields: platform/ps3/rsx/fpasm/nv40_vertprog.h)
+
+void SoftDevice::fetchRaw(unsigned short index, Vert& v)
+{
+	float in[16][4];
+	const u8* p = mVerts + index * mStride;
+	for (int a = 0; a < 16; a++) {
+		in[a][0] = in[a][1] = in[a][2] = 0, in[a][3] = 1;
+		const gfx::VertexAttrib& at = mFormat.attr[a];
+		for (int k = 0; k < at.components && k < 4; k++) {
+			switch (at.type) {
+			case gfx::ATTRIB_F32:
+			{
+				float f;
+				memcpy(&f, p + at.offset + k * 4, 4);
+				in[a][k] = f;
+				break;
+			}
+			case gfx::ATTRIB_U8_NORM: in[a][k] = p[at.offset + k] / 255.0f; break;
+			case gfx::ATTRIB_U8: in[a][k] = (float)p[at.offset + k]; break;
+			default: mStats.badVpInstructions++; break;
+			}
+		}
+	}
+	float out[16][4];
+	runVertexProgram(in, out);
+	memcpy(v.pos, out[0], sizeof(v.pos));
+	memset(v.in, 0, sizeof(v.in));
+	for (int k = 0; k < 4; k++) {
+		// (the RSX clamps the color outputs)
+		v.in[1][k] = out[1][k] < 0 ? 0 : out[1][k] > 1 ? 1 : out[1][k];
+		v.in[2][k] = out[2][k] < 0 ? 0 : out[2][k] > 1 ? 1 : out[2][k];
+	}
+	for (int t = 0; t < 8; t++) {
+		memcpy(v.in[4 + t], out[7 + t], sizeof(v.in[4 + t]));
+	}
+}
+
+void SoftDevice::runVertexProgram(const float in[16][4], float out[16][4])
+{
+	mStats.programVertices++;
+	float R[64][4];
+	int A[2][4];
+	memset(R, 0, sizeof(R));
+	memset(A, 0, sizeof(A));
+	for (int o = 0; o < 16; o++) {
+		out[o][0] = out[o][1] = out[o][2] = 0, out[o][3] = 1;
+	}
+	if (!mVp || mVp->ucode.empty()) {
+		return;
+	}
+	const u32* code = &mVp->ucode[0];
+	for (u32 i = 0; i < mVp->instructions && i < 512; i++) {
+		const u32* hw  = code + i * 4;
+		const u32 vop  = (hw[1] >> 22) & 0x1F;
+		const u32 sop  = (hw[1] >> 27) & 0x1F;
+		const u32 inIx = (hw[1] >> 8) & 0xF;
+		u32 cIx        = (hw[1] >> 12) & 0xFF;
+		if (hw[3] & (1u << 1)) { // relative constant
+			cIx += A[(hw[0] >> 24) & 1][hw[0] & 3];
+		}
+		const bool sat = (hw[0] >> 26) & 1;
+		const u32 sr[3] = { ((hw[1] & 0xFF) << 9) | ((hw[2] >> 23) & 0x1FF), (hw[2] >> 6) & 0x1FFFF,
+			                ((hw[2] & 0x3F) << 11) | ((hw[3] >> 21) & 0x7FF) };
+		float src[3][4];
+		for (int s = 0; s < 3; s++) {
+			const float* r;
+			static const float zero[4] = { 0, 0, 0, 0 };
+			switch (sr[s] & 3) {
+			case 1: r = R[(sr[s] >> 2) & 0x1F]; break;
+			case 2: r = in[inIx]; break;
+			case 3: r = cIx < 256 ? mVpConst[cIx] : zero; break;
+			default: r = zero; break;
+			}
+			const int sw[4] = { (int)((sr[s] >> 14) & 3), (int)((sr[s] >> 12) & 3), (int)((sr[s] >> 10) & 3), (int)((sr[s] >> 8) & 3) };
+			for (int k = 0; k < 4; k++) {
+				float v = r[sw[k]];
+				if ((hw[0] >> (21 + s)) & 1) {
+					v = fabsf(v);
+				}
+				if ((sr[s] >> 16) & 1) {
+					v = -v;
+				}
+				src[s][k] = v;
+			}
+		}
+		const float* a = src[0];
+		const float* b = src[1];
+		const float* c = src[2];
+		// vector slot
+		const u32 vmask = (hw[3] >> 13) & 0xF;
+		if (vop && vmask) {
+			float r[4];
+			bool toAddr = false;
+			for (int k = 0; k < 4; k++) {
+				switch (vop) {
+				case 1: r[k] = a[k]; break;                                         // MOV
+				case 2: r[k] = a[k] * b[k]; break;                                  // MUL
+				case 3: r[k] = a[k] + c[k]; break;                                  // ADD
+				case 4: r[k] = a[k] * b[k] + c[k]; break;                           // MAD
+				case 5: r[k] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; break;      // DP3
+				case 6: r[k] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + b[3]; break; // DPH
+				case 7: r[k] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]; break; // DP4
+				case 9: r[k] = a[k] < b[k] ? a[k] : b[k]; break;                    // MIN
+				case 10: r[k] = a[k] > b[k] ? a[k] : b[k]; break;                   // MAX
+				case 11: r[k] = a[k] < b[k] ? 1.0f : 0.0f; break;                   // SLT
+				case 12: r[k] = a[k] >= b[k] ? 1.0f : 0.0f; break;                  // SGE
+				case 13: r[k] = floorf(a[k]), toAddr = true; break;                 // ARL
+				case 14: r[k] = a[k] - floorf(a[k]); break;                         // FRC
+				case 15: r[k] = floorf(a[k]); break;                                // FLR
+				case 16: r[k] = a[k] == b[k] ? 1.0f : 0.0f; break;                  // SEQ
+				case 18: r[k] = a[k] > b[k] ? 1.0f : 0.0f; break;                   // SGT
+				case 19: r[k] = a[k] <= b[k] ? 1.0f : 0.0f; break;                  // SLE
+				case 20: r[k] = a[k] != b[k] ? 1.0f : 0.0f; break;                  // SNE
+				default: r[k] = 0, mStats.badVpInstructions++; break;
+				}
+				if (sat) {
+					r[k] = r[k] < 0 ? 0 : r[k] > 1 ? 1 : r[k];
+				}
+			}
+			for (int k = 0; k < 4; k++) {
+				if (!(vmask & (8 >> k))) {
+					continue;
+				}
+				if (toAddr) {
+					A[0][k] = (int)r[k];
+				} else if (hw[0] & (1u << 30)) {
+					out[(hw[3] >> 2) & 0x1F & 15][k] = r[k];
+				} else {
+					u32 t = (hw[0] >> 15) & 0x3F;
+					if (t < 64) {
+						R[t][k] = r[k];
+					}
+				}
+			}
+		}
+		// scalar slot (operand: the third source's x)
+		const u32 smask = (hw[3] >> 17) & 0xF;
+		if (sop && smask) {
+			float x = c[0], r;
+			switch (sop) {
+			case 1: r = x; break;                          // MOV
+			case 2: r = 1.0f / x; break;                   // RCP
+			case 4: r = 1.0f / sqrtf(fabsf(x)); break;     // RSQ
+			case 13: r = log2f(x); break;                  // LG2
+			case 14: r = exp2f(x); break;                  // EX2
+			default: r = 0, mStats.badVpInstructions++; break;
+			}
+			if (sat) {
+				r = r < 0 ? 0 : r > 1 ? 1 : r;
+			}
+			for (int k = 0; k < 4; k++) {
+				if (!(smask & (8 >> k))) {
+					continue;
+				}
+				if (hw[3] & (1u << 12)) {
+					out[(hw[3] >> 2) & 0x1F & 15][k] = r;
+				} else {
+					u32 t = (hw[3] >> 7) & 0x3F;
+					if (t < 64) {
+						R[t][k] = r;
+					}
+				}
+			}
+		}
+		if (hw[3] & 1) {
+			break; // last instruction
+		}
+	}
 }
 
 void SoftDevice::clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo)
@@ -170,9 +361,15 @@ void SoftDevice::drawTriangles(const unsigned short* indices, u32 count)
 {
 	for (u32 i = 0; i + 2 < count; i += 3) {
 		Vert a, b, c;
-		fetch(indices[i], a);
-		fetch(indices[i + 1], b);
-		fetch(indices[i + 2], c);
+		if (mRaw) {
+			fetchRaw(indices[i], a);
+			fetchRaw(indices[i + 1], b);
+			fetchRaw(indices[i + 2], c);
+		} else {
+			fetch(indices[i], a);
+			fetch(indices[i + 1], b);
+			fetch(indices[i + 2], c);
+		}
 		triangle(a, b, c);
 	}
 }
@@ -232,6 +429,11 @@ void SoftDevice::rasterize(const Vert* v[3])
 	}
 	float area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
 	if (area == 0) {
+		return;
+	}
+	// (front faces: positive window areas, see frontFaceSign)
+	if ((S.cullFace == gfx::CULL_FRONT && area > 0) || (S.cullFace == gfx::CULL_BACK && area < 0)) {
+		mStats.culled++;
 		return;
 	}
 	int sx0 = S.scissor[0], sy0 = S.scissor[1];

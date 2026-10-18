@@ -1,10 +1,13 @@
 // PS3 port: draws the GameCube's graphics commands with a modern-ish GPU (the PS3's RSX, through the
 // Device interface in device.h).
 //
-// The command processor (platform/ps3/gpu/gpu_cp.h) reports each draw with its decoded vertices. The
-// renderer
-//   - transforms and lights the vertices on the CPU (gpu_xf.h, the same code as the host's reference
-//     renderer), and removes back faces the way the GameCube does;
+// The command processor (platform/ps3/gpu/gpu_cp.h) reports each draw. The renderer
+//   - has the RSX transform and light the vertices: the XF set-up becomes a vertex program
+//     (xf_program.h), the matrices the vertices use go into a palette of vertex program constants, and the
+//     CPU only unpacks the vertices into the RSX's memory (CommandProcessor::gatherVertices). Set-ups the
+//     vertex programs do not cover (emboss texture coordinates), or a device whose vertex programs failed
+//     the start-up self-test, are transformed on the CPU instead (gpu_xf.h, the same code as the host's
+//     reference renderer), with back faces removed the way the GameCube does;
 //   - turns the pixel pipeline set-up (TEV, alpha test) into a fragment program (tev_program.h), the
 //     blending, depth and scissor settings into device state, and the textures the stages sample into
 //     device textures (decoded on the CPU, cached, re-checked once per frame);
@@ -22,6 +25,7 @@
 #include "../gpu/gpu_xf.h"
 #include "device.h"
 #include "tev_program.h"
+#include "xf_program.h"
 
 #include "rsx_alloc.h"
 
@@ -33,6 +37,7 @@ struct RendererStats {
 	u64 draws, batches, triangles, culled, vertices, skippedDraws, lineDraws, pointDraws;
 	u64 programs, programErrors, programBinds, textureUploads, textureUploadBytes, missingTextures;
 	u64 copies, copyUses, presents, clears, fenceWaits;
+	u64 gpuDraws, cpuDraws, xfPrograms, xfProgramErrors, paletteRows, setupUploads, vertexProgramLoads;
 	u64 rsxBehind; // frames finished before the RSX had drawn the previous one
 	u32 textureBytes, textures;
 };
@@ -51,8 +56,14 @@ public:
 
 	void setLogger(void (*log)(const char* text)) { mLog = log; }
 
-	gpu::VertexDetail vertexDetail() override { return gpu::VERTICES_DECODED; }
+	// (with the transform on the RSX, vertices are unpacked straight into its memory: no decoding)
+	gpu::VertexDetail vertexDetail() override { return mGpuXf ? gpu::VERTICES_ARRAYS : gpu::VERTICES_DECODED; }
 	void draw(const gpu::DrawCall& call) override;
+	void xfWritten(u32 address, u32 count) override;
+	// Transform on the RSX when it can (the default when the device's vertex programs work), or always on
+	// the CPU.
+	void setGpuTransform(bool on) { mGpuXf = on && mDev.vertexProgramsWork() && mDev.frontFaceSign() != 0; }
+	bool gpuTransform() const { return mGpuXf; }
 	void copy(const gpu::CopyInfo& info) override;
 	void bpWritten(u32 reg, u32 value) override;
 
@@ -69,6 +80,7 @@ private:
 		TevKey key;
 		TevProgram prog;
 		bool ok;
+		u32 texCoordCount; // texture coordinates 0 .. n-1 cover those the program reads
 	};
 	struct TexKey {
 		u32 address, width, height, format, tlutFormat;
@@ -104,6 +116,16 @@ private:
 		u32 serial, tmem, bytes;
 		u64 hash;
 	};
+	struct XfProgramEntry {
+		XfKey key;
+		VertexProgram prog;
+		XfInfo info;
+		bool ok;
+	};
+	struct Slot {
+		u32 lap, serial;
+		u8 offset, rows;
+	};
 
 	void log(const char* fmt, ...);
 
@@ -114,15 +136,23 @@ private:
 	void retire(Texture* t);
 
 	// batches
-	u8* batchVertices(u32 count, u32 texCoords, u32* first);
+	u8* batchVertices(u32 count, u32 stride, u32 texCoords, XfProgramEntry* xp, u32* first);
 	void flushBatch();
 
 	// state
 	bool updateState();
 	void bindProgram(const FragmentProgram& fp, const float (*params)[4]);
 	const Texture* lookupTexture(u32 map, Sampler& sampler);
+	bool checkDue(u32 address) const;
 	const Texture* missingTexture();
 	void invalidateDeviceState();
+
+	// draws
+	void drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp);
+	void drawCpu(const gpu::DrawCall& call, u32 texCoords);
+	XfProgramEntry* xfProgramFor(u32 texCoords);
+	u8 paletteSlot(Slot* slots, u32 row, u32 rows);
+	void setDeviceCull(u8 cull);
 
 	// internal drawing
 	void drawQuad(u32 targetWidth, u32 targetHeight, const float dst[4], const float uv[4], const Texture* source, bool linear,
@@ -162,6 +192,7 @@ private:
 		bool active;
 		u8* base;
 		u32 reserved, stride, texCoords, vertexCount;
+		XfProgramEntry* xp; // the vertex program (NULL: vertices transformed on the CPU)
 		Vec<unsigned short> indices;
 	} mBatch;
 
@@ -190,6 +221,28 @@ private:
 	gpu::VertexLayout mXfLayout;
 	u64 mXfSerial;
 	bool mXfValid;
+
+	// the transform on the RSX (xf_program.h)
+	bool mGpuXf;
+	Map<u32, Vec<XfProgramEntry*> > mXfPrograms;
+	XfProgramEntry* mXfLookup; // the program for the current set-up (NULL: on the CPU)
+	bool mXfLookupValid;
+	const ProgramEntry* mXfLookupFp;
+	u32 mXfLookupTexCoords;
+	const gpu::VertexLayout* mXfLayoutAt; // (mXfLayout's source, while the processor's layouts are unchanged)
+	u32 mXfLayoutVersion;
+	const ProgramEntry* mXfLimitFp;       // the program mXf was limited (xfLimit) for
+	XfProgramEntry* mBoundXp;             // the vertex program of the last batch drawn (NULL: pass-through)
+	bool mBoundXpValid;
+	float mSetup[XC_SETUP_COUNT][4]; // set-up constants on the device
+	bool mSetupValid, mSetupDirty;
+	// the matrix palette: XF matrix rows copied into constants, found again while unchanged
+	u32 mXfWrites;      // XF loads so far
+	u32 mRowWrite[64];  // the last load that reached each matrix row (XF 0x000-0x0FF, 4 words a row)
+	u32 mNrmWrite[48];  // the same for the normal matrices (XF 0x400-0x45F, 3 words a row)
+	Slot mPosSlot[64], mTexSlot[64];
+	u32 mPalHead, mPalLap; // rows used, times the palette was started again
+	u8 mPosMap[64], mTexMap[64];
 };
 
 } // namespace gfx

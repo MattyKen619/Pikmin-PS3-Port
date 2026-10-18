@@ -40,6 +40,16 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 	}
 	sRenderer = gfx::create<gfx::Renderer>(cp, memory, *sDev);
 	sRenderer->setLogger(logLine);
+	if (ps3b_data_root()) {
+		char path[256];
+		snprintf(path, sizeof(path), "%s/cpu_xf.txt", ps3b_data_root());
+		if (ps3b_file_exists(path)) {
+			sRenderer->setGpuTransform(false);
+			ps3b_log_write("[rsx] PIKMIN/cpu_xf.txt exists: vertices are transformed on the CPU\n");
+		}
+	}
+	ps3b_log_write(sRenderer->gpuTransform() ? "[rsx] vertices are transformed and lit by the RSX (vertex programs)\n"
+	                                         : "[rsx] vertices are transformed and lit on the CPU\n");
 	sRenderer->begin();
 	return sRenderer;
 }
@@ -95,7 +105,7 @@ void ps3rsx::status(char* buf, unsigned int size)
 	const gfx::RendererStats& s = sRenderer->stats();
 	gfx::u32 frames             = sRenderer->framesPresented();
 	gfx::u32 n                  = frames - lastFrames ? frames - lastFrames : 1;
-	snprintf(buf, size,
+	int at = snprintf(buf, size,
 	         "RSX: %u frames shown; per frame %llu draws in %llu batches, %llu program changes, %llu culled of %llu triangles, "
 	         "%llu KB of textures uploaded; %llu programs (%llu failed), %u textures (%u KB), %llu skipped, %llu line/point "
 	         "draws, %llu missing textures, %llu copies, %llu waits; RSX memory %u KB; %llu of %u frames finished before the RSX "
@@ -104,6 +114,13 @@ void ps3rsx::status(char* buf, unsigned int size)
 	         (s.culled - last.culled) / n, (s.triangles - last.triangles) / n, ((s.textureUploadBytes - last.textureUploadBytes) >> 10) / n,
 	         s.programs, s.programErrors, s.textures, s.textureBytes >> 10, s.skippedDraws, s.lineDraws + s.pointDraws,
 	         s.missingTextures, s.copies, s.fenceWaits, sDev->localMemoryUsed() >> 10, s.rsxBehind - last.rsxBehind, frames - lastFrames);
+	if (at > 0 && at < (int)size) {
+		snprintf(buf + at, size - at,
+		         "; transform: per frame %llu draws on the RSX, %llu on the CPU, %llu matrix rows and %llu set-ups loaded; %llu vertex "
+		         "programs (%llu failed)",
+		         (s.gpuDraws - last.gpuDraws) / n, (s.cpuDraws - last.cpuDraws) / n, (s.paletteRows - last.paletteRows) / n,
+		         (s.setupUploads - last.setupUploads) / n, s.xfPrograms, s.xfProgramErrors);
+	}
 	last       = s;
 	lastFrames = frames;
 }

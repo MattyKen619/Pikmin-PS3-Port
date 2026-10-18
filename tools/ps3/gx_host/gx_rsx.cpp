@@ -1,7 +1,9 @@
 // PS3 port, host tools: draws a frame trace with the PS3 renderer (platform/ps3/rsx/renderer.cpp) on a
 // software RSX (soft_device.cpp), and compares the frame with the reference software renderer's.
 //
-//   gx_rsx TRACE OUT.png [--ref REF.png] [--diff DIFF.png] [--programs FILE] [--efb EFB.png]
+//   gx_rsx TRACE OUT.png [--ref REF.png] [--diff DIFF.png] [--efb EFB.png] [--cpu-xf 1]
+//
+// --cpu-xf 1: vertices transformed on the CPU (as without working vertex programs on the PS3).
 //
 // Prints how many pixels differ and by how much. --programs writes the text of every fragment program
 // the renderer made.
@@ -30,7 +32,9 @@ int main(int argc, char** argv)
 	const char* refPath  = NULL;
 	const char* diffPath = NULL;
 	const char* efbPath  = NULL;
+	bool cpuXf           = false;
 	for (int i = 3; i + 1 < argc; i += 2) {
+		if (!strcmp(argv[i], "--cpu-xf")) cpuXf = atoi(argv[i + 1]) != 0;
 		if (!strcmp(argv[i], "--ref")) refPath = argv[i + 1];
 		if (!strcmp(argv[i], "--diff")) diffPath = argv[i + 1];
 		if (!strcmp(argv[i], "--efb")) efbPath = argv[i + 1];
@@ -48,6 +52,7 @@ int main(int argc, char** argv)
 		gfx::Renderer* r = new gfx::Renderer(cp, mem, *dev);
 		sRenderer        = r;
 		r->setLogger(logLine);
+		r->setGpuTransform(!cpuXf);
 		cp.setMemory(&mem);
 		cp.setListener(r);
 		cp.setState(trace.state);
@@ -62,9 +67,13 @@ int main(int argc, char** argv)
 		       st.draws, st.skippedDraws, st.lineDraws, st.pointDraws, st.batches, st.triangles, st.culled, st.programs,
 		       st.programErrors, st.programBinds, st.textureUploads, st.textureUploadBytes >> 10, st.missingTextures, st.copies,
 		       st.copyUses, st.presents, st.clears);
+		printf("  transform: %llu draws by vertex programs, %llu on the CPU; %llu vertex programs (%llu failed), %llu loads; %llu matrix "
+		       "rows and %llu set-ups loaded\n",
+		       st.gpuDraws, st.cpuDraws, st.xfPrograms, st.xfProgramErrors, st.vertexProgramLoads, st.paletteRows, st.setupUploads);
 		const SoftDevice::Stats& ds = dev->stats();
-		printf("  soft RSX: %llu triangles, %llu pixels (%llu killed, %llu written), %llu bad instructions\n", ds.triangles,
-		       ds.pixels, ds.killed, ds.written, ds.programErrors);
+		printf("  soft RSX: %llu triangles (%llu culled), %llu pixels (%llu killed, %llu written), %llu bad instructions, %llu "
+		       "vertices through programs (%llu bad instructions)\n",
+		       ds.triangles, ds.culled, ds.pixels, ds.killed, ds.written, ds.programErrors, ds.programVertices, ds.badVpInstructions);
 		delete r;
 	}
 	const gfx::u32 W = dev->displayWidth(), H = dev->displayHeight();

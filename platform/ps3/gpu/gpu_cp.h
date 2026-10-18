@@ -189,6 +189,14 @@ struct VertexLayout {
 	u8 texMode[8], texType[8], texCount[8], texFrac[8]; // texCount: 1 or 2
 	u8 byteDequant;
 	u32 size; // bytes per vertex in the command stream
+	// where each attribute (its value or index) is in a vertex in the command stream
+	u16 offTexMtx[8], offPos, offNrm, offClr[2], offTex[8];
+	// the attributes that come from arrays
+	struct Indexed {
+		u8 array, mode, indices; // Array, ATTR_INDEX8/16, indices per vertex (3 for separate normal/NBT indices)
+		u16 offset, elemSize;
+	} indexed[12];
+	u8 indexedCount;
 };
 
 struct Vertex {
@@ -202,6 +210,15 @@ struct Vertex {
 	u8 texmtx[8];
 };
 
+// An indexed attribute's array for one draw: the elements the draw's indices reach.
+struct VertexArray {
+	const u8* data; // element minIndex (NULL: not readable)
+	u32 minIndex, maxIndex;
+	u32 stride;     // bytes between elements
+	u32 elemSize;   // bytes the attribute reads
+	bool used;
+};
+
 struct DrawCall {
 	u8 primitive;   // Primitive
 	u8 vat;         // vertex format 0-7
@@ -210,7 +227,28 @@ struct DrawCall {
 	const VertexLayout* layout;
 	const Vertex* vertices; // decoded, count entries; NULL unless the listener asked for VERTICES_DECODED
 	const u8* data;         // the vertices as in the command stream (count * layout->size bytes)
+	const VertexArray* arrays; // by Array (ARRAY_POS ..), unless the listener asked for VERTICES_NONE
 };
+
+// Where gatherVertices puts each attribute of a vertex (byte offsets; NO_OFFSET: not wanted). Positions are
+// 3 floats (z 0 for 2-component positions), normals 3 floats, colors R G B A bytes, texture coordinates 2
+// floats (t 0 for 1-component ones). Matrix indices are bytes: index[0] the position matrix, index[1 + n]
+// texture coordinate n's matrix, each mapped through its table (MATINDEX values for missing ones).
+struct GatherSpec {
+	enum { NO_OFFSET = 0xFFFF };
+	u32 stride;
+	u16 pos, nrm, clr[2], tex[8];
+	u16 index;      // first index byte
+	u8 indexCount;  // index bytes written (1 + texture matrices)
+	const u8* posMap; // [64] position matrix row -> byte
+	const u8* texMap; // [64] texture matrix row -> byte
+};
+
+// Sizes in the command stream: a component of each type (CompType), a color of each format (ColorFormat).
+extern const u8 kCompSize[8];
+extern const u8 kColorSize[8];
+// A color in the command stream as R, G, B, A bytes.
+void readColor(const u8* p, u32 format, u8* out);
 
 // How much of a draw's vertex data the processor works out (Listener::vertexDetail).
 enum VertexDetail {
@@ -247,6 +285,8 @@ public:
 	virtual void drawDone() { }                         // BP 0x45: raise the PE finish interrupt
 	virtual void token(u16 value, bool interrupt) { (void)value; (void)interrupt; } // BP 0x47/0x48
 	virtual void bpWritten(u32 reg, u32 value) { (void)reg; (void)value; }
+	// XF memory or registers [address, address + count) were loaded (after the values are in State::xf)
+	virtual void xfWritten(u32 address, u32 count) { (void)address; (void)count; }
 	virtual void badCommand(u8 opcode, const u8* where, u32 available, bool inDisplayList)
 	{
 		(void)opcode;
@@ -320,9 +360,21 @@ public:
 		if (!(mLayoutValid & (1u << vat))) {
 			layoutFor(vat, mLayouts[vat]);
 			mLayoutValid |= (u8)(1u << vat);
+			mLayoutVersion++;
 		}
 		return mLayouts[vat];
 	}
+	// Counts layout recomputations: unchanged, the layouts are unchanged (and at the same addresses).
+	u32 layoutVersion() const { return mLayoutVersion; }
+
+	// Decodes a draw's vertices now (for a listener that asked for less: call from Listener::draw). NULL if
+	// the decode buffer could not grow.
+	const Vertex* decodeDraw(const DrawCall& call);
+	// The matrix rows a draw's vertices use: bit per row (0-63) for the position matrix and for texture
+	// coordinate n's matrix (n < texCount). Needs DrawCall::arrays (any detail but VERTICES_NONE).
+	void matrixRows(const DrawCall& call, u32 texCount, u64* pos, u64* tex) const;
+	// Writes a draw's vertices as the spec says (to out, call.count * spec.stride bytes).
+	void gatherVertices(const DrawCall& call, const GatherSpec& spec, u8* out) const;
 
 	// Length of the command at p (avail bytes there), or 0 if more bytes are needed to tell.
 	u32 commandLength(const u8* p, u32 avail);
@@ -369,6 +421,8 @@ private:
 	// decoded vertices of the current draw
 	Vertex* mVerts;
 	u32 mVertCap;
+	VertexArray mArrays[12];
+	u32 mLayoutVersion;
 };
 
 } // namespace gpu

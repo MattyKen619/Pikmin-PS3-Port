@@ -1007,7 +1007,7 @@ static void reportThreads(const char* title)
 	ps3Log("[ps3] %s: last SDK call \"%s\", %u retraces, %u frames drawn; interrupts %s%s, %u pending, %u dropped, %s; %s%s\n",
 	       title, sLastActivity, ps3FrameCounter(), ps3FramesDrawn(), sIntrEnabled ? "on" : "OFF",
 	       sInInterrupt ? " (in handler)" : "", (unsigned)(sIntrTail - sIntrHead), (unsigned)sIntrDropped, waits, audio, nans);
-	char gfx[800];
+	char gfx[1200];
 	ps3GxStatus(gfx, sizeof(gfx));
 	ps3Log("[ps3]   %s\n", gfx);
 	ps3RsxStatus(gfx, sizeof(gfx));

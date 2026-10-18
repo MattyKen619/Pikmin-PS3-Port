@@ -14,8 +14,8 @@ static inline u32 be16(const u8* p) { return ((u32)p[0] << 8) | p[1]; }
 static inline u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 static inline u32 bits(u32 v, u32 shift, u32 count) { return (v >> shift) & ((1u << count) - 1); }
 
-static const u8 kCompSize[8] = { 1, 1, 2, 2, 4, 4, 4, 4 };
-static const u8 kColorSize[8] = { 2, 3, 4, 2, 3, 4, 4, 4 };
+const u8 kCompSize[8]  = { 1, 1, 2, 2, 4, 4, 4, 4 };
+const u8 kColorSize[8] = { 2, 3, 4, 2, 3, 4, 4, 4 };
 
 // Integer to float conversions by table: on the PS3's PPU a conversion goes through memory (a store and
 // a load of the same address, which stalls the pipeline for dozens of cycles). 16-bit values are the
@@ -51,10 +51,12 @@ CommandProcessor::CommandProcessor()
     , mLayoutValid(0)
     , mVerts(NULL)
     , mVertCap(0)
+    , mLayoutVersion(0)
 {
 	memset(&mState, 0, sizeof(mState));
 	memset(&mStats, 0, sizeof(mStats));
 	memset(mLayouts, 0, sizeof(mLayouts));
+	memset(mArrays, 0, sizeof(mArrays));
 	for (int i = 0; i < 256; i++) {
 		sU8Float[i] = (float)i;
 		sS8Float[i] = (float)(s8)i;
@@ -311,6 +313,9 @@ void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
 			mStats.xfOutOfRange++;
 		}
 	}
+	if (mListener) {
+		mListener->xfWritten(address, count);
+	}
 }
 
 void CommandProcessor::loadIndexed(u32 op, u32 word)
@@ -338,6 +343,9 @@ void CommandProcessor::loadIndexed(u32 op, u32 word)
 		if (a < sizeof(mState.xf) / sizeof(mState.xf[0])) {
 			mState.xf[a] = be32(src + i * 4);
 		}
+	}
+	if (mListener) {
+		mListener->xfWritten(xfAddr, count);
 	}
 }
 
@@ -431,6 +439,34 @@ void CommandProcessor::callDisplayList(u32 address, u32 size)
 
 // ---------------------------------------------------------------- vertex formats
 
+// Where each attribute is in a stream vertex.
+static void streamOffsets(VertexLayout& L)
+{
+	static const u8 kIndexSize[4] = { 0, 0, 1, 2 };
+	u32 off = L.pnmtx;
+	for (int i = 0; i < 8; i++) {
+		L.offTexMtx[i] = (u16)off;
+		off += L.texmtx[i];
+	}
+	L.offPos = (u16)off;
+	off += L.posMode == ATTR_DIRECT ? L.posCount * kCompSize[L.posType] : kIndexSize[L.posMode];
+	L.offNrm           = (u16)off;
+	const u32 nrmIdxN = (L.nrmNbt && L.nrmIndex3) ? 3 : 1;
+	if (L.nrmMode == ATTR_DIRECT) {
+		off += (L.nrmNbt ? 9 : 3) * kCompSize[L.nrmType];
+	} else {
+		off += kIndexSize[L.nrmMode] * nrmIdxN;
+	}
+	for (int i = 0; i < 2; i++) {
+		L.offClr[i] = (u16)off;
+		off += L.clrMode[i] == ATTR_DIRECT ? kColorSize[L.clrFormat[i]] : kIndexSize[L.clrMode[i]];
+	}
+	for (int i = 0; i < 8; i++) {
+		L.offTex[i] = (u16)off;
+		off += L.texMode[i] == ATTR_DIRECT ? L.texCount[i] * kCompSize[L.texType[i]] : kIndexSize[L.texMode[i]];
+	}
+}
+
 void CommandProcessor::layoutFor(u32 vat, VertexLayout& L) const
 {
 	memset(&L, 0, sizeof(L));
@@ -508,6 +544,33 @@ void CommandProcessor::layoutFor(u32 vat, VertexLayout& L) const
 		}
 	}
 	L.size = size;
+	streamOffsets(L);
+
+	// attributes from arrays
+	u32 n = 0;
+	const u32 nrmIdxN = (L.nrmNbt && L.nrmIndex3) ? 3 : 1;
+	const u32 nrmElem = (L.nrmNbt && !L.nrmIndex3) ? 9 : 3;
+	if (L.posMode >= ATTR_INDEX8) {
+		VertexLayout::Indexed x = { ARRAY_POS, L.posMode, 1, L.offPos, (u16)(L.posCount * kCompSize[L.posType]) };
+		L.indexed[n++] = x;
+	}
+	if (L.nrmMode >= ATTR_INDEX8) {
+		VertexLayout::Indexed x = { ARRAY_NRM, L.nrmMode, (u8)nrmIdxN, L.offNrm, (u16)(nrmElem * kCompSize[L.nrmType]) };
+		L.indexed[n++] = x;
+	}
+	for (int i = 0; i < 2; i++) {
+		if (L.clrMode[i] >= ATTR_INDEX8) {
+			VertexLayout::Indexed x = { (u8)(ARRAY_CLR0 + i), L.clrMode[i], 1, L.offClr[i], kColorSize[L.clrFormat[i]] };
+			L.indexed[n++] = x;
+		}
+	}
+	for (int i = 0; i < 8; i++) {
+		if (L.texMode[i] >= ATTR_INDEX8) {
+			VertexLayout::Indexed x = { (u8)(ARRAY_TEX0 + i), L.texMode[i], 1, L.offTex[i], (u16)(L.texCount[i] * kCompSize[L.texType[i]]) };
+			L.indexed[n++] = x;
+		}
+	}
+	L.indexedCount = (u8)n;
 }
 
 // ---------------------------------------------------------------- vertex decoding
@@ -536,7 +599,7 @@ static inline float readComp(const u8* p, u32 type, float scale)
 	}
 }
 
-static void readColor(const u8* p, u32 format, u8* out)
+void readColor(const u8* p, u32 format, u8* out)
 {
 	switch (format) {
 	case CLR_RGB565:
@@ -583,19 +646,6 @@ static void readColor(const u8* p, u32 format, u8* out)
 	}
 }
 
-namespace {
-
-// One attribute's source for a draw: the stream, or an array (read once per draw).
-struct ArraySource {
-	const u8* data; // array memory from base + minIndex * stride
-	u32 minIndex;
-	u32 maxIndex;
-	u32 stride;
-	u32 elemSize;
-	bool used;
-};
-
-} // namespace
 
 void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32 count, bool decode)
 {
@@ -614,71 +664,48 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 		mVertCap = cap;
 	}
 
-	// Pass 1: offsets of each attribute in a stream vertex, and the index ranges of indexed attributes.
+	// Pass 1: the index ranges of indexed attributes.
 	static const u8 kIndexSize[4] = { 0, 0, 1, 2 };
-	u32 off = L.pnmtx;
-	u32 texMtxOff[8];
-	for (int i = 0; i < 8; i++) {
-		texMtxOff[i] = off;
-		off += L.texmtx[i];
-	}
-	const u32 posOff = off;
-	off += L.posMode == ATTR_DIRECT ? L.posCount * kCompSize[L.posType] : kIndexSize[L.posMode];
-	const u32 nrmOff  = off;
-	const u32 nrmIdxN = (L.nrmNbt && L.nrmIndex3) ? 3 : 1;
-	if (L.nrmMode == ATTR_DIRECT) {
-		off += (L.nrmNbt ? 9 : 3) * kCompSize[L.nrmType];
-	} else {
-		off += kIndexSize[L.nrmMode] * nrmIdxN;
-	}
-	u32 clrOff[2];
-	for (int i = 0; i < 2; i++) {
-		clrOff[i] = off;
-		off += L.clrMode[i] == ATTR_DIRECT ? kColorSize[L.clrFormat[i]] : kIndexSize[L.clrMode[i]];
-	}
-	u32 texOff[8];
-	for (int i = 0; i < 8; i++) {
-		texOff[i] = off;
-		off += L.texMode[i] == ATTR_DIRECT ? L.texCount[i] * kCompSize[L.texType[i]] : kIndexSize[L.texMode[i]];
-	}
+	const u32 posOff  = L.offPos;
+	const u32 nrmOff  = L.offNrm;
+	const u16* clrOff = L.offClr;
+	const u16* texOff = L.offTex;
+	const u16* texMtxOff = L.offTexMtx;
 
-	ArraySource src[12];
-	memset(src, 0, sizeof(src));
-	const u32 nrmElem = (L.nrmNbt && !L.nrmIndex3) ? 9 : 3;
-	struct Attr {
-		u32 array, mode, offset, elemSize, indices;
-	} attrs[12];
-	int nattrs = 0;
-	if (L.posMode >= ATTR_INDEX8) {
-		attrs[nattrs++] = { ARRAY_POS, L.posMode, posOff, (u32)L.posCount * kCompSize[L.posType], 1 };
+	VertexArray* src = mArrays;
+	for (int k = 0; k < 12; k++) {
+		src[k].data = NULL, src[k].used = false;
 	}
-	if (L.nrmMode >= ATTR_INDEX8) {
-		attrs[nattrs++] = { ARRAY_NRM, L.nrmMode, nrmOff, nrmElem * kCompSize[L.nrmType], nrmIdxN };
-	}
-	for (int i = 0; i < 2; i++) {
-		if (L.clrMode[i] >= ATTR_INDEX8) {
-			attrs[nattrs++] = { (u32)(ARRAY_CLR0 + i), L.clrMode[i], clrOff[i], kColorSize[L.clrFormat[i]], 1 };
-		}
-	}
-	for (int i = 0; i < 8; i++) {
-		if (L.texMode[i] >= ATTR_INDEX8) {
-			attrs[nattrs++] = { (u32)(ARRAY_TEX0 + i), L.texMode[i], texOff[i], (u32)L.texCount[i] * kCompSize[L.texType[i]], 1 };
-		}
-	}
-	for (int k = 0; k < nattrs; k++) {
-		const Attr& A   = attrs[k];
-		ArraySource& S  = src[A.array];
+	for (u32 k = 0; k < L.indexedCount; k++) {
+		const VertexLayout::Indexed& A = L.indexed[k];
+		VertexArray& S                 = src[A.array];
 		u32 lo = 0xFFFFFFFF, hi = 0;
 		const u32 isz   = kIndexSize[A.mode];
-		for (u32 v = 0; v < count; v++) {
-			const u8* p = data + v * L.size + A.offset;
-			for (u32 n = 0; n < A.indices; n++) {
-				u32 idx = isz == 1 ? p[n] : be16(p + n * 2);
-				if (A.array == ARRAY_POS && idx == (isz == 1 ? 0xFFu : 0xFFFFu)) {
-					continue; // "skip this vertex" marker, not an array element
+		const u32 skip  = A.array == ARRAY_POS ? (isz == 1 ? 0xFFu : 0xFFFFu) : 0xFFFFFFFFu; // ("skip this vertex")
+		const u8* p     = data + A.offset;
+		if (A.indices == 1 && isz == 1) {
+			for (u32 v = 0; v < count; v++, p += L.size) {
+				const u32 idx = p[0];
+				if (idx != skip) {
+					lo = idx < lo ? idx : lo;
+					hi = idx > hi ? idx : hi;
 				}
-				lo = idx < lo ? idx : lo;
-				hi = idx > hi ? idx : hi;
+			}
+		} else if (A.indices == 1) {
+			for (u32 v = 0; v < count; v++, p += L.size) {
+				const u32 idx = ((u32)p[0] << 8) | p[1];
+				if (idx != skip) {
+					lo = idx < lo ? idx : lo;
+					hi = idx > hi ? idx : hi;
+				}
+			}
+		} else {
+			for (u32 v = 0; v < count; v++, p += L.size) {
+				for (u32 n = 0; n < A.indices; n++) {
+					const u32 idx = isz == 1 ? p[n] : be16(p + n * 2);
+					lo = idx < lo ? idx : lo;
+					hi = idx > hi ? idx : hi;
+				}
 			}
 		}
 		if (count == 0 || lo > hi) {
@@ -767,7 +794,7 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 			if (L.posMode == ATTR_DIRECT) {
 				q = p + posOff;
 			} else {
-				const ArraySource& S = src[ARRAY_POS];
+				const VertexArray& S = src[ARRAY_POS];
 				u32 idx = L.posMode == ATTR_INDEX8 ? p[posOff] : be16(p + posOff);
 				q       = (S.data && idx >= S.minIndex && idx <= S.maxIndex) ? S.data + (idx - S.minIndex) * S.stride : NULL;
 			}
@@ -791,7 +818,7 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 				if (L.nrmMode == ATTR_DIRECT) {
 					q = p + nrmOff + n * 3 * cs;
 				} else {
-					const ArraySource& S = src[ARRAY_NRM];
+					const VertexArray& S = src[ARRAY_NRM];
 					u32 which = (L.nrmNbt && L.nrmIndex3) ? n : 0;
 					u32 isz   = kIndexSize[L.nrmMode];
 					u32 idx   = isz == 1 ? p[nrmOff + which] : be16(p + nrmOff + which * 2);
@@ -819,7 +846,7 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 			if (L.clrMode[i] == ATTR_DIRECT) {
 				q = p + clrOff[i];
 			} else {
-				const ArraySource& S = src[ARRAY_CLR0 + i];
+				const VertexArray& S = src[ARRAY_CLR0 + i];
 				u32 idx = L.clrMode[i] == ATTR_INDEX8 ? p[clrOff[i]] : be16(p + clrOff[i]);
 				q       = (S.data && idx >= S.minIndex && idx <= S.maxIndex) ? S.data + (idx - S.minIndex) * S.stride : NULL;
 			}
@@ -837,7 +864,7 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 			if (L.texMode[i] == ATTR_DIRECT) {
 				q = p + texOff[i];
 			} else {
-				const ArraySource& S = src[ARRAY_TEX0 + i];
+				const VertexArray& S = src[ARRAY_TEX0 + i];
 				u32 idx = L.texMode[i] == ATTR_INDEX8 ? p[texOff[i]] : be16(p + texOff[i]);
 				q       = (S.data && idx >= S.minIndex && idx <= S.maxIndex) ? S.data + (idx - S.minIndex) * S.stride : NULL;
 			}
@@ -849,6 +876,192 @@ void CommandProcessor::decodeVertices(const VertexLayout& L, const u8* data, u32
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------- vertices for a vertex program
+
+namespace {
+
+// The attribute's data for the vertex at p: in the stream, or the array element its index picks.
+inline const u8* element(u32 mode, const u8* at, const VertexArray& A)
+{
+	if (mode == ATTR_DIRECT) {
+		return at;
+	}
+	const u32 idx = mode == ATTR_INDEX8 ? at[0] : ((u32)at[0] << 8 | at[1]);
+	return (A.data && idx >= A.minIndex && idx <= A.maxIndex) ? A.data + (idx - A.minIndex) * A.stride : NULL;
+}
+
+} // namespace
+
+void CommandProcessor::matrixRows(const DrawCall& call, u32 texCount, u64* pos, u64* tex) const
+{
+	const VertexLayout& L = *call.layout;
+	const u32 matA = mState.cp[0x30];
+	const u32 matB = mState.cp[0x40];
+	if (L.pnmtx) {
+		u64 m = 0;
+		for (u32 v = 0; v < call.count; v++) {
+			m |= 1ULL << (call.data[v * L.size] & 63);
+		}
+		*pos = m;
+	} else {
+		*pos = 1ULL << bits(matA, 0, 6);
+	}
+	for (u32 n = 0; n < texCount && n < 8; n++) {
+		if (L.texmtx[n]) {
+			u64 m = 0;
+			for (u32 v = 0; v < call.count; v++) {
+				m |= 1ULL << (call.data[v * L.size + L.offTexMtx[n]] & 63);
+			}
+			tex[n] = m;
+		} else {
+			tex[n] = 1ULL << (n < 4 ? bits(matA, 6 + n * 6, 6) : bits(matB, (n - 4) * 6, 6));
+		}
+	}
+}
+
+namespace {
+
+template <u32 TYPE> inline float component(const u8* p, float scale);
+template <> inline float component<COMP_U8>(const u8* p, float scale) { return sU8Float[p[0]] * scale; }
+template <> inline float component<COMP_S8>(const u8* p, float scale) { return sS8Float[p[0]] * scale; }
+template <> inline float component<COMP_U16>(const u8* p, float scale) { return (sU16Hi[p[0]] + sU8Float[p[1]]) * scale; }
+template <> inline float component<COMP_S16>(const u8* p, float scale) { return (sS16Hi[p[0]] + sU8Float[p[1]]) * scale; }
+template <> inline float component<COMP_F32>(const u8* p, float scale) { return readComp(p, COMP_F32, scale); }
+
+// One attribute of every vertex as floats: `comps` components read, `want` written (missing ones 0).
+template <u32 TYPE>
+void gatherFloats(const u8* data, u32 size, u32 count, u32 mode, u32 off, const VertexArray& A, u32 comps, u32 want, float scale,
+                  u8* out, u32 stride)
+{
+	const u32 cs = TYPE == COMP_U8 || TYPE == COMP_S8 ? 1 : TYPE == COMP_U16 || TYPE == COMP_S16 ? 2 : 4;
+	const u8* p  = data + off;
+	for (u32 v = 0; v < count; v++, p += size, out += stride) {
+		// (array elements a few vertices ahead are fetched into the cache meanwhile: they are scattered,
+		// and a cache miss costs the PS3 hundreds of cycles)
+		if (mode >= ATTR_INDEX8 && v + 8 < count) {
+			const u8* e = element(mode, p + 8 * size, A);
+			if (e) {
+				__builtin_prefetch(e);
+			}
+		}
+		const u8* q = element(mode, p, A);
+		float* f    = (float*)out;
+		if (q) {
+			f[0] = component<TYPE>(q, scale);
+			f[1] = comps > 1 ? component<TYPE>(q + cs, scale) : 0.0f;
+			if (want > 2) {
+				f[2] = comps > 2 ? component<TYPE>(q + 2 * cs, scale) : 0.0f;
+			}
+		} else {
+			f[0] = f[1] = 0.0f;
+			if (want > 2) {
+				f[2] = 0.0f;
+			}
+		}
+	}
+}
+
+void gatherAttribute(const u8* data, u32 size, u32 count, u32 mode, u32 type, u32 off, const VertexArray& A, u32 comps, u32 want,
+                     float scale, u8* out, u32 stride)
+{
+	if (mode == ATTR_NONE) {
+		for (u32 v = 0; v < count; v++, out += stride) {
+			float* f = (float*)out;
+			f[0] = f[1] = 0.0f;
+			if (want > 2) {
+				f[2] = 0.0f;
+			}
+		}
+		return;
+	}
+	switch (type) {
+	case COMP_U8: gatherFloats<COMP_U8>(data, size, count, mode, off, A, comps, want, scale, out, stride); break;
+	case COMP_S8: gatherFloats<COMP_S8>(data, size, count, mode, off, A, comps, want, scale, out, stride); break;
+	case COMP_U16: gatherFloats<COMP_U16>(data, size, count, mode, off, A, comps, want, scale, out, stride); break;
+	case COMP_S16: gatherFloats<COMP_S16>(data, size, count, mode, off, A, comps, want, scale, out, stride); break;
+	default: gatherFloats<COMP_F32>(data, size, count, mode, off, A, comps, want, scale, out, stride); break;
+	}
+}
+
+} // namespace
+
+void CommandProcessor::gatherVertices(const DrawCall& call, const GatherSpec& G, u8* out) const
+{
+	PhaseScope phase(GFX_DECODE);
+	const VertexLayout& L = *call.layout;
+	const VertexArray* A  = call.arrays;
+	const u32 count       = call.count;
+	const u32 size        = L.size;
+	const u8* data        = call.data;
+	const u32 stride      = G.stride;
+
+	// matrix indices (attribute by attribute: the PS3's processor predicts the branches)
+	if (G.indexCount) {
+		const u32 matA = mState.cp[0x30];
+		const u32 matB = mState.cp[0x40];
+		const u8 pn    = G.posMap[bits(matA, 0, 6)];
+		u8* ix         = out + G.index;
+		const u8* p    = data;
+		for (u32 v = 0; v < count; v++, p += size, ix += stride) {
+			ix[0] = L.pnmtx ? G.posMap[p[0] & 63] : pn;
+		}
+		for (u32 t = 1; t < G.indexCount; t++) {
+			const u32 n   = t - 1;
+			ix            = out + G.index + t;
+			p             = data + L.offTexMtx[n];
+			if (L.texmtx[n]) {
+				for (u32 v = 0; v < count; v++, p += size, ix += stride) {
+					ix[0] = G.texMap[p[0] & 63];
+				}
+			} else {
+				const u8 m = G.texMap[n < 4 ? bits(matA, 6 + n * 6, 6) : bits(matB, (n - 4) * 6, 6)];
+				for (u32 v = 0; v < count; v++, ix += stride) {
+					ix[0] = m;
+				}
+			}
+		}
+	}
+	// position
+	gatherAttribute(data, size, count, L.posMode, L.posType, L.offPos, A[ARRAY_POS], L.posCount, 3,
+	                L.posType == COMP_F32 ? 1.0f : sPow2Inv[L.posFrac & 31], out + G.pos, stride);
+	// normal
+	if (G.nrm != GatherSpec::NO_OFFSET) {
+		gatherAttribute(data, size, count, L.nrmMode, L.nrmType, L.offNrm, A[ARRAY_NRM], 3, 3,
+		                (L.nrmType == COMP_S8 || L.nrmType == COMP_U8) ? 1.0f / 64.0f : 1.0f / 16384.0f, out + G.nrm, stride);
+	}
+	// colors
+	for (int i = 0; i < 2; i++) {
+		if (G.clr[i] == GatherSpec::NO_OFFSET) {
+			continue;
+		}
+		u8* c       = out + G.clr[i];
+		const u8* p = data + L.offClr[i];
+		const u32 mode = L.clrMode[i], format = L.clrFormat[i];
+		const VertexArray& CA = A[ARRAY_CLR0 + i];
+		for (u32 v = 0; v < count; v++, p += size, c += stride) {
+			const u8* q = mode != ATTR_NONE ? element(mode, p, CA) : NULL;
+			if (q) {
+				readColor(q, format, c);
+			} else {
+				c[0] = c[1] = c[2] = c[3] = 0;
+			}
+		}
+	}
+	// texture coordinates
+	for (int i = 0; i < 8; i++) {
+		if (G.tex[i] != GatherSpec::NO_OFFSET) {
+			gatherAttribute(data, size, count, L.texMode[i], L.texType[i], L.offTex[i], A[ARRAY_TEX0 + i], L.texCount[i], 2,
+			                L.texType[i] == COMP_F32 ? 1.0f : sPow2Inv[L.texFrac[i] & 31], out + G.tex[i], stride);
+		}
+	}
+}
+
+const Vertex* CommandProcessor::decodeDraw(const DrawCall& call)
+{
+	decodeVertices(*call.layout, call.data, call.count, true);
+	return call.count <= mVertCap ? mVerts : NULL;
 }
 
 void CommandProcessor::drawCommand(const u8* data, bool inDisplayList)
@@ -872,6 +1085,7 @@ void CommandProcessor::drawCommand(const u8* data, bool inDisplayList)
 		call.layout        = &L;
 		call.vertices      = (detail == VERTICES_DECODED && count <= mVertCap) ? mVerts : NULL;
 		call.data          = data + 3;
+		call.arrays        = detail != VERTICES_NONE ? mArrays : NULL;
 		mListener->draw(call);
 	}
 }

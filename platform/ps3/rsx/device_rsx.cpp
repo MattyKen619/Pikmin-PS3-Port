@@ -72,6 +72,10 @@ RsxDevice::RsxDevice()
     , mInvalidateTextures(true)
     , mReadLabelValue(1)
     , mLocalUsed(0)
+    , mVertexProgram(NULL)
+    , mVertexProgramValid(false)
+    , mFrontFaceSign(0)
+    , mVertexProgramsWork(false)
 {
 	memset(&mState, 0, sizeof(mState));
 	memset(&mEfbTexture, 0, sizeof(mEfbTexture));
@@ -171,11 +175,7 @@ bool RsxDevice::init()
 		rsxTextureControl(ctx, (u8)i, GCM_FALSE, 0, 12 << 8, GCM_TEXTURE_MAX_ANISO_1);
 	}
 	mBoundTexCoords = 0;
-	const rsxVertexProgram* vp = (const rsxVertexProgram*)kPassthroughVpo;
-	void* vpUcode;
-	u32 vpSize;
-	rsxVertexProgramGetUCode(vp, &vpUcode, &vpSize);
-	rsxLoadVertexProgram(ctx, vp, vpUcode);
+	setVertexProgram(NULL);
 	setTarget(NULL);
 	rsxFlushBuffer(ctx);
 	sDevice = this;
@@ -384,6 +384,12 @@ void RsxDevice::applyState(const RenderState& s, bool all)
 	if (all || s.scissor[0] != o.scissor[0] || s.scissor[1] != o.scissor[1] || s.scissor[2] != o.scissor[2] || s.scissor[3] != o.scissor[3]) {
 		rsxSetScissor(ctx, s.scissor[0], s.scissor[1], s.scissor[2], s.scissor[3]);
 	}
+	if (all || s.cullFace != o.cullFace) {
+		rsxSetCullFaceEnable(ctx, s.cullFace ? GCM_TRUE : GCM_FALSE);
+		if (s.cullFace) {
+			rsxSetCullFace(ctx, s.cullFace == CULL_FRONT ? GCM_CULL_FRONT : GCM_CULL_BACK);
+		}
+	}
 	if (all || memcmp(s.viewportScale, o.viewportScale, sizeof(s.viewportScale)) != 0
 	    || memcmp(s.viewportOffset, o.viewportOffset, sizeof(s.viewportOffset)) != 0) {
 		f32 scale[4]  = { s.viewportScale[0], s.viewportScale[1], s.viewportScale[2], 0.0f };
@@ -465,6 +471,61 @@ void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 		rsxBindVertexArrayAttrib(ctx, (u8)(GCM_VERTEX_ATTRIB_TEX0 + t), 0, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
 	}
 	mBoundTexCoords = texCoords;
+}
+
+void RsxDevice::setVertexProgram(const VertexProgram* program)
+{
+	checkStop();
+	if (mVertexProgramValid && program == mVertexProgram) {
+		return;
+	}
+	gcmContextData* ctx = CTX;
+	if (!program) {
+		const rsxVertexProgram* vp = (const rsxVertexProgram*)kPassthroughVpo;
+		void* vpUcode;
+		u32 vpSize;
+		rsxVertexProgramGetUCode(vp, &vpUcode, &vpSize);
+		rsxLoadVertexProgram(ctx, vp, vpUcode);
+	} else {
+		// (the program header PSL1GHT's loader reads: where, how much, which inputs and outputs)
+		rsxVertexProgram h;
+		memset(&h, 0, sizeof(h));
+		h.num_regs    = (u16)program->numRegs;
+		h.num_insn    = (u16)program->instructions;
+		h.input_mask  = program->inputMask;
+		h.output_mask = program->outputMask;
+		h.insn_start  = 0;
+		rsxLoadVertexProgramBlock(ctx, &h, &program->ucode[0]);
+	}
+	mVertexProgram      = program;
+	mVertexProgramValid = true;
+}
+
+void RsxDevice::setVertexConstants(u32 first, u32 count, const float* values)
+{
+	checkStop();
+	// (in pieces of at most 7: PSL1GHT's loader copies blocks of 8 or more wrongly)
+	for (u32 i = 0; i < count; i += 7) {
+		const u32 n = count - i < 7 ? count - i : 7;
+		rsxSetVertexProgramConstants(CTX, first + i, n * 4, values + i * 4);
+	}
+}
+
+void RsxDevice::setVertexFormat(const void* base, const VertexFormat& f)
+{
+	checkStop();
+	gcmContextData* ctx = CTX;
+	const u32 o         = offsetOf(base);
+	rsxInvalidateVertexCache(ctx);
+	for (u32 i = 0; i < 16; i++) {
+		const VertexAttrib& a = f.attr[i];
+		if (a.components) {
+			rsxBindVertexArrayAttrib(ctx, (u8)i, 0, o + a.offset, (u8)f.stride, a.components, a.type, GCM_LOCATION_CELL);
+		} else {
+			rsxBindVertexArrayAttrib(ctx, (u8)i, 0, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
+		}
+	}
+	mBoundTexCoords = 8; // (setVertices turns off what it does not use)
 }
 
 void RsxDevice::drawTriangles(const unsigned short* indices, u32 count)
@@ -693,6 +754,98 @@ void RsxDevice::selfTest()
 	allOk &= ok;
 	NOTE(", partial clear %s", ok ? "ok" : "WRONG");
 	if (!ok) NOTE(" (%08x %08x)", cIn, cOut);
+
+	// 9. the renderer's vertex programs: a constant picked by a byte index in the vertex (relative
+	// addressing, unscaled byte attributes), and which triangles the RSX culls as front faces
+	{
+		using namespace vp;
+		Builder b;
+		b.add(DT(0), V(6), C(1)("y"));       // index + base
+		b.arl(T(0)("x"));
+		b.mov(DT(1, M_XYZ), V(0));
+		b.mov(DT(1, M_W), C(0)("y"));        // w = 1
+		b.mov(DO(O_HPOS), T(1));
+		b.mov(DO(O_COL0), CRel(2, 0));       // c[A0.x + 2]
+		b.mov(DO(O_COL1), C(0)("x"));
+		VertexProgram* prog = create<VertexProgram>();
+		const char* vpError = NULL;
+		bool built = b.finish(*prog, &vpError);
+		if (!built) {
+			NOTE(", vertex programs NOT BUILT (%s)", vpError ? vpError : "?");
+		} else {
+			float k[2][4] = { { 0, 1, 0.5f, 2 }, { 0, 100, 0, 0 } };
+			float colors[8][4];
+			for (int i = 0; i < 8; i++) {
+				colors[i][0] = colors[i][1] = colors[i][2] = 0, colors[i][3] = 1;
+			}
+			colors[0][0] = 1;              // 0: red
+			colors[5][1] = 1;              // 5: green
+			colors[7][2] = 1;              // 7: blue
+			setVertexConstants(0, 2, &k[0][0]);
+			setVertexConstants(100, 8, &colors[0][0]);
+			setVertexProgram(prog);
+			VertexFormat vf;
+			memset(&vf, 0, sizeof(vf));
+			vf.stride             = 16;
+			vf.attr[0].components = 3, vf.attr[0].type = ATTRIB_F32, vf.attr[0].offset = 0;
+			vf.attr[6].components = 4, vf.attr[6].type = ATTRIB_U8, vf.attr[6].offset = 12;
+			u8* tv = verts + quads * 4 * 64 + 4096; // (after the quads drawn so far)
+			auto put = [&](int i, float px, float py, u8 index) {
+				float* f = (float*)(tv + i * 16);
+				f[0]     = px / EFB_WIDTH * 2.0f - 1.0f;
+				f[1]     = 1.0f - py / EFB_HEIGHT * 2.0f;
+				f[2]     = 0.0f;
+				u8* ix   = tv + i * 16 + 12;
+				ix[0] = index, ix[1] = ix[2] = ix[3] = 0;
+			};
+			setProgram(fpColor, colorFp);
+			setState(rs);
+			// a quad with index 3 (c[100 + 3 + 2]: green); then the constant changes (yellow) and a second quad
+			// uses it: the first must stay green (constants change in order with the draws)
+			put(0, 100, 400, 3), put(1, 200, 400, 3), put(2, 200, 450, 3), put(3, 100, 450, 3);
+			put(4, 210, 400, 3), put(5, 260, 400, 3), put(6, 260, 450, 3), put(7, 210, 450, 3);
+			setVertexFormat(tv, vf);
+			static const unsigned short qi[6] = { 0, 1, 2, 0, 2, 3 };
+			static const unsigned short qi2[6] = { 4, 5, 6, 4, 6, 7 };
+			drawTriangles(qi, 6);
+			const float yellow[4] = { 1, 1, 0, 1 };
+			setVertexConstants(105, 1, yellow);
+			drawTriangles(qi2, 6);
+			u32 g = pixel(150, 425), y = pixel(235, 425);
+			bool relOk = g == 0xFF00FF00 && y == 0xFFFFFF00;
+			// a triangle with a positive screen area (GameCube convention), culled as front, then as back
+			u32 seen[2];
+			for (int pass = 0; pass < 2; pass++) {
+				u8* tri = tv + 128 + pass * 64;
+				u8* save = tv;
+				tv = tri;
+				const float x0 = 300 + pass * 120, y0 = 400, x1 = x0 + 100, y1 = 450;
+				put(0, x0, y0, 5), put(1, x1, y0, 5), put(2, x0, y1, 5); // (c[107]: blue)
+				tv = save;
+				RenderState cs = rs;
+				cs.cullFace    = pass == 0 ? CULL_FRONT : CULL_BACK;
+				setState(cs);
+				setVertexFormat(tri, vf);
+				static const unsigned short ti[3] = { 0, 1, 2 };
+				drawTriangles(ti, 3);
+				seen[pass] = pixel((u32)x0 + 10, (u32)y0 + 10);
+			}
+			setState(rs);
+			const bool frontDrawn = seen[0] == 0xFF0000FF, backDrawn = seen[1] == 0xFF0000FF;
+			if (frontDrawn != backDrawn) {
+				// drawn while front faces were culled: the RSX's front faces have negative areas
+				mFrontFaceSign = frontDrawn ? -1 : +1;
+			}
+			mVertexProgramsWork = relOk && mFrontFaceSign != 0;
+			NOTE(", vertex programs %s", mVertexProgramsWork ? "ok" : "WRONG");
+			if (!relOk) NOTE(" (indexed constants %08x %08x)", g, y);
+			if (!mFrontFaceSign) NOTE(" (culling %08x %08x)", seen[0], seen[1]);
+			else NOTE(" (front faces %s)", mFrontFaceSign > 0 ? "positive" : "negative");
+			allOk &= mVertexProgramsWork;
+			setVertexProgram(NULL);
+		}
+		// (the program stays allocated: the RSX may still read its upload from the command buffer)
+	}
 
 	logf("[rsx] self-test: %s%s\n", report, allOk ? " - all good" : "");
 	clear(all, 0xFF000000, 0xFFFFFF, true, true, true);
