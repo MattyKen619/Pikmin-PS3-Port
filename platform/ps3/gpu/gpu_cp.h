@@ -239,7 +239,8 @@ struct GatherSpec {
 	u32 stride;
 	u16 pos, nrm, clr[2], tex[8];
 	u16 index;      // first index byte
-	u8 indexCount;  // index bytes written (1 + texture matrices)
+	u8 indexCount;  // indices written (1 + texture matrices)
+	u8 indexFloat;  // as floats (4 bytes each) instead of bytes
 	const u8* posMap; // [64] position matrix row -> byte
 	const u8* texMap; // [64] texture matrix row -> byte
 };

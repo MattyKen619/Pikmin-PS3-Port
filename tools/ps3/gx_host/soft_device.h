@@ -41,6 +41,8 @@ public:
 	void setVertexFormat(const void* base, const gfx::VertexFormat& format) override;
 	int frontFaceSign() override { return +1; } // (rasterize: front faces have positive window areas)
 	bool vertexProgramsWork() override { return true; }
+	gfx::u32 vertexIndexType() override { return mIndexType; }
+	void setVertexIndexType(gfx::u32 t) { mIndexType = t; } // (to try each kind of the renderer's programs)
 	void drawTriangles(const unsigned short* indices, gfx::u32 count) override;
 	void clear(const gfx::u16 rect[4], gfx::u32 argb, gfx::u32 depth, bool color, bool alpha, bool depthToo) override;
 	bool readTarget(gfx::u32* out, gfx::u32 x, gfx::u32 y, gfx::u32 width, gfx::u32 height) override;
@@ -94,6 +96,7 @@ private:
 	bool mRaw; // the vertices are raw (setVertexFormat), for mVp
 	gfx::VertexFormat mFormat;
 	float mVpConst[256][4];
+	gfx::u32 mIndexType;
 	Stats mStats;
 };
 

@@ -4,6 +4,8 @@
 //   gx_rsx TRACE OUT.png [--ref REF.png] [--diff DIFF.png] [--efb EFB.png] [--cpu-xf 1]
 //
 // --cpu-xf 1: vertices transformed on the CPU (as without working vertex programs on the PS3).
+// --index-type N: matrix indices as the device would take them (Device::vertexIndexType): 7 bytes, 4 bytes
+// read as 0-1, 2 floats, 0 none (fixed matrices).
 //
 // Prints how many pixels differ and by how much. --programs writes the text of every fragment program
 // the renderer made.
@@ -33,7 +35,9 @@ int main(int argc, char** argv)
 	const char* diffPath = NULL;
 	const char* efbPath  = NULL;
 	bool cpuXf           = false;
+	int indexType        = -1;
 	for (int i = 3; i + 1 < argc; i += 2) {
+		if (!strcmp(argv[i], "--index-type")) indexType = atoi(argv[i + 1]);
 		if (!strcmp(argv[i], "--cpu-xf")) cpuXf = atoi(argv[i + 1]) != 0;
 		if (!strcmp(argv[i], "--ref")) refPath = argv[i + 1];
 		if (!strcmp(argv[i], "--diff")) diffPath = argv[i + 1];
@@ -46,6 +50,9 @@ int main(int argc, char** argv)
 
 	// the PS3 renderer on the software RSX
 	SoftDevice* dev = new SoftDevice;
+	if (indexType >= 0) {
+		dev->setVertexIndexType((gfx::u32)indexType); // (0: fixed matrices, 2 floats, 4 bytes 0-1, 7 bytes 0-255)
+	}
 	{
 		gpu::CommandProcessor cp;
 		TraceMemory mem(trace);

@@ -48,6 +48,7 @@ public:
 	void setVertexFormat(const void* base, const VertexFormat& format) override;
 	int frontFaceSign() override { return mFrontFaceSign; }
 	bool vertexProgramsWork() override { return mVertexProgramsWork; }
+	u32 vertexIndexType() override { return mVertexIndexType; }
 	void drawTriangles(const unsigned short* indices, u32 count) override;
 	void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) override;
 	bool readTarget(u32* out, u32 x, u32 y, u32 width, u32 height) override;
@@ -61,6 +62,7 @@ private:
 	void surface(u32 colorOffset, u32 colorPitch, u32 width, u32 height, u32 depthOffset, u32 depthPitch, bool argb);
 	bool waitLabel(u32 value, u32 timeoutUs);
 	void applyState(const RenderState& s, bool all);
+	void testVertexPrograms(u8* mem, const RenderState& rs);
 	void checkStop();
 
 	void* mCtx; // gcmContextData*
@@ -92,6 +94,7 @@ private:
 	bool mVertexProgramValid;
 	int mFrontFaceSign;       // (self-test)
 	bool mVertexProgramsWork; // (self-test)
+	u32 mVertexIndexType;     // (self-test)
 };
 
 } // namespace gfx

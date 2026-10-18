@@ -12,10 +12,17 @@
 //   c[10..57] lights, 6 rows each: color, attenuation A (x y z), K (x y z), position, direction,
 //             normalized position (the specular half-angle vector)
 //   c[58..81] post-transform matrices, 3 rows per texture coordinate
-//   c[82..]   the matrix palette: position matrices (3 rows, then 3 rows of normal matrix when lighting
-//             needs normals) and texture matrices (3 rows) that the vertices pick with index bytes
-// Vertex inputs: 0 position (3 floats), 6 matrix indices (bytes: position, texture 0-2), 7 (texture 3-6),
+//   c[82]     (255, XC_PALETTE + 0.5, 0, 0)
+//   c[83..]   the matrix palette: position matrices (3 rows, then 3 rows of normal matrix when lighting
+//             needs normals) and texture matrices (3 rows) that the vertices pick with index values
+// Vertex inputs: 0 position (3 floats), 6 matrix indices (position, texture 0-2), 7 (texture 3-6),
 // 1 (texture 7), 2 normal (3 floats), 3 and 4 colors (bytes, 0-1), 8 + n texture coordinate n (2 floats).
+//
+// Matrix indices come in the form the device's start-up test found to work (Device::vertexIndexType):
+// bytes read as 0-255, bytes read as 0-1 (scaled back in the program), or floats. Without relative
+// addressing (index type 0) there are no indices: the draw's one position matrix and one matrix per
+// texture coordinate sit at fixed constants (c[83..88] and c[89 + 3n ..]); draws whose vertices pick
+// different matrices are then transformed on the CPU.
 //
 // Not supported (the renderer transforms such draws on the CPU): emboss (bump) texture coordinates and
 // texture coordinates generated from binormals or tangents.
@@ -39,9 +46,12 @@ enum {
 	XC_LIGHTS       = 10,
 	XC_LIGHT_ROWS   = 6,
 	XC_POST         = 58,
-	XC_SETUP_COUNT  = 82, // constants c[0 .. XC_SETUP_COUNT - 1] come from the XF set-up
-	XC_PALETTE      = 82,
-	XC_PALETTE_ROWS = 256 - 82,
+	XC_MISC2        = 82,
+	XC_SETUP_COUNT  = 83, // constants c[0 .. XC_SETUP_COUNT - 1] come from the XF set-up
+	XC_PALETTE      = 83,
+	XC_PALETTE_ROWS = 256 - 83,
+	XC_DIRECT_POS   = XC_PALETTE,     // without indices: the position (and normal) matrix
+	XC_DIRECT_TEX   = XC_PALETTE + 6, // and texture coordinate n's matrix at + 3n
 };
 
 enum { XA_POS = 0, XA_IDX_C = 1, XA_NRM = 2, XA_CLR0 = 3, XA_CLR1 = 4, XA_IDX_A = 6, XA_IDX_B = 7, XA_TEX0 = 8 };
@@ -63,11 +73,13 @@ struct XfInfo {
 	u32 posRows;           // palette rows per position matrix (3, or 6 with the normal matrix)
 	u32 texCount;          // texture coordinates the program outputs
 	u32 texMatrices;       // bit per texture coordinate that uses a texture matrix from the palette
+	u32 indexType;         // how the vertices pick matrices (0: they do not, fixed constants)
 };
 
-// The key for an XF set-up (setup: xfPrepare'd and xfLimit'ed for the draw), the draw's vertex layout and
-// the texture coordinates the fragment program reads. False: not supported (transform on the CPU).
-bool makeXfKey(const gpu::XfSetup& setup, const gpu::VertexLayout& layout, u32 texCoords, XfKey& key);
+// The key for an XF set-up (setup: xfPrepare'd and xfLimit'ed for the draw), the draw's vertex layout, the
+// texture coordinates the fragment program reads and the matrix index type (Device::vertexIndexType). False:
+// not supported (transform on the CPU).
+bool makeXfKey(const gpu::XfSetup& setup, const gpu::VertexLayout& layout, u32 texCoords, u32 indexType, XfKey& key);
 bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, const char** error);
 // Constants c[0 .. XC_SETUP_COUNT - 1] for a set-up.
 void xfSetupConstants(const gpu::XfSetup& setup, float out[XC_SETUP_COUNT][4]);

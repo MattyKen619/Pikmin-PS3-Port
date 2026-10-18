@@ -29,6 +29,7 @@ SoftDevice::SoftDevice()
     , mTexCoords(0)
     , mVp(NULL)
     , mRaw(false)
+    , mIndexType(gfx::ATTRIB_U8)
 {
 	memset(&mFormat, 0, sizeof(mFormat));
 	memset(mVpConst, 0, sizeof(mVpConst));

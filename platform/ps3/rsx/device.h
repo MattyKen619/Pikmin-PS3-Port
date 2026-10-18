@@ -154,6 +154,9 @@ public:
 	virtual int frontFaceSign() = 0;
 	// The renderer's vertex programs work on this device (checked at start-up on the PS3).
 	virtual bool vertexProgramsWork() = 0;
+	// How vertices can pick constants (relative addressing): the attribute type of the index values that
+	// works (ATTRIB_U8, ATTRIB_U8_NORM or ATTRIB_F32), or 0 if relative addressing does not work.
+	virtual u32 vertexIndexType() = 0;
 	virtual void drawTriangles(const unsigned short* indices, u32 count) = 0;  // indices into the vertices
 	// Clears a rectangle of the current target (the scissor is not used).
 	virtual void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) = 0;

@@ -998,7 +998,28 @@ void CommandProcessor::gatherVertices(const DrawCall& call, const GatherSpec& G,
 	const u32 stride      = G.stride;
 
 	// matrix indices (attribute by attribute: the PS3's processor predicts the branches)
-	if (G.indexCount) {
+	if (G.indexCount && G.indexFloat) {
+		const u32 matA = mState.cp[0x30];
+		const u32 matB = mState.cp[0x40];
+		for (u32 t = 0; t < G.indexCount; t++) {
+			u8* ix      = out + G.index + t * 4;
+			const u8* p = data + (t ? L.offTexMtx[t - 1] : 0);
+			const bool fromVertex = t ? L.texmtx[t - 1] != 0 : L.pnmtx != 0;
+			const u8* map         = t ? G.texMap : G.posMap;
+			if (fromVertex) {
+				for (u32 v = 0; v < count; v++, p += size, ix += stride) {
+					*(float*)ix = sU8Float[map[p[0] & 63]];
+				}
+			} else {
+				const u32 n   = t - 1;
+				const u32 row = t ? (n < 4 ? bits(matA, 6 + n * 6, 6) : bits(matB, (n - 4) * 6, 6)) : bits(matA, 0, 6);
+				const float f = sU8Float[map[row]];
+				for (u32 v = 0; v < count; v++, ix += stride) {
+					*(float*)ix = f;
+				}
+			}
+		}
+	} else if (G.indexCount) {
 		const u32 matA = mState.cp[0x30];
 		const u32 matB = mState.cp[0x40];
 		const u8 pn    = G.posMap[bits(matA, 0, 6)];

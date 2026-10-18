@@ -86,9 +86,24 @@ void initBpDirty()
 
 } // namespace
 
-// Texture memory is checked for changes (hashed) once every TEXTURE_CHECK_FRAMES frames, each texture in
-// its own frame of the cycle (by its address), so the checks are spread out.
-bool Renderer::checkDue(u32 address) const { return ((mFrame + (address >> 5)) % TEXTURE_CHECK_FRAMES) == 0; }
+// Texture memory is checked for changes (hashed) at most once a frame: every frame while it keeps
+// changing (a movie), then less and less often while it does not, down to once in TEXTURE_CHECK_FRAMES
+// frames. (Test 24 checked every texture in its own fixed frame of an 8-frame cycle: a texture used only
+// in the other frames, like a movie's alternating images, was never checked again.)
+bool Renderer::checkDue(u32 checkedFrame, u8 interval) const { return mFrame - checkedFrame >= (interval ? interval : 1u); }
+
+void Renderer::checked(u32& checkedFrame, u8& interval, bool changed, u32 address) const
+{
+	if (changed) {
+		interval = 1;
+	} else {
+		interval = (u8)(interval * 2 > TEXTURE_CHECK_FRAMES ? TEXTURE_CHECK_FRAMES : (interval ? interval * 2 : 2));
+	}
+	checkedFrame = mFrame;
+	if (interval >= TEXTURE_CHECK_FRAMES) {
+		checkedFrame -= (address >> 5) & 3; // (textures checked together drift apart: the work is spread out)
+	}
+}
 
 bool Renderer::TexKey::operator<(const TexKey& o) const
 {
@@ -145,6 +160,8 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 	memset(mPosSlot, 0, sizeof(mPosSlot));
 	memset(mTexSlot, 0, sizeof(mTexSlot));
 	memset(mPosMap, 0, sizeof(mPosMap));
+	memset(&mFixedPos, 0, sizeof(mFixedPos));
+	memset(mFixedTex, 0, sizeof(mFixedTex));
 	memset(mTexMap, 0, sizeof(mTexMap));
 	memset(&mStats, 0, sizeof(mStats));
 	memset(mTevReg, 0, sizeof(mTevReg));
@@ -206,6 +223,10 @@ void Renderer::begin()
 	mXfLimitFp     = NULL;
 	mSetupDirty    = true;
 	mPalLap++; // (XF memory came from somewhere else: no palette slot is known to be current)
+	mFixedPos.valid = false;
+	for (int t = 0; t < 8; t++) {
+		mFixedTex[t].valid = false;
+	}
 }
 
 void Renderer::flush()
@@ -444,7 +465,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	if (ci != mCopies.end()) {
 		CopyEntry& c = ci->second;
 		bool valid   = true;
-		if (c.memKnown && c.checkedFrame != mFrame && checkDue(k.address)) {
+		if (c.memKnown && checkDue(c.checkedFrame, c.interval)) {
 			// (the game may have loaded something else there since)
 			gpu::PhaseScope phase(gpu::GFX_CHECKS);
 			u32 size      = gpu::CommandProcessor::textureSize(c.format, c.width, c.height, 1);
@@ -452,7 +473,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 			if (src && gpu::hashMemory(src, size) != c.memHash) {
 				valid = false;
 			}
-			c.checkedFrame = mFrame;
+			checked(c.checkedFrame, c.interval, !valid, k.address);
 		}
 		if (valid) {
 			mStats.copyUses++;
@@ -483,7 +504,7 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 		k.tlutHash = th.hash;
 	}
 	TexEntry& e = mTextures[k];
-	if (e.tex && (e.checkedFrame == mFrame || !checkDue(k.address))) {
+	if (e.tex && !checkDue(e.checkedFrame, e.interval)) {
 		e.usedFrame = mFrame;
 		return e.tex;
 	}
@@ -499,8 +520,8 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	}
 	const u64 hash = gpu::hashMemory(src, size);
 	if (e.tex && hash == e.hash) {
-		e.checkedFrame = mFrame;
-		e.usedFrame    = mFrame;
+		checked(e.checkedFrame, e.interval, false, k.address);
+		e.usedFrame = mFrame;
 		return e.tex;
 	}
 	gpu::PhaseScope decode(gpu::GFX_TEXTURES);
@@ -523,11 +544,17 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	mTextureBytes += t->bytes;
 	mStats.textureUploads++;
 	mStats.textureUploadBytes += t->bytes;
+	const bool replaced = e.tex != NULL;
 	retire(e.tex);
 	e.tex          = t;
 	e.hash         = hash;
-	e.checkedFrame = mFrame;
 	e.usedFrame    = mFrame;
+	if (replaced) {
+		checked(e.checkedFrame, e.interval, true, k.address);
+	} else {
+		e.checkedFrame = mFrame;
+		e.interval     = 1; // (new: checked again soon, its memory may still be filling)
+	}
 	return t;
 }
 
@@ -760,9 +787,7 @@ void Renderer::draw(const gpu::DrawCall& call)
 		mXfLimitFp = mProgram;
 	}
 	XfProgramEntry* xp = mGpuXf && call.arrays ? xfProgramFor(texCoords) : NULL;
-	if (xp) {
-		drawGpu(call, xp);
-	} else {
+	if (!xp || !drawGpu(call, xp)) {
 		drawCpu(call, texCoords);
 	}
 }
@@ -780,7 +805,7 @@ Renderer::XfProgramEntry* Renderer::xfProgramFor(u32 texCoords)
 	mXfLookupTexCoords = texCoords;
 	mXfLookup          = NULL;
 	XfKey key;
-	if (!makeXfKey(mXf, mXfLayout, texCoords, key)) {
+	if (!makeXfKey(mXf, mXfLayout, texCoords, mDev.vertexIndexType(), key)) {
 		return NULL;
 	}
 	Vec<XfProgramEntry*>& chain = mXfPrograms[key.hash()];
@@ -864,18 +889,7 @@ u8 Renderer::paletteSlot(Slot* slots, u32 row, u32 rows)
 		mPalHead = 0;
 	}
 	float data[6][4];
-	const float* xf = (const float*)mCp.state().xf;
-	for (u32 k = 0; k < 3; k++) {
-		for (u32 i = 0; i < 4; i++) {
-			data[k][i] = row + k < 64 ? xf[(row + k) * 4 + i] : 0.0f;
-		}
-	}
-	if (rows > 3) {
-		const float* n = xf + 0x400 + (row & 31) * 3;
-		for (u32 k = 0; k < 3; k++) {
-			data[3 + k][0] = n[k * 3], data[3 + k][1] = n[k * 3 + 1], data[3 + k][2] = n[k * 3 + 2], data[3 + k][3] = 0.0f;
-		}
-	}
+	matrixRows(row, rows, data);
 	{
 		gpu::PhaseScope rsx(gpu::GFX_RSX);
 		mDev.setVertexConstants(XC_PALETTE + mPalHead, rows, &data[0][0]);
@@ -889,8 +903,70 @@ u8 Renderer::paletteSlot(Slot* slots, u32 row, u32 rows)
 	return s.offset;
 }
 
-void Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
+// Without relative addressing: XF matrix row `row` (with its normal matrix when rows is 6) at fixed
+// constants, loaded when it is not already there (after the draws that used the old values).
+void Renderer::fixedMatrix(FixedSlot& f, u32 base, u32 row, u32 rows)
 {
+	u32 newest = 0;
+	for (u32 k = 0; k < 3 && row + k < 64; k++) {
+		newest = mRowWrite[row + k] > newest ? mRowWrite[row + k] : newest;
+	}
+	if (rows > 3) {
+		const u32 n = row & 31;
+		for (u32 k = 0; k < 3; k++) {
+			newest = mNrmWrite[n + k] > newest ? mNrmWrite[n + k] : newest;
+		}
+	}
+	if (f.valid && f.row == row && f.rows >= rows && f.serial >= newest) {
+		return;
+	}
+	flushBatch();
+	float data[6][4];
+	matrixRows(row, rows, data);
+	gpu::PhaseScope rsx(gpu::GFX_RSX);
+	mDev.setVertexConstants(base, rows, &data[0][0]);
+	mStats.paletteRows += rows;
+	f.valid  = true;
+	f.row    = row;
+	f.rows   = rows;
+	f.serial = mXfWrites;
+}
+
+// XF matrix row `row` .. row + 2 as constants, and with rows 6 the normal matrix that goes with it.
+void Renderer::matrixRows(u32 row, u32 rows, float data[6][4])
+{
+	const float* xf = (const float*)mCp.state().xf;
+	for (u32 k = 0; k < 3; k++) {
+		for (u32 i = 0; i < 4; i++) {
+			data[k][i] = row + k < 64 ? xf[(row + k) * 4 + i] : 0.0f;
+		}
+	}
+	if (rows > 3) {
+		const float* n = xf + 0x400 + (row & 31) * 3;
+		for (u32 k = 0; k < 3; k++) {
+			data[3 + k][0] = n[k * 3], data[3 + k][1] = n[k * 3 + 1], data[3 + k][2] = n[k * 3 + 2], data[3 + k][3] = 0.0f;
+		}
+	}
+}
+
+bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
+{
+	const XfInfo& info = xp->info;
+	// the matrices the vertices use
+	u64 posRows, texRows[8];
+	mCp.matrixRows(call, info.texCount, &posRows, texRows);
+	u64 texAll = 0;
+	for (u32 t = 0; t < info.texCount; t++) {
+		if (info.texMatrices & (1u << t)) {
+			texAll |= texRows[t];
+			if (!info.indexType && (texRows[t] & (texRows[t] - 1))) {
+				return false; // (fixed matrices: one per texture coordinate)
+			}
+		}
+	}
+	if (!info.indexType && (posRows & (posRows - 1))) {
+		return false; // (fixed matrices: one position matrix)
+	}
 	mStats.gpuDraws++;
 	const int sign = mDev.frontFaceSign();
 	u8 cull        = CULL_NONE;
@@ -900,7 +976,6 @@ void Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 		cull = sign > 0 ? CULL_FRONT : CULL_BACK;
 	}
 	setDeviceCull(cull);
-	const XfInfo& info = xp->info;
 	{
 		gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
 		// set-up constants
@@ -929,16 +1004,17 @@ void Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 			}
 			mSetupDirty = false;
 		}
-		// matrices into the palette (again from an empty palette if it filled up on the way)
-		u64 posRows, texRows[8];
-		mCp.matrixRows(call, info.texCount, &posRows, texRows);
-		u64 texAll = 0;
-		for (u32 t = 0; t < info.texCount; t++) {
-			if (info.texMatrices & (1u << t)) {
-				texAll |= texRows[t];
+		if (!info.indexType) {
+			// fixed matrices
+			fixedMatrix(mFixedPos, XC_DIRECT_POS, (u32)__builtin_ctzll(posRows), info.posRows);
+			for (u32 t = 0; t < info.texCount; t++) {
+				if (info.texMatrices & (1u << t)) {
+					fixedMatrix(mFixedTex[t], XC_DIRECT_TEX + t * 3, (u32)__builtin_ctzll(texRows[t]), 3);
+				}
 			}
 		}
-		for (int attempt = 0; attempt < 2; attempt++) {
+		// matrices into the palette (again from an empty palette if it filled up on the way)
+		for (int attempt = 0; attempt < 2 && info.indexType; attempt++) {
 			const u32 lap = mPalLap;
 			for (u64 m = posRows; m; m &= m - 1) {
 				const u32 r = (u32)__builtin_ctzll(m);
@@ -957,7 +1033,7 @@ void Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 	u8* out = batchVertices(call.count, info.format.stride, 0, xp, &first);
 	if (!out) {
 		mStats.skippedDraws++;
-		return;
+		return true;
 	}
 	gpu::GatherSpec G = info.gather;
 	G.posMap          = mPosMap;
@@ -1013,6 +1089,7 @@ void Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 	}
 	mStats.triangles += tris;
 	mBatch.vertexCount += call.count;
+	return true;
 }
 
 // ---- draws transformed on the CPU (gpu_xf.cpp), culled on the CPU
@@ -1262,6 +1339,7 @@ void Renderer::copyToTexture(const gpu::CopyInfo& info)
 	c.height       = h;
 	c.format       = format;
 	c.checkedFrame = mFrame;
+	c.interval     = 1;
 	u32 size       = gpu::CommandProcessor::textureSize(format, w, h, 1);
 	const u8* mem  = mMem.read(address, size, gpu::MEM_TEXTURE);
 	c.memKnown     = mem != NULL;

@@ -76,6 +76,7 @@ RsxDevice::RsxDevice()
     , mVertexProgramValid(false)
     , mFrontFaceSign(0)
     , mVertexProgramsWork(false)
+    , mVertexIndexType(0)
 {
 	memset(&mState, 0, sizeof(mState));
 	memset(&mEfbTexture, 0, sizeof(mEfbTexture));
@@ -755,97 +756,10 @@ void RsxDevice::selfTest()
 	NOTE(", partial clear %s", ok ? "ok" : "WRONG");
 	if (!ok) NOTE(" (%08x %08x)", cIn, cOut);
 
-	// 9. the renderer's vertex programs: a constant picked by a byte index in the vertex (relative
-	// addressing, unscaled byte attributes), and which triangles the RSX culls as front faces
-	{
-		using namespace vp;
-		Builder b;
-		b.add(DT(0), V(6), C(1)("y"));       // index + base
-		b.arl(T(0)("x"));
-		b.mov(DT(1, M_XYZ), V(0));
-		b.mov(DT(1, M_W), C(0)("y"));        // w = 1
-		b.mov(DO(O_HPOS), T(1));
-		b.mov(DO(O_COL0), CRel(2, 0));       // c[A0.x + 2]
-		b.mov(DO(O_COL1), C(0)("x"));
-		VertexProgram* prog = create<VertexProgram>();
-		const char* vpError = NULL;
-		bool built = b.finish(*prog, &vpError);
-		if (!built) {
-			NOTE(", vertex programs NOT BUILT (%s)", vpError ? vpError : "?");
-		} else {
-			float k[2][4] = { { 0, 1, 0.5f, 2 }, { 0, 100, 0, 0 } };
-			float colors[8][4];
-			for (int i = 0; i < 8; i++) {
-				colors[i][0] = colors[i][1] = colors[i][2] = 0, colors[i][3] = 1;
-			}
-			colors[0][0] = 1;              // 0: red
-			colors[5][1] = 1;              // 5: green
-			colors[7][2] = 1;              // 7: blue
-			setVertexConstants(0, 2, &k[0][0]);
-			setVertexConstants(100, 8, &colors[0][0]);
-			setVertexProgram(prog);
-			VertexFormat vf;
-			memset(&vf, 0, sizeof(vf));
-			vf.stride             = 16;
-			vf.attr[0].components = 3, vf.attr[0].type = ATTRIB_F32, vf.attr[0].offset = 0;
-			vf.attr[6].components = 4, vf.attr[6].type = ATTRIB_U8, vf.attr[6].offset = 12;
-			u8* tv = verts + quads * 4 * 64 + 4096; // (after the quads drawn so far)
-			auto put = [&](int i, float px, float py, u8 index) {
-				float* f = (float*)(tv + i * 16);
-				f[0]     = px / EFB_WIDTH * 2.0f - 1.0f;
-				f[1]     = 1.0f - py / EFB_HEIGHT * 2.0f;
-				f[2]     = 0.0f;
-				u8* ix   = tv + i * 16 + 12;
-				ix[0] = index, ix[1] = ix[2] = ix[3] = 0;
-			};
-			setProgram(fpColor, colorFp);
-			setState(rs);
-			// a quad with index 3 (c[100 + 3 + 2]: green); then the constant changes (yellow) and a second quad
-			// uses it: the first must stay green (constants change in order with the draws)
-			put(0, 100, 400, 3), put(1, 200, 400, 3), put(2, 200, 450, 3), put(3, 100, 450, 3);
-			put(4, 210, 400, 3), put(5, 260, 400, 3), put(6, 260, 450, 3), put(7, 210, 450, 3);
-			setVertexFormat(tv, vf);
-			static const unsigned short qi[6] = { 0, 1, 2, 0, 2, 3 };
-			static const unsigned short qi2[6] = { 4, 5, 6, 4, 6, 7 };
-			drawTriangles(qi, 6);
-			const float yellow[4] = { 1, 1, 0, 1 };
-			setVertexConstants(105, 1, yellow);
-			drawTriangles(qi2, 6);
-			u32 g = pixel(150, 425), y = pixel(235, 425);
-			bool relOk = g == 0xFF00FF00 && y == 0xFFFFFF00;
-			// a triangle with a positive screen area (GameCube convention), culled as front, then as back
-			u32 seen[2];
-			for (int pass = 0; pass < 2; pass++) {
-				u8* tri = tv + 128 + pass * 64;
-				u8* save = tv;
-				tv = tri;
-				const float x0 = 300 + pass * 120, y0 = 400, x1 = x0 + 100, y1 = 450;
-				put(0, x0, y0, 5), put(1, x1, y0, 5), put(2, x0, y1, 5); // (c[107]: blue)
-				tv = save;
-				RenderState cs = rs;
-				cs.cullFace    = pass == 0 ? CULL_FRONT : CULL_BACK;
-				setState(cs);
-				setVertexFormat(tri, vf);
-				static const unsigned short ti[3] = { 0, 1, 2 };
-				drawTriangles(ti, 3);
-				seen[pass] = pixel((u32)x0 + 10, (u32)y0 + 10);
-			}
-			setState(rs);
-			const bool frontDrawn = seen[0] == 0xFF0000FF, backDrawn = seen[1] == 0xFF0000FF;
-			if (frontDrawn != backDrawn) {
-				// drawn while front faces were culled: the RSX's front faces have negative areas
-				mFrontFaceSign = frontDrawn ? -1 : +1;
-			}
-			mVertexProgramsWork = relOk && mFrontFaceSign != 0;
-			NOTE(", vertex programs %s", mVertexProgramsWork ? "ok" : "WRONG");
-			if (!relOk) NOTE(" (indexed constants %08x %08x)", g, y);
-			if (!mFrontFaceSign) NOTE(" (culling %08x %08x)", seen[0], seen[1]);
-			else NOTE(" (front faces %s)", mFrontFaceSign > 0 ? "positive" : "negative");
-			allOk &= mVertexProgramsWork;
-			setVertexProgram(NULL);
-		}
-		// (the program stays allocated: the RSX may still read its upload from the command buffer)
-	}
+	// 9. the renderer's vertex programs (their own log line)
+	setProgram(fpColor, colorFp);
+	setState(rs);
+	testVertexPrograms(mem + 64 * 1024, rs);
 
 	logf("[rsx] self-test: %s%s\n", report, allOk ? " - all good" : "");
 	clear(all, 0xFF000000, 0xFFFFFF, true, true, true);
@@ -854,6 +768,304 @@ void RsxDevice::selfTest()
 		destroyTexture(t);
 	}
 	mStateValid = false;
+#undef NOTE
+}
+
+// The renderer's vertex programs, piece by piece: what the transform programs (xf_program.cpp) need from
+// the RSX, each in a little quad of its own at the bottom of the frame buffer, read back and compared. The
+// results decide whether the RSX transforms vertices (vertexProgramsWork), how vertices pick matrices
+// (vertexIndexType) and which faces the RSX calls front (frontFaceSign). Test 24 tried it all in one
+// program, and the RSX drew nothing with it.
+void RsxDevice::testVertexPrograms(u8* mem, const RenderState& rs)
+{
+	using namespace vp;
+	char report[640];
+	int n = 0;
+#define NOTE(...) (n += snprintf(report + n, n < (int)sizeof(report) ? sizeof(report) - n : 0, __VA_ARGS__))
+	auto pixel = [&](u32 x, u32 y) -> u32 {
+		u32 p = 0;
+		if (!readTarget(&p, x, y, 1, 1)) {
+			return 0xDEADBEEF;
+		}
+		return p;
+	};
+	// constants: c[0] (0, 1, 0.5, 2), c[1] (0, 100, 0, 0), c[2] (255, 100.5, 0, 0), c[100 + i] colors (c[105]
+	// green, c[107] blue), c[110], c[111] for the arithmetic
+	float k[3][4] = { { 0, 1, 0.5f, 2 }, { 0, 100, 0, 0 }, { 255, 100.5f, 0, 0 } };
+	float colors[8][4];
+	for (int i = 0; i < 8; i++) {
+		colors[i][0] = colors[i][1] = colors[i][2] = 0, colors[i][3] = 1;
+	}
+	colors[0][1] = 1; // c[100] green
+	colors[5][1] = 1; // c[105] green
+	colors[7][2] = 1; // c[107] blue
+	float math[2][4] = { { 0.25f, 0.5f, 0.75f, 4 }, { 1, 0.5f, 0.25f, 0.5f } };
+	setVertexConstants(0, 3, &k[0][0]);
+	setVertexConstants(100, 8, &colors[0][0]);
+	setVertexConstants(110, 2, &math[0][0]);
+
+	u32 used = 0;
+	// A quad (two triangles) at pixels x0..x0+40, y0..y0+30: positions as 4 floats (w 1) or 3, then extras
+	// at offset 16 (the stride is 32).
+	auto quadVerts = [&](float x0, float y0, bool w) -> u8* {
+		u8* v = mem + used;
+		used += 4 * 32 + 128;
+		memset(v, 0, 4 * 32);
+		const float xs[4] = { x0, x0 + 40, x0 + 40, x0 }, ys[4] = { y0, y0, y0 + 30, y0 + 30 };
+		for (int i = 0; i < 4; i++) {
+			float* f = (float*)(v + i * 32);
+			f[0]     = xs[i] / EFB_WIDTH * 2.0f - 1.0f;
+			f[1]     = 1.0f - ys[i] / EFB_HEIGHT * 2.0f;
+			f[2]     = 0.0f;
+			if (w) {
+				f[3] = 1.0f;
+			}
+		}
+		return v;
+	};
+	static const unsigned short quadIx[6] = { 0, 1, 2, 0, 2, 3 };
+	auto draw = [&](const VertexProgram* prog, const VertexFormat& f, const u8* v) {
+		setVertexProgram(prog);
+		setVertexFormat(v, f);
+		drawTriangles(quadIx, 6);
+	};
+	auto build = [&](Builder& b) -> VertexProgram* {
+		VertexProgram* p = create<VertexProgram>(); // (kept: the RSX may still read the upload)
+		const char* error = NULL;
+		if (!b.finish(*p, &error)) {
+			NOTE(" [not built: %s]", error ? error : "?");
+			return NULL;
+		}
+		return p;
+	};
+	VertexFormat f4; // position 4 floats, color bytes at 16
+	memset(&f4, 0, sizeof(f4));
+	f4.stride = 32;
+	f4.attr[0].components = 4, f4.attr[0].type = ATTRIB_F32, f4.attr[0].offset = 0;
+	f4.attr[3].components = 4, f4.attr[3].type = ATTRIB_U8_NORM, f4.attr[3].offset = 16;
+	VertexFormat f3 = f4; // position 3 floats
+	f3.attr[0].components = 3;
+	f3.attr[3].components = 0;
+	const float y0 = 460;
+	float x0 = 10;
+
+	// a0. the built-in pass-through program with this way of describing vertices (setVertexFormat)
+	{
+		u8* v = quadVerts(x0, y0, true);
+		for (int i = 0; i < 4; i++) {
+			u8* c = v + i * 32 + 16;
+			c[0] = 255, c[1] = 0, c[2] = 255, c[3] = 255; // magenta
+		}
+		draw(NULL, f4, v);
+		u32 px = pixel((u32)x0 + 20, (u32)y0 + 15);
+		NOTE("vertex formats %s", px == 0xFFFF00FF ? "ok" : "WRONG");
+		if (px != 0xFFFF00FF) NOTE(" (%08x)", px);
+		x0 += 50;
+	}
+	// a1. the pass-through program's microcode (cgcomp's), loaded the way the renderer's programs are
+	{
+		const rsxVertexProgram* vpo = (const rsxVertexProgram*)kPassthroughVpo;
+		void* ucode;
+		u32 size;
+		rsxVertexProgramGetUCode(vpo, &ucode, &size);
+		VertexProgram* p = create<VertexProgram>();
+		p->instructions  = vpo->num_insn;
+		p->inputMask     = vpo->input_mask;
+		p->outputMask    = vpo->output_mask;
+		p->numRegs       = vpo->num_regs;
+		p->ucode.assign((const u32*)ucode, (const u32*)ucode + vpo->num_insn * 4);
+		u8* v = quadVerts(x0, y0, true);
+		for (int i = 0; i < 4; i++) {
+			u8* c = v + i * 32 + 16;
+			c[0] = 0, c[1] = 255, c[2] = 255, c[3] = 255; // cyan
+		}
+		draw(p, f4, v);
+		u32 px = pixel((u32)x0 + 20, (u32)y0 + 15);
+		NOTE(", program loading %s", px == 0xFF00FFFF ? "ok" : "WRONG");
+		if (px != 0xFF00FFFF) NOTE(" (%08x)", px);
+		x0 += 50;
+	}
+	// a. basic: position and color straight through
+	bool basic = false;
+	{
+		Builder b;
+		b.mov(DO(O_HPOS), V(0));
+		b.mov(DO(O_COL0), V(3));
+		b.mov(DO(O_COL1), V(3));
+		VertexProgram* p = build(b);
+		if (p) {
+			u8* v = quadVerts(x0, y0, true);
+			for (int i = 0; i < 4; i++) {
+				u8* c = v + i * 32 + 16;
+				c[0] = 255, c[1] = 0, c[2] = 0, c[3] = 255; // red
+			}
+			draw(p, f4, v);
+			u32 px = pixel((u32)x0 + 20, (u32)y0 + 15);
+			basic  = px == 0xFFFF0000;
+			NOTE(", basic %s", basic ? "ok" : "WRONG");
+			if (!basic) NOTE(" (%08x)", px);
+		}
+		x0 += 50;
+	}
+	// b. a constant
+	bool constants = false;
+	{
+		Builder b;
+		b.mov(DO(O_HPOS), V(0));
+		b.mov(DO(O_COL0), C(100));
+		b.mov(DO(O_COL1), C(0)("x"));
+		VertexProgram* p = build(b);
+		if (p) {
+			draw(p, f4, quadVerts(x0, y0, true));
+			u32 px    = pixel((u32)x0 + 20, (u32)y0 + 15);
+			constants = px == 0xFF00FF00;
+			NOTE(", constants %s", constants ? "ok" : "WRONG");
+			if (!constants) NOTE(" (%08x)", px);
+		}
+		x0 += 50;
+	}
+	// c. 3-float positions, w from a constant, through a temporary
+	bool float3 = false;
+	VertexProgram* plain = NULL; // (this program draws the rest: constant c[100], or the culling test)
+	{
+		Builder b;
+		b.mov(DT(1, M_XYZ), V(0));
+		b.mov(DT(1, M_W), C(0)("y"));
+		b.mov(DO(O_HPOS), T(1));
+		b.mov(DO(O_COL0), C(100));
+		b.mov(DO(O_COL1), C(0)("x"));
+		plain = build(b);
+		if (plain) {
+			draw(plain, f3, quadVerts(x0, y0, false));
+			u32 px = pixel((u32)x0 + 20, (u32)y0 + 15);
+			float3 = px == 0xFF00FF00;
+			NOTE(", 3-float positions %s", float3 ? "ok" : "WRONG");
+			if (!float3) NOTE(" (%08x)", px);
+		}
+		x0 += 50;
+	}
+	// d. arithmetic: DP3, RSQ, RCP, SGE, SEQ, SNE, MUL, MAX, ADD, MAD with saturation
+	bool arith = false;
+	{
+		Builder b;
+		b.mov(DT(1, M_XYZ), V(0));
+		b.mov(DT(1, M_W), C(0)("y"));
+		b.mov(DO(O_HPOS), T(1));
+		b.mov(DT(3), C(111));
+		b.dp3(DT(2, M_X), C(110), T(3));             // 0.6875
+		b.rsq(DT(2, M_Y), C(110)("w"));              // 0.5
+		b.rcp(DT(2, M_Z), C(110)("w"));              // 0.25
+		b.sge(DT(4, M_X), C(110)("y"), T(3)("y"));   // 1
+		b.seq(DT(4, M_Y), C(110)("y"), T(3)("y"));   // 1
+		b.sne(DT(4, M_Z), C(110)("x"), T(3)("x"));   // 1
+		b.mul(DT(2, M_W), T(4)("x"), T(4)("y"));
+		b.mul(DT(2, M_W), T(2)("w"), T(4)("z"));     // 1
+		b.max(DT(5, M_X), -C(110)("x"), C(0)("x"));  // 0
+		b.add(DT(2, M_X), T(2)("x"), T(5)("x"));
+		b.mad(DT(6), T(2), C(0)("y"), C(0)("x"), true);
+		b.mov(DO(O_COL0), T(6));
+		b.mov(DO(O_COL1), C(0)("x"));
+		VertexProgram* p = build(b);
+		if (p) {
+			draw(p, f3, quadVerts(x0, y0, false));
+			u32 px = pixel((u32)x0 + 20, (u32)y0 + 15);
+			int r = (px >> 16) & 0xFF, g = (px >> 8) & 0xFF, bl = px & 0xFF, a = px >> 24;
+			arith = r >= 173 && r <= 177 && g >= 126 && g <= 130 && bl >= 62 && bl <= 66 && a == 255;
+			NOTE(", arithmetic %s", arith ? "ok" : "WRONG");
+			if (!arith) NOTE(" (%08x)", px);
+		}
+		x0 += 50;
+	}
+	// e-g. relative addressing: an index in the vertex picks c[100 + index + 2] (index 3: green), with the
+	// index as an unscaled byte, a byte read as 0-1, and a float
+	static const u8 kTypes[3] = { ATTRIB_U8, ATTRIB_U8_NORM, ATTRIB_F32 };
+	static const char* const kTypeNames[3] = { "byte", "0-1 byte", "float" };
+	bool indexOk[3] = { false, false, false };
+	VertexProgram* indexed[3] = { NULL, NULL, NULL };
+	for (int t = 0; t < 3; t++) {
+		Builder b;
+		if (kTypes[t] == ATTRIB_U8_NORM) {
+			b.mad(DT(0), V(6), C(2)("x"), C(2)("y"));
+		} else {
+			b.add(DT(0), V(6), C(1)("y"));
+		}
+		b.arl(T(0)("x"));
+		b.mov(DT(1, M_XYZ), V(0));
+		b.mov(DT(1, M_W), C(0)("y"));
+		b.mov(DO(O_HPOS), T(1));
+		b.mov(DO(O_COL0), CRel(2, 0));
+		b.mov(DO(O_COL1), C(0)("x"));
+		indexed[t] = build(b);
+		if (indexed[t]) {
+			VertexFormat fi = f3;
+			fi.attr[6].components = 4, fi.attr[6].type = kTypes[t], fi.attr[6].offset = 16;
+			u8* v = quadVerts(x0, y0, false);
+			for (int i = 0; i < 4; i++) {
+				u8* ix = v + i * 32 + 16;
+				if (kTypes[t] == ATTRIB_F32) {
+					((float*)ix)[0] = 3.0f;
+				} else {
+					ix[0] = 3;
+				}
+			}
+			draw(indexed[t], fi, v);
+			u32 px     = pixel((u32)x0 + 20, (u32)y0 + 15);
+			indexOk[t] = px == 0xFF00FF00;
+			NOTE(", %s indices %s", kTypeNames[t], indexOk[t] ? "ok" : "WRONG");
+			if (!indexOk[t]) NOTE(" (%08x)", px);
+		}
+		x0 += 50;
+	}
+	mVertexIndexType = indexOk[0] ? ATTRIB_U8 : indexOk[1] ? ATTRIB_U8_NORM : indexOk[2] ? ATTRIB_F32 : 0;
+	// h. a constant changed between two draws: the first keeps the old value
+	bool order = false;
+	if (plain) {
+		draw(plain, f3, quadVerts(x0, y0, false));
+		const float yellow[4] = { 1, 1, 0, 1 };
+		setVertexConstants(100, 1, yellow);
+		draw(plain, f3, quadVerts(x0 + 50, y0, false));
+		u32 a = pixel((u32)x0 + 20, (u32)y0 + 15), b2 = pixel((u32)x0 + 70, (u32)y0 + 15);
+		order = a == 0xFF00FF00 && b2 == 0xFFFFFF00;
+		NOTE(", constants between draws %s", order ? "ok" : "WRONG");
+		if (!order) NOTE(" (%08x %08x)", a, b2);
+		const float green[4] = { 0, 1, 0, 1 };
+		setVertexConstants(100, 1, green);
+		x0 += 100;
+	}
+	// i. culling: a triangle with a positive screen area (GameCube convention), culled as front, then back
+	if (plain) {
+		u32 seen[2];
+		for (int pass = 0; pass < 2; pass++) {
+			u8* v = quadVerts(x0, y0, false); // (its first three corners: top left, top right, bottom right)
+			float* c2 = (float*)(v + 2 * 32);
+			c2[0]     = (x0) / EFB_WIDTH * 2.0f - 1.0f; // bottom left instead: a right angle at the top left
+			RenderState cs = rs;
+			cs.cullFace    = pass == 0 ? CULL_FRONT : CULL_BACK;
+			setState(cs);
+			setVertexProgram(plain);
+			setVertexFormat(v, f3);
+			static const unsigned short ti[3] = { 0, 1, 2 };
+			drawTriangles(ti, 3);
+			seen[pass] = pixel((u32)x0 + 5, (u32)y0 + 5);
+			x0 += 50;
+		}
+		setState(rs);
+		const bool frontDrawn = seen[0] == 0xFF00FF00, backDrawn = seen[1] == 0xFF00FF00;
+		if (frontDrawn != backDrawn) {
+			// drawn while front faces were culled: the RSX's front faces have negative areas
+			mFrontFaceSign = frontDrawn ? -1 : +1;
+		}
+		NOTE(", culling ");
+		if (mFrontFaceSign) NOTE("ok (front faces %s)", mFrontFaceSign > 0 ? "positive" : "negative");
+		else NOTE("WRONG (%08x %08x)", seen[0], seen[1]);
+	}
+	mVertexProgramsWork = basic && constants && float3 && arith && order && mFrontFaceSign != 0;
+	setVertexProgram(NULL);
+	logf("[rsx] vertex program self-test: %s -> %s\n", report,
+	     !mVertexProgramsWork ? "vertices transformed on the CPU"
+	     : mVertexIndexType   ? (mVertexIndexType == ATTRIB_U8 ? "vertex programs, byte indices"
+	                             : mVertexIndexType == ATTRIB_U8_NORM ? "vertex programs, 0-1 byte indices" : "vertex programs, float indices")
+	                          : "vertex programs, fixed matrices (no relative addressing)");
 #undef NOTE
 }
 

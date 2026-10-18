@@ -91,6 +91,7 @@ private:
 		Texture* tex;
 		u64 hash;
 		u32 checkedFrame, usedFrame;
+		u8 interval; // frames between checks
 	};
 	struct CopyEntry {
 		Texture* tex;
@@ -98,6 +99,7 @@ private:
 		u64 memHash;
 		bool memKnown;
 		u32 checkedFrame;
+		u8 interval;
 	};
 	struct Marker {
 		u32 fence;
@@ -126,6 +128,10 @@ private:
 		u32 lap, serial;
 		u8 offset, rows;
 	};
+	struct FixedSlot {
+		bool valid;
+		u32 row, rows, serial;
+	};
 
 	void log(const char* fmt, ...);
 
@@ -143,15 +149,18 @@ private:
 	bool updateState();
 	void bindProgram(const FragmentProgram& fp, const float (*params)[4]);
 	const Texture* lookupTexture(u32 map, Sampler& sampler);
-	bool checkDue(u32 address) const;
+	bool checkDue(u32 checkedFrame, u8 interval) const;
+	void checked(u32& checkedFrame, u8& interval, bool changed, u32 address) const;
 	const Texture* missingTexture();
 	void invalidateDeviceState();
 
 	// draws
-	void drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp);
+	bool drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp); // false: not possible, use drawCpu
 	void drawCpu(const gpu::DrawCall& call, u32 texCoords);
 	XfProgramEntry* xfProgramFor(u32 texCoords);
 	u8 paletteSlot(Slot* slots, u32 row, u32 rows);
+	void fixedMatrix(FixedSlot& f, u32 base, u32 row, u32 rows);
+	void matrixRows(u32 row, u32 rows, float data[6][4]);
 	void setDeviceCull(u8 cull);
 
 	// internal drawing
@@ -243,6 +252,7 @@ private:
 	Slot mPosSlot[64], mTexSlot[64];
 	u32 mPalHead, mPalLap; // rows used, times the palette was started again
 	u8 mPosMap[64], mTexMap[64];
+	FixedSlot mFixedPos, mFixedTex[8]; // (without relative addressing)
 };
 
 } // namespace gfx
