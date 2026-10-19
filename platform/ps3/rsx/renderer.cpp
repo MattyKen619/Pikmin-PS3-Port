@@ -7,6 +7,7 @@
 
 #include "../gpu/gpu_tex.h"
 
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +16,9 @@
 
 #ifndef RSX_VERTEX_CACHE_BYTES
 #define RSX_VERTEX_CACHE_BYTES (8 * 1024 * 1024)
+#endif
+#ifndef RSX_AUDIT_FRAMES
+#define RSX_AUDIT_FRAMES 300
 #endif
 
 namespace gfx {
@@ -43,6 +47,8 @@ enum {
 	CACHE_ENTRIES   = 32768,           // entries before the vertex cache starts over
 	POOL_CHUNK      = 1024 * 1024,
 	POOL_MAX        = 12 * 1024 * 1024, // CPU memory for the entries before the vertex cache starts over
+	AUDIT_FRAMES    = RSX_AUDIT_FRAMES, // one frame in this many is an audit frame (Renderer::mAudit)
+	AUDIT_LOGS      = 40,              // log lines about what an audit found, at most
 };
 
 // The triangles of a draw's primitive as indices (first: the index of its first vertex). Returns the count.
@@ -149,8 +155,6 @@ void initBpDirty()
 // changing (a movie), then less and less often while it does not, down to once in TEXTURE_CHECK_FRAMES
 // frames. (Test 24 checked every texture in its own fixed frame of an 8-frame cycle: a texture used only
 // in the other frames, like a movie's alternating images, was never checked again.)
-bool Renderer::checkDue(u32 checkedFrame, u8 interval) const { return mFrame - checkedFrame >= (interval ? interval : 1u); }
-
 void Renderer::checked(u32& checkedFrame, u8& interval, bool changed, u32 address) const
 {
 	if (changed) {
@@ -159,7 +163,7 @@ void Renderer::checked(u32& checkedFrame, u8& interval, bool changed, u32 addres
 		interval = (u8)(interval * 2 > TEXTURE_CHECK_FRAMES ? TEXTURE_CHECK_FRAMES : (interval ? interval * 2 : 2));
 	}
 	checkedFrame = mFrame;
-	if (interval >= TEXTURE_CHECK_FRAMES) {
+	if (interval >= TEXTURE_CHECK_FRAMES && !mCheckEveryFrame) {
 		checkedFrame -= (address >> 5) & 3; // (textures checked together drift apart: the work is spread out)
 	}
 }
@@ -211,6 +215,12 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mXfWrites(1)
     , mCacheOn(false)
     , mResetRequest(0)
+    , mSwitchRequest(0)
+    , mMode(0)
+    , mCheckEveryFrame(false)
+    , mFrontFaceSign(0)
+    , mLastEntry(NULL)
+    , mAudit(false)
     , mChainLength(0)
     , mArena(NULL)
     , mArenaSize(0)
@@ -226,7 +236,10 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mPoolBytes(0)
     , mRegions(NULL)
 {
+	// (every draw from the vertex cache reads its entry: one cache line)
+	static_assert(sizeof(CacheEntry) <= 128 && sizeof(CacheEntry) % 8 == 0, "a vertex cache entry is one cache line (and its copy of the bytes as aligned as the display list's)");
 	memset(mSetup, 0, sizeof(mSetup));
+	memset(&mAuditCounts, 0, sizeof(mAuditCounts));
 	mStale.lo = mNStale.lo = ~0ULL;
 	mStale.hi = mNStale.hi = 3;
 	for (int i = 0; i < 64; i++) {
@@ -277,8 +290,9 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 void Renderer::setGpuTransform(bool on)
 {
 	flushBatch();
-	mGpuXf   = on && mDev.vertexProgramsWork() && mDev.frontFaceSign() != 0 && mDev.vertexIndexType() != 0;
-	mCacheOn = mGpuXf && mDev.index32Works() && mTable && mArenaSize >= 1024 * 1024;
+	mFrontFaceSign = mDev.frontFaceSign();
+	mGpuXf         = on && mDev.vertexProgramsWork() && mFrontFaceSign != 0 && mDev.vertexIndexType() != 0;
+	mCacheOn       = mGpuXf && mDev.index32Works() && mTable && mArenaSize >= 1024 * 1024;
 }
 
 void Renderer::setVertexCache(bool on)
@@ -657,8 +671,22 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 	}
 	TexEntry& e = mTextures[k];
 	if (e.tex && !checkDue(e.checkedFrame, e.interval)) {
-		e.usedFrame = mFrame;
-		return e.tex;
+		if (!mAudit || e.usedFrame == mFrame) {
+			e.usedFrame = mFrame;
+			return e.tex;
+		}
+		// (an audit frame: checked anyway, once)
+		const u32 size = gpu::CommandProcessor::textureSize(k.format, k.width, k.height, 1);
+		const u8* src  = k.address ? mMem.read(k.address, size, gpu::MEM_TEXTURE) : NULL;
+		mAuditCounts.textures++;
+		if (!src || gpu::hashMemory(src, size) == e.hash) {
+			e.usedFrame = mFrame;
+			return e.tex;
+		}
+		if (mAuditCounts.texturesChanged++ < AUDIT_LOGS) {
+			log("[audit] frame %u: texture %ux%u (format %u) at 0x%07x changed without being noticed (checked %u frames ago, every %u)\n",
+			    mFrame, k.width, k.height, k.format, k.address, mFrame - e.checkedFrame, e.interval);
+		}
 	}
 	gpu::PhaseScope phase(gpu::GFX_CHECKS);
 	const u32 size = gpu::CommandProcessor::textureSize(k.format, k.width, k.height, 1);
@@ -1109,6 +1137,7 @@ void Renderer::uploadMatrices(const Rows& need, const Rows& nneed)
 	if (!(stale.lo | stale.hi | nstale.lo | nstale.hi)) {
 		return;
 	}
+	gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
 	if ((stale.lo & mBatch.rows.lo) || (stale.hi & mBatch.rows.hi) || (nstale.lo & mBatch.nrows.lo) || (nstale.hi & mBatch.nrows.hi)) {
 		flushBatch(); // (its draws read the old values)
 	}
@@ -1168,7 +1197,7 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 {
 	const XfInfo& info = xp->info;
 	mStats.gpuDraws++;
-	const int sign = mDev.frontFaceSign();
+	const int sign = mFrontFaceSign;
 	u8 cull        = CULL_NONE;
 	if (mCull == 1) {
 		cull = sign > 0 ? CULL_BACK : CULL_FRONT; // (remove negative areas)
@@ -1176,27 +1205,30 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 		cull = sign > 0 ? CULL_FRONT : CULL_BACK;
 	}
 	setDeviceCull(cull);
-	{
+	if (mSetupDirty || !mSetupValid) {
 		gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
 		uploadSetup();
 	}
 
-	// a display list draw: from the vertex cache
+	// a display list draw: from the vertex cache (time counted as state: a phase switch for each part of
+	// every draw costs more than the parts)
 	if (mCacheOn && call.inDisplayList) {
 		CacheEntry* reuse = NULL;
 		CacheEntry* e     = cacheLookup(call, xp, &reuse);
 		if (!e) {
+			gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
 			e = cacheFill(call, xp, reuse);
 		}
+		if (e && mAudit) {
+			auditEntry(e, call, xp);
+		}
 		if (e) {
-			{
-				gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
-				uploadMatrices(e->rows, e->nrows);
-			}
-			gpu::PhaseScope phase(gpu::GFX_TRIANGLES);
+			cacheFollow(e);
+			const Rows rows = e->rows(), nrows = e->nrows();
+			uploadMatrices(rows, nrows);
 			batchCached(e, xp);
-			mBatch.rows.lo |= e->rows.lo, mBatch.rows.hi |= e->rows.hi;
-			mBatch.nrows.lo |= e->nrows.lo, mBatch.nrows.hi |= e->nrows.hi;
+			mBatch.rows.lo |= rows.lo, mBatch.rows.hi |= rows.hi;
+			mBatch.nrows.lo |= nrows.lo, mBatch.nrows.hi |= nrows.hi;
 			mStats.triangles += e->indexCount / 3;
 			mStats.vertices += call.count;
 			return true;
@@ -1243,12 +1275,13 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 
 // ---- the vertex cache
 
-void* Renderer::poolAlloc(u32 bytes)
+void* Renderer::poolAlloc(u32 bytes, u32 align)
 {
 	bytes = (bytes + 15) & ~15u;
 	if (bytes > POOL_CHUNK) {
 		return NULL;
 	}
+	mPoolUsed       = (mPoolUsed + align - 1) & ~(align - 1); // (the chunks are 128-byte aligned)
 	const u32 chunk = mPoolUsed / POOL_CHUNK, at = mPoolUsed % POOL_CHUNK;
 	if (at + bytes > POOL_CHUNK || chunk >= mPool.size()) {
 		// (the next chunk)
@@ -1257,7 +1290,7 @@ void* Renderer::poolAlloc(u32 bytes)
 			if ((next + 1) * (u32)POOL_CHUNK > (u32)POOL_MAX) {
 				return NULL;
 			}
-			u8* m = (u8*)malloc(POOL_CHUNK);
+			u8* m = (u8*)memalign(128, POOL_CHUNK);
 			if (!m) {
 				return NULL;
 			}
@@ -1293,11 +1326,45 @@ void Renderer::cacheReset()
 	mArenaHead = 0;
 	mIdxHead   = 0;
 	mArenaGen++;
-	mRegions = NULL;
+	mRegions   = NULL;
+	mLastEntry = NULL;
 	mStats.cacheResets++;
 }
 
 namespace {
+
+// Whether n bytes at a and b are the same, for a and b equally far into an 8-byte word: compared a word at a
+// time, the bytes before and after the range masked off (they are in the same words: readable). (The
+// library's memcmp compares unaligned bytes one at a time.)
+typedef u64 __attribute__((may_alias)) AliasU64;
+inline bool sameBytes(const u8* a, const u8* b, u32 n)
+{
+	if (!n) {
+		return true;
+	}
+	const u32 head     = (u32)((uintptr_t)a & 7);
+	const AliasU64* wa = (const AliasU64*)(a - head);
+	const AliasU64* wb = (const AliasU64*)(b - head);
+	const u32 total    = n + head;
+	const u32 words    = (total + 7) >> 3;
+	const u32 tail     = total & 7;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	const u64 first = ~0ULL >> (head * 8);
+	const u64 last  = tail ? ~(~0ULL >> (tail * 8)) : ~0ULL;
+#else
+	const u64 first = ~0ULL << (head * 8);
+	const u64 last  = tail ? ~(~0ULL << (tail * 8)) : ~0ULL;
+#endif
+	if (words == 1) {
+		return ((wa[0] ^ wb[0]) & first & last) == 0;
+	}
+	u64 d = (wa[0] ^ wb[0]) & first;
+	for (u32 i = 1; i + 1 < words; i++) {
+		d |= wa[i] ^ wb[i];
+	}
+	d |= (wa[words - 1] ^ wb[words - 1]) & last;
+	return d == 0;
+}
 
 inline u32 tableSlot(const u8* data, u32 slots)
 {
@@ -1311,30 +1378,56 @@ inline u32 tableSlot(const u8* data, u32 slots)
 // there, or out of date (then *reuse: the entry to fill again).
 Renderer::CacheEntry* Renderer::cacheLookup(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry** reuse)
 {
-	u32 i = tableSlot(call.data, mTableSlots);
-	CacheEntry* head = NULL;
-	while (mTable[i]) {
-		if (mTable[i]->data == call.data) {
-			head = mTable[i];
-			break;
+	// (the draws come in the same order frame after frame: the entry that came after the last one, last
+	// time, is usually this draw's, and already read ahead)
+	CacheEntry* e = mLastEntry ? mLastEntry->follow : NULL;
+	if (e && e->data == call.data && e->xp == xp && e->count == call.count && e->prim == call.primitive
+	    && e->size == call.layout->size) {
+		mStats.cacheFollowed++;
+		mChainLength = 1;
+	} else {
+		u32 i = tableSlot(call.data, mTableSlots);
+		CacheEntry* head = NULL;
+		while (mTable[i]) {
+			if (mTable[i]->data == call.data) {
+				head = mTable[i];
+				break;
+			}
+			i = (i + 1) & (mTableSlots - 1);
 		}
-		i = (i + 1) & (mTableSlots - 1);
-	}
-	mChainLength = 0;
-	for (CacheEntry* e = head; e; e = e->next) {
-		mChainLength++;
-		if (e->xp != xp || e->count != call.count || e->prim != call.primitive || e->size != call.layout->size) {
-			continue;
+		mChainLength = 0;
+		for (e = head; e; e = e->next) {
+			mChainLength++;
+			if (e->xp == xp && e->count == call.count && e->prim == call.primitive && e->size == call.layout->size) {
+				break;
+			}
 		}
-		*reuse = e;
-		if (!e->cached) {
+		if (!e) {
 			return NULL;
 		}
-		// (the entry filled after this one, right after its bytes, is usually the next draw's)
-		__builtin_prefetch(e->bytes + ((e->count * e->size + 15) & ~15u));
-		return cacheValid(e, call) ? (mStats.cacheHits++, e) : NULL;
 	}
-	return NULL;
+	*reuse = e;
+	if (!e->cached) {
+		return NULL;
+	}
+	return cacheValid(e, call) ? (mStats.cacheHits++, e) : NULL;
+}
+
+// After a draw from the cache: e is the entry that came after the last one, and the one it was followed by
+// last time is read ahead for the next draw.
+void Renderer::cacheFollow(CacheEntry* e)
+{
+	if (mLastEntry && mLastEntry->follow != e) {
+		mLastEntry->follow      = e;
+		mLastEntry->followLines = e->lines;
+	}
+	mLastEntry = e;
+	if (const CacheEntry* f = e->follow) {
+		const u8* p = (const u8*)f;
+		for (u32 l = 0; l < e->followLines; l++) {
+			__builtin_prefetch(p + l * 128);
+		}
+	}
 }
 
 bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
@@ -1348,22 +1441,44 @@ bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
 	    || e->cp[4] != cp[0x90 + vat] || e->cp[5] != cp[0x30] || e->cp[6] != cp[0x40]) {
 		return false;
 	}
-	if (memcmp(call.data, e->bytes, e->count * e->size) != 0) {
+	if (!sameBytes(call.data, e->bytes(), e->count * e->size)) {
 		return false;
 	}
-	for (u32 k = 0; k < e->arrays; k++) {
-		const CacheArray& a = e->arr[k];
+	// the arrays: where they are, and whether they changed (unless they were found unchanged earlier in this
+	// frame: their versions change only when they are checked, at most once a frame)
+	const CacheArray* arr = e->arr();
+	const bool recheck    = e->okFrame != mFrame;
+	for (u32 k = 0, n = e->arrays; k < n; k++) {
+		const CacheArray& a = arr[k];
 		if (cp[0xA0 + a.array] != a.base || (cp[0xB0 + a.array] & 0xFF) != a.stride) {
 			return false;
 		}
-		ArrayRegion& r = *a.region;
-		if (mFrame - r.checkedFrame >= r.interval) {
-			checkRegion(r);
-		}
-		if (r.version != a.version) {
-			return false;
+		if (recheck) {
+			ArrayRegion& r = *a.region;
+			if (checkDue(r.checkedFrame, r.interval)) {
+				checkRegion(r);
+			} else if (mAudit && r.hashValid && r.checkedFrame != mFrame && r.auditFrame != mFrame) {
+				// (an audit frame: checked anyway, once)
+				r.auditFrame    = mFrame;
+				const u32 bytes = (r.hi - r.lo) * r.stride + r.stride;
+				const u8* p     = mMem.read(r.base + r.lo * r.stride, bytes, gpu::MEM_ARRAY);
+				mAuditCounts.regions++;
+				if (p && gpu::hashMemory(p, bytes) != r.hash) {
+					if (mAuditCounts.regionsChanged++ < AUDIT_LOGS) {
+						log("[audit] frame %u: vertex array %u at 0x%07x (entries %u-%u) changed without being noticed (checked %u frames "
+						    "ago, every %u)\n",
+						    mFrame, r.array, r.base, r.lo, r.hi, mFrame - r.checkedFrame, r.interval);
+					}
+					r.checkedFrame = mFrame - r.interval; // (due: checked, a new version)
+					checkRegion(r);
+				}
+			}
+			if (r.version != a.version) {
+				return false;
+			}
 		}
 	}
+	e->okFrame = mFrame;
 	return true;
 }
 
@@ -1395,7 +1510,7 @@ Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
 			return r;
 		}
 	}
-	ArrayRegion* r = (ArrayRegion*)poolAlloc(sizeof(ArrayRegion));
+	ArrayRegion* r = (ArrayRegion*)poolAlloc(sizeof(ArrayRegion), 16);
 	if (!r) {
 		return NULL;
 	}
@@ -1409,6 +1524,7 @@ Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
 	r->hashValid    = false;
 	r->version      = 1;
 	r->checkedFrame = mFrame;
+	r->auditFrame   = 0;
 	r->interval     = 1;
 	mRegions        = r;
 	return r;
@@ -1437,9 +1553,11 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	const u32 indexCount       = triangleCount(call.primitive, call.count) * 3;
 	const u32 dataBytes        = call.count * L.size;
 	const u32 vertexBytes      = call.count * stride;
-	const u32 entryBytes       = (sizeof(CacheEntry) + 15) & ~15u;
-	if (!stride || vertexBytes > mArenaSize / 4 || indexCount > mIdxSize / 4 || dataBytes > POOL_CHUNK / 4
-	    || L.indexedCount > CACHE_ARRAYS) {
+	const u32 arrayCap         = L.indexedCount;
+	const u32 bytesOff         = (u32)((uintptr_t)call.data & 7);
+	const u32 entryBytes       = sizeof(CacheEntry) + ((bytesOff + dataBytes + 15) & ~15u) + arrayCap * sizeof(CacheArray);
+	if (!stride || vertexBytes > mArenaSize / 4 || indexCount > mIdxSize / 4 || entryBytes > POOL_CHUNK / 4 || L.size > 255
+	    || arrayCap > CACHE_ARRAYS || (e && arrayCap > e->arrayCap)) {
 		mStats.cacheUncached++;
 		return NULL;
 	}
@@ -1447,45 +1565,42 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	// index memory, the table and the entries' memory
 	u32 off = (mArenaHead + stride - 1) / stride * stride;
 	if (off + vertexBytes > mArenaSize || mIdxHead + indexCount > mIdxSize || mTableUsed >= (u32)CACHE_ENTRIES
-	    || mTableUsed * 2 >= mTableSlots || mPoolUsed + entryBytes + dataBytes + 32 > (u32)(POOL_MAX - 2 * POOL_CHUNK)) {
+	    || mTableUsed * 2 >= mTableSlots || mPoolUsed + entryBytes + 256 > (u32)(POOL_MAX - 2 * POOL_CHUNK)) {
 		cacheReset();
 		e   = NULL;
 		off = 0;
 	}
-	u8* bytes;
 	const bool fresh = e == NULL;
 	if (fresh) {
-		u8* block = (u8*)poolAlloc(entryBytes + dataBytes);
-		if (!block) {
+		// (an entry starts a 128-byte cache line: what every draw from it reads first is one line)
+		e = (CacheEntry*)poolAlloc(entryBytes, 128);
+		if (!e) {
 			mStats.cacheUncached++;
 			return NULL;
 		}
-		e = (CacheEntry*)block;
 		memset(e, 0, sizeof(*e));
-		e->data   = call.data;
-		e->xp     = xp;
-		e->count  = call.count;
-		e->prim   = (u8)call.primitive;
-		e->size   = L.size;
-		e->cached = true;
-		bytes     = block + entryBytes;
-	} else {
-		bytes = (u8*)poolAlloc(dataBytes);
-		if (!bytes) {
-			mStats.cacheUncached++;
-			return NULL;
-		}
+		e->data     = call.data;
+		e->xp       = xp;
+		e->count    = (u16)call.count;
+		e->prim     = (u8)call.primitive;
+		e->size     = (u8)L.size;
+		e->arrayCap = (u8)arrayCap;
+		e->bytesOff = (u8)bytesOff;
+		e->lines    = (u8)((entryBytes + 127) / 128 < 8 ? (entryBytes + 127) / 128 : 8);
+		e->cached   = true;
 	}
+	// (a refill keeps its place in the entries' memory: the bytes and arrays are the CPU's, the vertices
+	// the RSX reads are unpacked to new cache memory)
 	const gpu::VertexArray* arrays = call.arrays ? call.arrays : mCp.resolveArrays(call);
 	gpu::DrawCall c = call;
 	c.arrays        = arrays;
-	e->bytes = bytes;
-	memcpy(e->bytes, call.data, dataBytes);
+	memcpy(e->bytes(), call.data, dataBytes);
 	const u32* cp = mCp.state().cp;
 	e->cp[0] = cp[0x50], e->cp[1] = cp[0x60], e->cp[2] = cp[0x70 + call.vat], e->cp[3] = cp[0x80 + call.vat];
 	e->cp[4] = cp[0x90 + call.vat], e->cp[5] = cp[0x30], e->cp[6] = cp[0x40];
 	// the arrays it reads, and the ranges
-	e->arrays = 0;
+	CacheArray* arr = e->arr();
+	e->arrays       = 0;
 	for (u32 k = 0; k < L.indexedCount; k++) {
 		const u32 id              = L.indexed[k].array;
 		const gpu::VertexArray& A = arrays[id];
@@ -1494,12 +1609,12 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 		}
 		bool dup = false;
 		for (u32 j = 0; j < e->arrays; j++) {
-			dup |= e->arr[j].array == id;
+			dup |= arr[j].array == id;
 		}
 		if (dup) {
 			continue;
 		}
-		CacheArray& ca = e->arr[e->arrays++];
+		CacheArray& ca = arr[e->arrays++];
 		ca.array       = (u8)id;
 		ca.base        = cp[0xA0 + id];
 		ca.stride      = (u8)(cp[0xB0 + id] & 0xFF);
@@ -1530,9 +1645,13 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	e->indexAt     = mIdxHead;
 	e->indexCount  = triangleIndices<u32>(call.primitive, call.count, e->firstVertex, mIdx + mIdxHead);
 	mIdxHead += e->indexCount;
-	matrixRowsUsed(c, xp->info, &e->rows, &e->nrows);
+	Rows rows, nrows;
+	matrixRowsUsed(c, xp->info, &rows, &nrows);
+	e->rowsLo = rows.lo, e->rowsHi = rows.hi;
+	e->nrowsLo = nrows.lo, e->nrowsHi = nrows.hi;
 	mArenaHead = off + vertexBytes;
 	e->gen     = mArenaGen;
+	e->okFrame = mFrame;
 	if (fresh) {
 		// into the table (after the entries for the same data, if any)
 		u32 i = tableSlot(call.data, mTableSlots);
@@ -1549,6 +1668,76 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	}
 	mStats.cacheFills++;
 	return e;
+}
+
+// An audit frame: the entry's vertices, triangles and matrix rows compared with what unpacking the draw
+// again gives.
+void Renderer::auditEntry(CacheEntry* e, const gpu::DrawCall& call, XfProgramEntry* xp)
+{
+	gpu::PhaseScope phase(gpu::GFX_CHECKS);
+	mAuditCounts.draws++;
+	const u32 stride = xp->info.format.stride;
+	const u32 bytes  = call.count * stride;
+	gpu::DrawCall c  = call;
+	c.arrays         = call.arrays ? call.arrays : mCp.resolveArrays(call);
+	mAuditVerts.resize(bytes + 64);
+	{
+		gpu::GatherSpec G = xp->info.gather;
+		G.posMap          = mIdentity;
+		G.texMap          = mIdentity;
+		mCp.gatherVertices(c, G, &mAuditVerts[0]);
+	}
+	// (the bytes of a vertex the unpacking writes: the matrix index groups have room for 4 indices, the
+	// unused ones are left as they are)
+	u8 written[256];
+	memset(written, 0, sizeof(written));
+	const VertexFormat& F = xp->info.format;
+	for (u32 i = 0; i < 16; i++) {
+		const VertexAttrib& a = F.attr[i];
+		if (!a.components || i == XA_IDX_A || i == XA_IDX_B || i == XA_IDX_C) {
+			continue;
+		}
+		const u32 n = a.components * (a.type == ATTRIB_F32 ? 4u : 1u);
+		for (u32 b = a.offset; b < a.offset + n && b < sizeof(written); b++) {
+			written[b] = 1;
+		}
+	}
+	const gpu::GatherSpec& G0 = xp->info.gather;
+	for (u32 t = 0; t < G0.indexCount; t++) {
+		const u32 o = G0.index + (G0.indexFloat ? t * 4 : t), n = G0.indexFloat ? 4 : 1;
+		for (u32 b = o; b < o + n && b < sizeof(written); b++) {
+			written[b] = 1;
+		}
+	}
+	const u8* kept   = mArena + e->firstVertex * stride;
+	const char* what = NULL;
+	u32 at           = 0;
+	for (; at < bytes && stride <= sizeof(written); at++) {
+		if (written[at % stride] && mAuditVerts[at] != kept[at]) {
+			what = "vertices";
+			break;
+		}
+	}
+	if (!what) {
+		mAuditIdx.resize(e->indexCount + 8);
+		const u32 n = triangleIndices<u32>(call.primitive, call.count, e->firstVertex, &mAuditIdx[0]);
+		if (n != e->indexCount || (n && memcmp(&mAuditIdx[0], mIdx + e->indexAt, n * 4) != 0)) {
+			what = "triangles";
+		}
+	}
+	if (!what) {
+		Rows rows, nrows;
+		matrixRowsUsed(c, xp->info, &rows, &nrows);
+		if (rows.lo != e->rowsLo || rows.hi != e->rowsHi || nrows.lo != e->nrowsLo || nrows.hi != e->nrowsHi) {
+			what = "matrix rows";
+		}
+	}
+	if (what && mAuditCounts.drawsWrong++ < AUDIT_LOGS) {
+		log("[audit] frame %u: a draw from the vertex cache has the wrong %s (%u vertices of %u bytes, %u in the cache, primitive 0x%02x, "
+		    "list bytes at %p; first difference: vertex %u, byte %u; filled %u times)\n",
+		    mFrame, what, call.count, call.layout->size, stride, call.primitive, (const void*)call.data, at / stride, at % stride,
+		    e->refills + 1u);
+	}
 }
 
 // ---- draws transformed on the CPU (gpu_xf.cpp), culled on the CPU
@@ -1728,6 +1917,20 @@ void Renderer::present(const gpu::CopyInfo& info)
 	const float uv[4]  = { (float)info.srcLeft / EFB_WIDTH, (float)info.srcTop / EFB_HEIGHT,
 		                   (float)(info.srcLeft + info.width) / EFB_WIDTH, (float)(info.srcTop + info.height) / EFB_HEIGHT };
 	drawQuad(dw, dh, dst, uv, mDev.efbColor(), true, mCopyPrograms[COPY_RGB][0]);
+	// the test switches, beside the picture: red, the vertex cache off; yellow, the transform on the CPU;
+	// blue, everything checked every frame
+	if (x0 >= 48 && (mMode != 0 || mCheckEveryFrame)) {
+		const u16 sq    = (u16)(x0 / 4 < 32 ? x0 / 4 : 32);
+		const u16 sx    = (u16)(x0 / 2 - sq / 2);
+		if (mMode != 0) {
+			const u16 r[4] = { sx, (u16)(y0 + 40), sq, sq };
+			mDev.clear(r, mMode == 1 ? 0xFFE02020 : 0xFFE0E020, 0, true, true, false);
+		}
+		if (mCheckEveryFrame) {
+			const u16 r[4] = { sx, (u16)(y0 + 40 + sq * 2), sq, sq };
+			mDev.clear(r, 0xFF2040FF, 0, true, true, false);
+		}
+	}
 	mDev.endDisplay();
 	mDev.setTarget(NULL);
 	invalidateDeviceState();
@@ -1863,10 +2066,42 @@ void Renderer::endFrame()
 		mStats.rsxBehind++;
 	}
 	mFrame++;
+	if (mAudit) {
+		const Audit& a = mAuditCounts;
+		log("[audit] frame %u: %u draws from the vertex cache compared (%u wrong); %u textures and %u vertex arrays checked early "
+		    "(%u and %u had changed)\n",
+		    mFrame - 1, a.draws, a.drawsWrong, a.textures, a.regions, a.texturesChanged, a.regionsChanged);
+		memset(&mAuditCounts, 0, sizeof(mAuditCounts));
+	}
+	mAudit = mFrame % AUDIT_FRAMES == 0;
 	if (mResetRequest) {
 		mResetRequest = 0;
 		if (mTableUsed) {
 			cacheReset();
+		}
+	}
+	if (mSwitchRequest) {
+		const int sw = __sync_fetch_and_and(&mSwitchRequest, 0);
+		if (sw & SWITCH_MODE) {
+			// the vertex cache on, off, the transform on the CPU, on again (started over: its vertex arrays were
+			// not checked while it was off)
+			mMode = (mMode + 1) % 3;
+			if (mTableUsed) {
+				cacheReset();
+			}
+			setGpuTransform(mMode != 2);
+			setVertexCache(mMode == 0);
+			mXfLookupValid = false;
+			log("[rsx] frame %u: test switch (R3): %s\n", mFrame,
+			    mMode == 0 ? "vertex cache on (normal)" : mMode == 1 ? "vertex cache OFF" : "transform on the CPU (vertex cache off)");
+			if (mGpuXf != (mMode != 2) || mCacheOn != (mMode == 0)) {
+				log("[rsx]   (not possible here: transform on the %s, vertex cache %s)\n", mGpuXf ? "RSX" : "CPU", mCacheOn ? "on" : "off");
+			}
+		}
+		if (sw & SWITCH_CHECKS) {
+			mCheckEveryFrame = !mCheckEveryFrame;
+			log("[rsx] frame %u: test switch (L3): textures and vertex arrays checked %s\n", mFrame,
+			    mCheckEveryFrame ? "EVERY FRAME" : "as usual");
 		}
 	}
 	if (mFrame <= 300 && mFrame % 10 == 0) {

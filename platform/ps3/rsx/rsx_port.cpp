@@ -113,6 +113,25 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 	ps3b_log_write(line);
 }
 
+// Test switches (the game does not use the stick buttons). R3: the vertex cache on (normal), off, the
+// transform on the CPU, in turn. L3: textures and vertex arrays checked for changes every frame, or as usual.
+// Each press is logged, and the squares beside the picture show what is on (renderer.cpp, present).
+extern "C" void ps3RsxDebugButtons(unsigned int buttons)
+{
+	static unsigned int sLast;
+	const unsigned int pressed = buttons & ~sLast;
+	sLast = buttons;
+	if (!sRenderer || !pressed) {
+		return;
+	}
+	if (pressed & PS3B_BTN_R3) {
+		sRenderer->requestSwitch(gfx::Renderer::SWITCH_MODE);
+	}
+	if (pressed & PS3B_BTN_L3) {
+		sRenderer->requestSwitch(gfx::Renderer::SWITCH_CHECKS);
+	}
+}
+
 void ps3rsx::sectionChanged()
 {
 	if (sRenderer) {
@@ -150,9 +169,10 @@ void ps3rsx::status(char* buf, unsigned int size)
 	if (at > 0 && at < (int)size) {
 		if (sRenderer->vertexCache()) {
 			snprintf(buf + at, size - at,
-			         "; vertex cache: per frame %llu draws from it, %llu unpacked into it, %llu not cached; %u entries, %u KB; "
-			         "%llu array checks (%llu changed), started over %llu times",
-			         (s.cacheHits - last.cacheHits) / n, (s.cacheFills - last.cacheFills) / n, (s.cacheUncached - last.cacheUncached) / n,
+			         "; vertex cache: per frame %llu draws from it (%llu found by following the last), %llu unpacked into it, %llu not "
+			         "cached; %u entries, %u KB; %llu array checks (%llu changed), started over %llu times",
+			         (s.cacheHits - last.cacheHits) / n, (s.cacheFollowed - last.cacheFollowed) / n, (s.cacheFills - last.cacheFills) / n,
+			         (s.cacheUncached - last.cacheUncached) / n,
 			         s.cacheEntries, s.cacheBytes >> 10, (s.regionChecks - last.regionChecks) / n, s.regionChanges - last.regionChanges,
 			         s.cacheResets);
 		} else {

@@ -44,6 +44,7 @@ struct RendererStats {
 	u64 copies, copyUses, presents, clears, fenceWaits;
 	u64 gpuDraws, cpuDraws, xfPrograms, xfProgramErrors, matrixRows, setupUploads, vertexProgramLoads;
 	u64 cacheHits, cacheFills, cacheUncached, cacheResets, regionChecks, regionChanges;
+	u64 cacheFollowed; // (draws whose entry was the one predicted)
 	u32 cacheBytes, cacheEntries;
 	u64 rsxBehind; // frames finished before the RSX had drawn the previous one
 	u32 textureBytes, textures;
@@ -77,6 +78,11 @@ public:
 	bool vertexCache() const { return mCacheOn; }
 	// Starts the vertex cache over at the end of the frame (from any thread).
 	void requestCacheReset() { mResetRequest = 1; }
+	// Test switches, applied at the end of the frame (from any thread). MODE: the vertex cache on (the
+	// normal way), off, or the transform on the CPU (in turn). CHECKS: every texture and vertex array
+	// checked for changes every frame, or as usual (in turn). Shown by squares beside the picture.
+	enum { SWITCH_MODE = 1, SWITCH_CHECKS = 2 };
+	void requestSwitch(int which) { __sync_fetch_and_or(&mSwitchRequest, which); }
 	void copy(const gpu::CopyInfo& info) override;
 	void bpWritten(u32 reg, u32 value) override;
 
@@ -149,7 +155,7 @@ private:
 		u32 array, base, stride, lo, hi;
 		u64 hash;
 		bool hashValid;
-		u32 version, checkedFrame;
+		u32 version, checkedFrame, auditFrame;
 		u8 interval;
 	};
 	enum { CACHE_ARRAYS = 6 };
@@ -161,18 +167,28 @@ private:
 	// A display list draw in the vertex cache: its vertices unpacked into the cache memory (from
 	// firstVertex), its triangles (32-bit indices into the cache memory, at indexAt in the index memory:
 	// the entries filled one after another have their triangles one after another, and draws in that order
-	// are drawn as one), and what it was unpacked from.
+	// are drawn as one), and what it was unpacked from. In the entries' memory: this (one 128-byte cache
+	// line, what every draw from it reads), then a copy of the display list's vertex bytes, then the vertex
+	// arrays it reads (arrayCap of them).
 	struct CacheEntry {
 		const u8* data;       // the draw's vertices in the display list
-		CacheEntry* next;     // other entries for the same data (other programs)
 		XfProgramEntry* xp;
-		u8* bytes;            // a copy of the display list's vertex bytes (count * layout size)
-		u32 count, size, indexAt, indexCount, gen, firstVertex, block;
+		CacheEntry* follow;   // the entry of the cached draw that came after this one last time
+		CacheEntry* next;     // other entries for the same data (other programs)
+		u64 rowsLo, nrowsLo;  // the rows of the matrices the vertices use (Rows, packed)
+		u32 rowsHi, nrowsHi;
 		u32 cp[7];            // vertex descriptor, the format's VAT A/B/C, MATINDEX A/B
-		Rows rows, nrows;     // the rows of the matrices the vertices use
-		u8 prim, arrays, refills;
+		u32 gen, okFrame;     // okFrame: the last frame its vertex arrays were found unchanged
+		u32 indexAt, indexCount, firstVertex;
+		u16 count;
+		u8 size, prim, arrays, arrayCap, refills, lines; // lines: 128-byte lines from the entry to its end
 		bool cached;          // (false: changes too often, drawn from the ring)
-		CacheArray arr[CACHE_ARRAYS];
+		u8 followLines;       // (follow's lines: read ahead)
+		u8 bytesOff;          // (the copy is as far into an 8-byte word as the display list's bytes: compared by words)
+		u8* bytes() { return (u8*)this + sizeof(CacheEntry) + bytesOff; }
+		CacheArray* arr() { return (CacheArray*)((u8*)this + sizeof(CacheEntry) + ((bytesOff + count * size + 15) & ~15u)); }
+		Rows rows() const { Rows r = { rowsLo, rowsHi }; return r; }
+		Rows nrows() const { Rows r = { nrowsLo, nrowsHi }; return r; }
 	};
 
 	void log(const char* fmt, ...);
@@ -191,7 +207,14 @@ private:
 	bool updateState();
 	void bindProgram(const FragmentProgram& fp, const float (*params)[4]);
 	const Texture* lookupTexture(u32 map, Sampler& sampler);
-	bool checkDue(u32 checkedFrame, u8 interval) const;
+	// (checks of memory for changes: textures, frame buffer copies, vertex arrays)
+	bool checkDue(u32 checkedFrame, u8 interval) const
+	{
+		if (mCheckEveryFrame) {
+			return checkedFrame != mFrame; // (the test switch)
+		}
+		return mFrame - checkedFrame >= (interval ? interval : 1u);
+	}
 	void checked(u32& checkedFrame, u8& interval, bool changed, u32 address) const;
 	const Texture* missingTexture();
 	void invalidateDeviceState();
@@ -207,11 +230,12 @@ private:
 
 	// the vertex cache
 	CacheEntry* cacheLookup(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry** reuse);
+	void cacheFollow(CacheEntry* e);
 	CacheEntry* cacheFill(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry* e);
 	bool cacheValid(CacheEntry* e, const gpu::DrawCall& call);
 	void checkRegion(ArrayRegion& r);
 	ArrayRegion* regionFor(u32 array, u32 base, u32 stride);
-	void* poolAlloc(u32 bytes);
+	void* poolAlloc(u32 bytes, u32 align);
 	void cacheReset();
 	void batchCached(CacheEntry* e, XfProgramEntry* xp);
 
@@ -308,6 +332,21 @@ private:
 	// the vertex cache
 	bool mCacheOn;
 	volatile int mResetRequest;
+	volatile int mSwitchRequest;
+	u32 mMode;            // (the test switch: 0 the vertex cache on, 1 off, 2 the transform on the CPU)
+	bool mCheckEveryFrame; // (the test switch: textures and vertex arrays checked every frame)
+	int mFrontFaceSign;   // (the device's, from its self-test)
+	CacheEntry* mLastEntry; // the entry of the last cached draw (its follow is the next one's)
+
+	// audit frames (every AUDIT_FRAMES): everything the checks would skip is checked anyway, and what changed
+	// without being noticed is logged (and corrected)
+	bool mAudit;
+	struct Audit {
+		u32 draws, drawsWrong, textures, texturesChanged, regions, regionsChanged;
+	} mAuditCounts;
+	Vec<u8> mAuditVerts;
+	Vec<u32> mAuditIdx;
+	void auditEntry(CacheEntry* e, const gpu::DrawCall& call, XfProgramEntry* xp);
 	u32 mChainLength;   // (entries for the display list address of the last lookup)
 	u8* mArena;         // cache memory for vertices (the end of the scratch memory)
 	u32 mArenaSize, mArenaHead, mArenaGen;

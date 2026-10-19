@@ -205,6 +205,9 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 	while (pos < size) {
 		const u8* p = data + pos;
 		u32 avail   = size - pos;
+		if (inDisplayList && avail > 512) {
+			__builtin_prefetch(p + 512);
+		}
 		if (p[0] == OP_NOP) { // (GXFlush pads with 32 of them)
 			mStats.commands++;
 			pos++;
@@ -431,6 +434,10 @@ void CommandProcessor::callDisplayList(u32 address, u32 size)
 			mListener->memoryFailed(address, size, MEM_DISPLAY_LIST);
 		}
 		return;
+	}
+	// (display lists are read from memory, not the cache, each frame: read ahead, here and as they run)
+	for (u32 at = 0; at < size && at < 512; at += 128) {
+		__builtin_prefetch(list + at);
 	}
 	mDisplayListDepth++;
 	run(list, size, true, 0);

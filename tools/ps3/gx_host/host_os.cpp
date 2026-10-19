@@ -243,6 +243,7 @@ void* ps3b_memalign(unsigned int align, unsigned int size)
 	return posix_memalign(&p, align, size) == 0 ? p : NULL;
 }
 void ps3b_sleep_us(unsigned int usec) { usleep(usec); }
+void ps3b_log_memory(const char* when) { (void)when; }
 int ps3b_thread_create(void (*entry)(void*), void* arg, int priority, unsigned int stackSize, const char* name)
 {
 	(void)priority;

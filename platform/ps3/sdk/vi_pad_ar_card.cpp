@@ -109,6 +109,8 @@ static s8 toS8(int v)
 	return (s8)v;
 }
 
+extern "C" void ps3RsxDebugButtons(unsigned int buttons); // (rsx_port.cpp)
+
 BOOL PADInit(void)
 {
 	ps3b_pad_init();
@@ -129,6 +131,9 @@ u32 PADRead(PADStatus* status)
 		if (!p.connected) {
 			s->err = PAD_ERR_NO_CONTROLLER;
 			continue;
+		}
+		if (ch == 0) {
+			ps3RsxDebugButtons(p.buttons); // (R3, L3: test switches for the renderer)
 		}
 		u16 b = 0;
 		if (p.buttons & PS3B_BTN_CROSS) b |= PAD_BUTTON_A;
