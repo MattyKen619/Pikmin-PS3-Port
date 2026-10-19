@@ -51,6 +51,9 @@ public:
 	u32 vertexIndexType() override { return mVertexIndexType; }
 	void drawTriangles(const unsigned short* indices, u32 count) override;
 	void drawTriangles32(const u32* indices, u32 count) override;
+	void drawTriangles32Inline(const u32* indices, u32 count) override;
+	void sleepUs(u32 us) override;
+	void setProgramCacheDrop(bool on) override { mProgramCacheDrop = on; }
 	bool index32Works() override { return mIndex32Works; }
 	void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) override;
 	bool readTarget(u32* out, u32 x, u32 y, u32 width, u32 height) override;
@@ -90,6 +93,7 @@ private:
 	bool mStateValid;
 	u32 mBoundTexCoords;
 	bool mInvalidateTextures;
+	bool mProgramCacheDrop; // (setProgramCacheDrop)
 	u32 mReadLabelValue;
 	u32 mLocalUsed;
 	const VertexProgram* mVertexProgram; // bound (NULL: the pass-through program)

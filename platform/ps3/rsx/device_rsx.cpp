@@ -70,6 +70,7 @@ RsxDevice::RsxDevice()
     , mStateValid(false)
     , mBoundTexCoords(8)
     , mInvalidateTextures(true)
+    , mProgramCacheDrop(true)
     , mReadLabelValue(1)
     , mLocalUsed(0)
     , mVertexProgram(NULL)
@@ -418,6 +419,13 @@ void RsxDevice::setProgram(const void* ucode, const FragmentProgram& fp)
 	h.texcoords  = fp.texcoords;
 	h.texcoord2D = fp.texcoord2D;
 	h.texcoord3D = fp.texcoord3D;
+	if (mProgramCacheDrop) {
+		// (Test build 30 flickered: now and then a draw with another material's colors. The suspicion: the
+		// RSX reads fragment programs through its texture cache, which keeps what it read from main
+		// memory. The renderer writes each program right after the one before, and reading that one may
+		// have brought the next one's memory, with its earlier contents, into the cache.)
+		rsxInvalidateTextureCache(CTX, GCM_INVALIDATE_TEXTURE);
+	}
 	rsxLoadFragmentProgramLocation(CTX, &h, offsetOf(ucode), GCM_LOCATION_CELL);
 }
 
@@ -554,6 +562,20 @@ void RsxDevice::drawTriangles32(const u32* indices, u32 count)
 	}
 	rsxDrawIndexArray(ctx, GCM_TYPE_TRIANGLES, offsetOf(indices), count, GCM_INDEX_TYPE_32B, GCM_LOCATION_CELL);
 }
+
+void RsxDevice::drawTriangles32Inline(const u32* indices, u32 count)
+{
+	checkStop();
+	gcmContextData* ctx = CTX;
+	if (mInvalidateTextures) {
+		rsxSetWaitForIdle(ctx);
+		rsxInvalidateTextureCache(ctx, GCM_INVALIDATE_TEXTURE);
+		mInvalidateTextures = false;
+	}
+	rsxDrawInlineIndexArray32(ctx, GCM_TYPE_TRIANGLES, 0, count, indices);
+}
+
+void RsxDevice::sleepUs(u32 us) { ps3b_sleep_us(us); }
 
 void RsxDevice::clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo)
 {

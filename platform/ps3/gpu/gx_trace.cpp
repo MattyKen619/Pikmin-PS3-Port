@@ -35,7 +35,7 @@ using gpu::u8;
 
 enum {
 	BUFFER_SIZE = 8 << 20, // (the largest frame so far: 5.2 MB; test 28 ran out of memory with 32 MB here)
-	MAX_TRACES  = 8,
+	MAX_TRACES  = 12, // (the plan's 8, and up to 4 asked for with the Select button)
 	MAX_PENDING = 8,
 	PAGE_SIZE   = 4096,
 	PAGE_SLOTS  = 1 << 15,
@@ -464,6 +464,19 @@ void traceStatus(char* buf, unsigned int size)
 }
 
 } // namespace ps3gx
+
+// The Select button (rsx_port.cpp): records the next frame, up to 4 times.
+extern "C" void ps3GxRecordRequested(void)
+{
+	static unsigned sRequests;
+	if (sRequests >= 4) {
+		return;
+	}
+	char label[32];
+	snprintf(label, sizeof(label), "pressed_%u", ++sRequests);
+	ps3gx::traceSchedule(label, 1);
+	ps3Log("[gpu] frame recording asked for with Select (%s)\n", label);
+}
 
 // Called by the game when it enters a section (plugPikiColin/gameflow.cpp, game.cpp): schedules frame
 // recordings at moments that show a variety of the game's graphics.

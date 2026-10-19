@@ -162,6 +162,13 @@ public:
 	// in the renderer's vertex cache. Only if index32Works.
 	virtual void drawTriangles32(const u32* indices, u32 count) = 0;
 	virtual bool index32Works() = 0;
+	// (test modes) The same with the indices copied into the command buffer, and a pause of the calling
+	// thread.
+	virtual void drawTriangles32Inline(const u32* indices, u32 count) { drawTriangles32(indices, count); }
+	virtual void sleepUs(u32 us) { (void)us; }
+	// Whether setProgram drops the chip's texture cache first (on by default): the RSX reads fragment
+	// programs through it, and a new program written where it has read before may come from the cache.
+	virtual void setProgramCacheDrop(bool on) { (void)on; }
 	// Clears a rectangle of the current target (the scissor is not used).
 	virtual void clear(const u16 rect[4], u32 argb, u32 depth, bool color, bool alpha, bool depthToo) = 0;
 

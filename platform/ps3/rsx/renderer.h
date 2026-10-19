@@ -78,10 +78,19 @@ public:
 	bool vertexCache() const { return mCacheOn; }
 	// Starts the vertex cache over at the end of the frame (from any thread).
 	void requestCacheReset() { mResetRequest = 1; }
-	// Test switches, applied at the end of the frame (from any thread). MODE: the vertex cache on (the
-	// normal way), off, or the transform on the CPU (in turn). CHECKS: every texture and vertex array
-	// checked for changes every frame, or as usual (in turn). Shown by squares beside the picture.
+	// Test switches, applied at the end of the frame (from any thread). MODE: the next test mode (MODE_*,
+	// in turn). CHECKS: every texture and vertex array checked for changes every frame, or as usual (in
+	// turn). Shown by squares beside the picture (as many as the mode's number; blue: the checks).
 	enum { SWITCH_MODE = 1, SWITCH_CHECKS = 2 };
+	enum {
+		MODE_NORMAL,  // the texture cache dropped before each new fragment program is used (Device::setProgram)
+		MODE_OLD,     // as test build 30: fragment programs used as they are written
+		MODE_SPACED,  // as test build 30, each fragment program in a 4 KB block of its own
+		MODE_SLOW,    // as normal, the graphics thread paused 8 ms after each frame
+		MODE_INLINE,  // as normal, the vertex cache's triangles copied into the command buffer
+		MODE_NOCACHE, // as normal, the vertex cache off
+		MODE_COUNT
+	};
 	void requestSwitch(int which) { __sync_fetch_and_or(&mSwitchRequest, which); }
 	void copy(const gpu::CopyInfo& info) override;
 	void bpWritten(u32 reg, u32 value) override;
@@ -333,7 +342,7 @@ private:
 	bool mCacheOn;
 	volatile int mResetRequest;
 	volatile int mSwitchRequest;
-	u32 mMode;            // (the test switch: 0 the vertex cache on, 1 off, 2 the transform on the CPU)
+	u32 mMode;            // (the test switch: MODE_*)
 	bool mCheckEveryFrame; // (the test switch: textures and vertex arrays checked every frame)
 	int mFrontFaceSign;   // (the device's, from its self-test)
 	CacheEntry* mLastEntry; // the entry of the last cached draw (its follow is the next one's)

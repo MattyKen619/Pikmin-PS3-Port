@@ -521,7 +521,11 @@ void Renderer::flushBatch()
 			}
 			mDev.setVertexProgram(&mBatch.xp->prog);
 			mDev.setVertexFormat(mArena, mBatch.xp->info.format);
-			mDev.drawTriangles32(mIdx + mBatch.at32, mBatch.count32);
+			if (mMode == MODE_INLINE) {
+				mDev.drawTriangles32Inline(mIdx + mBatch.at32, mBatch.count32);
+			} else {
+				mDev.drawTriangles32(mIdx + mBatch.at32, mBatch.count32);
+			}
 			mStats.batches++;
 			if ((mStats.batches & 31) == 0) {
 				mDev.kick(); // (the RSX starts on them while more are made)
@@ -579,7 +583,7 @@ void Renderer::bindProgram(const FragmentProgram& fp, const float (*params)[4])
 {
 	gpu::PhaseScope phase(gpu::GFX_RSX);
 	const u32 bytes = (u32)fp.ucode.size() * 4;
-	u32* dst        = (u32*)ringAlloc(bytes, 128);
+	u32* dst        = mMode == MODE_SPACED ? (u32*)ringAlloc((bytes + 4095) & ~4095u, 4096) : (u32*)ringAlloc(bytes, 128);
 	memcpy(dst, &fp.ucode[0], bytes);
 	if (params) {
 		for (size_t i = 0; i < fp.relocs.size(); i++) {
@@ -1917,17 +1921,18 @@ void Renderer::present(const gpu::CopyInfo& info)
 	const float uv[4]  = { (float)info.srcLeft / EFB_WIDTH, (float)info.srcTop / EFB_HEIGHT,
 		                   (float)(info.srcLeft + info.width) / EFB_WIDTH, (float)(info.srcTop + info.height) / EFB_HEIGHT };
 	drawQuad(dw, dh, dst, uv, mDev.efbColor(), true, mCopyPrograms[COPY_RGB][0]);
-	// the test switches, beside the picture: red, the vertex cache off; yellow, the transform on the CPU;
-	// blue, everything checked every frame
+	// the test switches, beside the picture: as many red squares as the test mode's number, and a blue one
+	// below them while everything is checked every frame
 	if (x0 >= 48 && (mMode != 0 || mCheckEveryFrame)) {
-		const u16 sq    = (u16)(x0 / 4 < 32 ? x0 / 4 : 32);
-		const u16 sx    = (u16)(x0 / 2 - sq / 2);
-		if (mMode != 0) {
-			const u16 r[4] = { sx, (u16)(y0 + 40), sq, sq };
-			mDev.clear(r, mMode == 1 ? 0xFFE02020 : 0xFFE0E020, 0, true, true, false);
+		const u16 sq = (u16)(x0 / 4 < 32 ? x0 / 4 : 32);
+		const u16 sx = (u16)(x0 / 2 - sq / 2);
+		u16 y        = (u16)(y0 + 40);
+		for (u32 i = 0; i < mMode; i++, y = (u16)(y + sq * 2)) {
+			const u16 r[4] = { sx, y, sq, sq };
+			mDev.clear(r, 0xFFE02020, 0, true, true, false);
 		}
 		if (mCheckEveryFrame) {
-			const u16 r[4] = { sx, (u16)(y0 + 40 + sq * 2), sq, sq };
+			const u16 r[4] = { sx, (u16)(y + sq), sq, sq };
 			mDev.clear(r, 0xFF2040FF, 0, true, true, false);
 		}
 	}
@@ -2083,20 +2088,24 @@ void Renderer::endFrame()
 	if (mSwitchRequest) {
 		const int sw = __sync_fetch_and_and(&mSwitchRequest, 0);
 		if (sw & SWITCH_MODE) {
-			// the vertex cache on, off, the transform on the CPU, on again (started over: its vertex arrays were
-			// not checked while it was off)
-			mMode = (mMode + 1) % 3;
+			// the next test mode (the vertex cache started over: its vertex arrays are not checked while it is
+			// off)
+			static const char* const kNames[MODE_COUNT] = {
+				"normal (the texture cache dropped before each new fragment program)",
+				"as test build 30 (fragment programs used as written)",
+				"as test build 30, each fragment program in a 4 KB block of its own",
+				"normal, the graphics thread paused 8 ms after each frame",
+				"normal, vertex cache triangles in the command buffer",
+				"normal, vertex cache OFF",
+			};
+			mMode = (mMode + 1) % MODE_COUNT;
 			if (mTableUsed) {
 				cacheReset();
 			}
-			setGpuTransform(mMode != 2);
-			setVertexCache(mMode == 0);
-			mXfLookupValid = false;
-			log("[rsx] frame %u: test switch (R3): %s\n", mFrame,
-			    mMode == 0 ? "vertex cache on (normal)" : mMode == 1 ? "vertex cache OFF" : "transform on the CPU (vertex cache off)");
-			if (mGpuXf != (mMode != 2) || mCacheOn != (mMode == 0)) {
-				log("[rsx]   (not possible here: transform on the %s, vertex cache %s)\n", mGpuXf ? "RSX" : "CPU", mCacheOn ? "on" : "off");
-			}
+			setVertexCache(mMode != MODE_NOCACHE);
+			mDev.setProgramCacheDrop(mMode != MODE_OLD && mMode != MODE_SPACED);
+			log("[rsx] frame %u: test switch (R3): mode %u, %s%s\n", mFrame, mMode, kNames[mMode],
+			    mCacheOn == (mMode != MODE_NOCACHE) ? "" : " (not possible here)");
 		}
 		if (sw & SWITCH_CHECKS) {
 			mCheckEveryFrame = !mCheckEveryFrame;
@@ -2115,6 +2124,10 @@ void Renderer::endFrame()
 		early = mStats;
 	}
 	mDirtyBits = D_ALL; // (textures are checked again once per frame)
+	if (mMode == MODE_SLOW) {
+		gpu::PhaseScope wait(gpu::GFX_WAIT_RSX);
+		mDev.sleepUs(8000);
+	}
 	mark();
 	mFrameFence = mFenceCounter;
 	mDev.kick();
