@@ -71,6 +71,7 @@ static volatile u32 sUnderruns, sOverruns;
 
 // (diagnostics, further down)
 static void captureOutput(const float* src, u32 have, u32 frames);
+static unsigned long long sOutputStartTb;
 static volatile u32 sEarlyDropped, sEarlyUnderruns;
 static volatile unsigned long long sStartTb, sFirstPullTb;
 
@@ -168,10 +169,10 @@ static u32 sLastStreamState = 4;
 
 // Recordings of the first seconds of sound, for checking it off the console: what the game's mixer made
 // (PIKMIN/sound_mix.wav, 32 kHz, the blocks the AI plays) and what went to the PS3's sound output
-// (PIKMIN/sound_out.wav, 48 kHz). (Test builds 14-16 recorded the first; test 28 both, to find where the
-// Nintendo logo's sound is lost.) Build with -DPS3_SOUND_CAPTURE=0 to leave them out.
+// (PIKMIN/sound_out.wav, 48 kHz). (Test builds 14-16 recorded the first; test 28 both: the Nintendo logo's
+// sound is in both, at the volume of the music.) Build with -DPS3_SOUND_CAPTURE=1 to turn them on (8 MB).
 #ifndef PS3_SOUND_CAPTURE
-#define PS3_SOUND_CAPTURE 1
+#define PS3_SOUND_CAPTURE 0
 #endif
 enum { CAPTURE_SECONDS = 25 };
 struct Capture {
@@ -394,9 +395,11 @@ static void aiTimerThread(void*)
 				sReported++;
 				const unsigned long long f = ps3b_timebase_freq();
 				ps3Log("[ps3] audio: first %u blocks (%u ms): %u not sent on (the sound output was not running), %u times the "
-				       "output found nothing queued; output first pulled %u ms after the start\n",
+				       "output found nothing queued; output first pulled %u ms after the start, which was %u ms after the sound "
+				       "output started\n",
 				       (unsigned)blocks, (unsigned)((ps3b_timebase() - sStartTb) * 1000 / f), (unsigned)sEarlyDropped,
-				       (unsigned)sEarlyUnderruns, sFirstPullTb ? (unsigned)((sFirstPullTb - sStartTb) * 1000 / f) : 0u);
+				       (unsigned)sEarlyUnderruns, sFirstPullTb ? (unsigned)((sFirstPullTb - sStartTb) * 1000 / f) : 0u,
+				       sOutputStartTb ? (unsigned)((sStartTb - sOutputStartTb) * 1000 / f) : 0u);
 			}
 		}
 		u32 streamState = ps3StreamControl->playbackState;
@@ -453,7 +456,11 @@ void AIStartDMA(void)
 
 // The PS3's sound output starts at boot, playing silence until the game's sound starts (AIStartDMA): a
 // TV or receiver that takes a moment to pick the sound up has it by the time of the Nintendo logo's.
-extern "C" void ps3AudioStartOutput(void) { ps3b_audio_start(pullOutput); }
+extern "C" void ps3AudioStartOutput(void)
+{
+	sOutputStartTb = ps3b_timebase();
+	ps3b_audio_start(pullOutput);
+}
 
 void AISetDSPSampleRate(u32 rate) { sDspSampleRate = rate; }
 u32 AIGetDSPSampleRate(void) { return sDspSampleRate; }

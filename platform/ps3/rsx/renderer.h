@@ -145,7 +145,8 @@ private:
 	// Vertex arrays as the vertex cache knows them: the range its draws read, its hash, and a version that
 	// changes when the memory does.
 	struct ArrayRegion {
-		u32 base, stride, lo, hi;
+		ArrayRegion* next;
+		u32 array, base, stride, lo, hi;
 		u64 hash;
 		bool hashValid;
 		u32 version, checkedFrame;
@@ -316,7 +317,7 @@ private:
 	u32 mTableSlots, mTableUsed;
 	Vec<u8*> mPool;      // CPU memory for entries (freed together by cacheReset)
 	u32 mPoolUsed, mPoolBytes;
-	Map<u64, ArrayRegion*> mRegions;
+	ArrayRegion* mRegions; // (in the entries' memory: freed by cacheReset)
 };
 
 } // namespace gfx

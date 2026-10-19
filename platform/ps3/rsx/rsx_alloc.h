@@ -23,6 +23,20 @@
 
 namespace gfx {
 
+// Called (if set) when the renderer's memory runs out, before abort(): says so in the log (rsx_port.cpp).
+inline void (*&allocFailedHook())(size_t)
+{
+	static void (*hook)(size_t) = 0;
+	return hook;
+}
+inline void allocFailed(size_t bytes)
+{
+	if (allocFailedHook()) {
+		allocFailedHook()(bytes);
+	}
+	abort();
+}
+
 template <class T>
 struct MallocAllocator {
 	typedef T value_type;
@@ -36,7 +50,7 @@ struct MallocAllocator {
 		const size_t bytes = n * sizeof(T);
 		void* p            = malloc(bytes != 0 ? bytes : 1);
 		if (!p) {
-			abort();
+			allocFailed(bytes);
 		}
 		return static_cast<T*>(p);
 	}
@@ -68,7 +82,7 @@ T* create(Args&&... args)
 {
 	void* p = malloc(sizeof(T));
 	if (!p) {
-		abort();
+		allocFailed(sizeof(T));
 	}
 	return new (p) T(static_cast<Args&&>(args)...); // (placement new: no allocation)
 }

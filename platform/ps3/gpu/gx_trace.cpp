@@ -34,7 +34,7 @@ using gpu::u64;
 using gpu::u8;
 
 enum {
-	BUFFER_SIZE = 32 << 20,
+	BUFFER_SIZE = 8 << 20, // (the largest frame so far: 5.2 MB; test 28 ran out of memory with 32 MB here)
 	MAX_TRACES  = 8,
 	MAX_PENDING = 8,
 	PAGE_SIZE   = 4096,
@@ -367,6 +367,8 @@ static void startRecording(const char* label, u32 frame, const gpu::CommandProce
 			return;
 		}
 		sBufSize = size - END_RESERVE;
+		ps3Log("[gpu] frame recording buffer: %u KB\n", (unsigned)(size >> 10));
+		ps3b_log_memory("after the frame recording buffer");
 	}
 	sLen       = 0;
 	sTruncated = false;

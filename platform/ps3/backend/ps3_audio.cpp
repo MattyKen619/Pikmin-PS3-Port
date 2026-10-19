@@ -129,11 +129,28 @@ static volatile int sStop;
 static volatile int sPlaying;
 static u32 sPort;
 
+// A faint noise floor (about -96 dB: half the step of 16-bit sound either way) under everything, silence
+// too. Some TVs and sound systems treat digital silence as "nothing playing" and swallow the start of the
+// first sound after it (test 28: the Nintendo logo's sound went to the PS3's output at the volume of the
+// music, and was not heard).
+static u32 sNoise = 0x2545F491;
+static inline float noise()
+{
+	sNoise   = sNoise * 1664525u + 1013904223u;
+	float a  = (float)(sNoise >> 8) * (1.0f / 16777216.0f);
+	sNoise   = sNoise * 1664525u + 1013904223u;
+	float b  = (float)(sNoise >> 8) * (1.0f / 16777216.0f);
+	return (a - b) * (1.0f / 32768.0f); // (triangular, -1 to 1 steps of 16-bit sound)
+}
+
 static void fillBlock(float* dst, u32 channels)
 {
 	unsigned int got = sPull ? sPull(dst, AUDIO_BLOCK_SAMPLES) : 0;
 	if (got < AUDIO_BLOCK_SAMPLES) {
 		memset(dst + got * channels, 0, (AUDIO_BLOCK_SAMPLES - got) * channels * sizeof(float));
+	}
+	for (u32 i = 0; i < AUDIO_BLOCK_SAMPLES * channels; i++) {
+		dst[i] += noise();
 	}
 }
 

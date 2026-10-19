@@ -58,6 +58,10 @@ extern "C" void ps3PlatformInit(void)
 	ps3b_log_memory("start");
 
 	ps3b_console_init();
+	// (as early as possible: playing a faint noise until the game's sound starts, so that the TV or sound
+	// system is listening by the time of the Nintendo logo's sound)
+	ps3BootStage("sound output");
+	ps3AudioStartOutput();
 
 	ps3BootStage("scheduler");
 	ps3SchedInit();
@@ -86,7 +90,5 @@ extern "C" void ps3PlatformInit(void)
 	ps3ViStart();
 	ps3BootStage("watchdog");
 	ps3StartWatchdog();
-	ps3BootStage("sound output");
-	ps3AudioStartOutput();
 	ps3BootStage("platform ready, starting the game");
 }

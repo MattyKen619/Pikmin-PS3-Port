@@ -16,8 +16,17 @@ static gfx::Renderer* sRenderer;
 
 static void logLine(const char* text) { ps3b_log_write(text); }
 
+static void outOfMemory(size_t bytes)
+{
+	char buf[160];
+	snprintf(buf, sizeof(buf), "[rsx] FAILED: out of memory (%u bytes asked for); the game stops\n", (unsigned)bytes);
+	ps3b_log_write(buf);
+	ps3b_log_memory("out of memory");
+}
+
 gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 {
+	gfx::allocFailedHook() = outOfMemory;
 	if (ps3b_data_root()) {
 		char path[256];
 		snprintf(path, sizeof(path), "%s/no_rsx.txt", ps3b_data_root());

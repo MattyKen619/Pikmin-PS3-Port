@@ -1014,6 +1014,7 @@ static void reportThreads(const char* title)
 	ps3Log("[ps3]   %s\n", gfx);
 	ps3GfxPhaseStatus(gfx, sizeof(gfx));
 	ps3Log("[ps3]   %s\n", gfx);
+	ps3b_log_memory(title);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];
 		if (!t->os) {

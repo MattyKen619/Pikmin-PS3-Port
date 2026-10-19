@@ -224,6 +224,7 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mTableUsed(0)
     , mPoolUsed(0)
     , mPoolBytes(0)
+    , mRegions(NULL)
 {
 	memset(mSetup, 0, sizeof(mSetup));
 	mStale.lo = mNStale.lo = ~0ULL;
@@ -292,9 +293,6 @@ Renderer::~Renderer()
 	free(mTable);
 	for (size_t i = 0; i < mPool.size(); i++) {
 		free(mPool[i]);
-	}
-	for (Map<u64, ArrayRegion*>::iterator it = mRegions.begin(); it != mRegions.end(); ++it) {
-		destroy(it->second);
 	}
 	for (Map<u32, Vec<ProgramEntry*> >::iterator it = mPrograms.begin(); it != mPrograms.end(); ++it) {
 		for (size_t i = 0; i < it->second.size(); i++) {
@@ -1295,10 +1293,7 @@ void Renderer::cacheReset()
 	mArenaHead = 0;
 	mIdxHead   = 0;
 	mArenaGen++;
-	for (Map<u64, ArrayRegion*>::iterator it = mRegions.begin(); it != mRegions.end(); ++it) {
-		destroy(it->second);
-	}
-	mRegions.clear();
+	mRegions = NULL;
 	mStats.cacheResets++;
 }
 
@@ -1392,14 +1387,20 @@ void Renderer::checkRegion(ArrayRegion& r)
 	checked(r.checkedFrame, r.interval, changed, r.base);
 }
 
+// (NULL: no memory for it)
 Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
 {
-	const u64 key = ((u64)base << 16) | ((u64)stride << 4) | array;
-	Map<u64, ArrayRegion*>::iterator it = mRegions.find(key);
-	if (it != mRegions.end()) {
-		return it->second;
+	for (ArrayRegion* r = mRegions; r; r = r->next) {
+		if (r->base == base && r->stride == (stride ? stride : 1) && r->array == array) {
+			return r;
+		}
 	}
-	ArrayRegion* r  = create<ArrayRegion>();
+	ArrayRegion* r = (ArrayRegion*)poolAlloc(sizeof(ArrayRegion));
+	if (!r) {
+		return NULL;
+	}
+	r->next         = mRegions;
+	r->array        = array;
 	r->base         = base;
 	r->stride       = stride ? stride : 1;
 	r->lo           = 0xFFFFFFFF;
@@ -1409,7 +1410,7 @@ Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
 	r->version      = 1;
 	r->checkedFrame = mFrame;
 	r->interval     = 1;
-	mRegions[key]   = r;
+	mRegions        = r;
 	return r;
 }
 
@@ -1503,6 +1504,11 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 		ca.base        = cp[0xA0 + id];
 		ca.stride      = (u8)(cp[0xB0 + id] & 0xFF);
 		ArrayRegion* r = regionFor(id, ca.base, ca.stride);
+		if (!r) {
+			e->cached = false; // (no memory: from the ring)
+			mStats.cacheUncached++;
+			return NULL;
+		}
 		if (A.minIndex < r->lo || A.maxIndex > r->hi) {
 			r->lo           = A.minIndex < r->lo ? A.minIndex : r->lo;
 			r->hi           = A.maxIndex > r->hi ? A.maxIndex : r->hi;
