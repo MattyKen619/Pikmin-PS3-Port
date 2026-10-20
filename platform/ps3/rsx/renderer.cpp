@@ -18,7 +18,7 @@
 #define RSX_VERTEX_CACHE_BYTES (8 * 1024 * 1024)
 #endif
 #ifndef RSX_AUDIT_FRAMES
-#define RSX_AUDIT_FRAMES 300
+#define RSX_AUDIT_FRAMES 1800 // (once a minute: an audit frame takes longer)
 #endif
 
 namespace gfx {

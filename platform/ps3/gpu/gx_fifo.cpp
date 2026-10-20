@@ -262,8 +262,9 @@ inline gpu::u64 fnv(gpu::u64 h, u32 v)
 } // namespace
 
 // The detailed checks (vertex arrays and textures in game memory, distinct TEV setups and vertex
-// formats) cost time on every draw, so they run on one frame in CHECK_EVERY, and on recorded frames.
-enum { CHECK_EVERY = 30 };
+// formats) cost time on every draw, so they run on one frame in CHECK_EVERY, and on recorded frames. (Test
+// builds up to 31 checked one frame in 30: in gameplay that frame ran late, about 29 frames a second.)
+enum { CHECK_EVERY = 1800 };
 static bool sCheckFrame = true;
 
 static HashSet sTevSetups;

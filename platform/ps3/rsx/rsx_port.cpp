@@ -13,6 +13,7 @@
 
 static gfx::RsxDevice* sDev;
 static gfx::Renderer* sRenderer;
+static bool sTestButtons; // (PIKMIN/test_buttons.txt: ps3RsxDebugButtons)
 
 static void logLine(const char* text) { ps3b_log_write(text); }
 
@@ -69,6 +70,14 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 	}
 	ps3b_log_write(sRenderer->vertexCache() ? "[rsx] display list draws are kept in the vertex cache\n"
 	                                        : "[rsx] the vertex cache is off\n");
+	if (ps3b_data_root()) {
+		char path[256];
+		snprintf(path, sizeof(path), "%s/test_buttons.txt", ps3b_data_root());
+		sTestButtons = ps3b_file_exists(path) != 0;
+		if (sTestButtons) {
+			ps3b_log_write("[rsx] PIKMIN/test_buttons.txt exists: R3, L3 and Select are test buttons\n");
+		}
+	}
 	sRenderer->begin();
 	return sRenderer;
 }
@@ -115,15 +124,16 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 
 extern "C" void ps3GxRecordRequested(void); // (gx_trace.cpp)
 
-// Test switches (the game does not use these buttons). R3: the next test mode (Renderer::MODE_*). L3:
-// textures and vertex arrays checked for changes every frame, or as usual. Each press is logged, and the
-// squares beside the picture show what is on (renderer.cpp, present). Select: records the next frame.
+// Test buttons, if PIKMIN/test_buttons.txt exists (the game does not use these buttons, but a stick is easily
+// pressed in by accident). R3: the next test mode (Renderer::MODE_*). L3: textures and vertex arrays checked
+// for changes every frame, or as usual. Each press is logged, and the squares beside the picture show what is
+// on (renderer.cpp, present). Select: records the next frame.
 extern "C" void ps3RsxDebugButtons(unsigned int buttons)
 {
 	static unsigned int sLast;
 	const unsigned int pressed = buttons & ~sLast;
 	sLast = buttons;
-	if (!sRenderer || !pressed) {
+	if (!sRenderer || !pressed || !sTestButtons) {
 		return;
 	}
 	if (pressed & PS3B_BTN_R3) {

@@ -121,7 +121,7 @@ void samplerThread(void*)
 {
 	Ps3SchedSample s;
 	for (;;) {
-		ps3b_sleep_us(1000);
+		ps3b_sleep_us(4000); // (250 samples a second: each one interrupts a running thread)
 		if (sStopped) {
 			continue;
 		}
