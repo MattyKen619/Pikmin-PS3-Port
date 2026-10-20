@@ -11,6 +11,8 @@
 
 #include "sdk_internal.h"
 
+#define PS3_HOOKS_NO_DEFINITIONS
+#include "ps3/hooks.h"
 #include "../backend/ps3_backend.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -20,7 +22,7 @@
 #define GAME_LV2_PRIO   1500    // all game threads share one lv2 priority; the baton decides who runs
 #define GAME_STACK_SIZE 0x40000 // 256 KB: 64-bit code uses more stack than the GameCube build did
 #define MAX_INTERRUPTS  256
-#define SHADOW_DEPTH    128
+#define SHADOW_DEPTH    PS3_SHADOW_DEPTH
 
 struct ThreadImpl {
 	OSThread* os;
@@ -37,15 +39,10 @@ struct ThreadImpl {
 	int intrEnabled;
 	int index;
 
-	// Shadow call stack, kept by the -finstrument-functions hooks (see "preemption points" below).
-	void* stackFn[SHADOW_DEPTH];
-	void* stackSite[SHADOW_DEPTH];
-	volatile int depth;
-	volatile u32 calls;
-	u32 reportedCalls;
-
-	// Basic-block trace (-fsanitize-coverage=trace-pc): the last game-code address this thread ran.
-	void* volatile lastPc;
+	// Shadow call stack, last code address and call count, kept by the -finstrument-functions hooks
+	// (ps3/hooks.h): in ps3Hook while the thread holds the baton, here while it does not (switchHooks).
+	Ps3HookState hook;
+	unsigned long long reportedCalls;
 };
 
 struct Interrupt {
@@ -58,6 +55,37 @@ static unsigned int sIdleCv;
 static ThreadImpl sImpls[MAX_THREADS];
 static int sImplCount;
 static ThreadImpl* sRunning;
+
+// The hooks' state for the baton holder (ps3/hooks.h), and the queued-interrupt hint they check.
+extern "C" {
+Ps3HookState ps3Hook;
+volatile unsigned int ps3HookPending;
+}
+
+// The hook state of a thread: in ps3Hook while it holds the baton.
+static inline Ps3HookState& hookOf(ThreadImpl* t) { return t == sRunning ? ps3Hook : t->hook; }
+
+// The baton passes from `from` to `to`: their hook states trade places (only the shadow stack entries in
+// use are copied).
+static void switchHooks(ThreadImpl* from, ThreadImpl* to)
+{
+	if (from) {
+		Ps3HookState& h = from->hook;
+		const int n     = ps3Hook.depth < SHADOW_DEPTH ? (ps3Hook.depth > 0 ? ps3Hook.depth : 0) : SHADOW_DEPTH;
+		h.lastPc        = ps3Hook.lastPc;
+		h.depth         = ps3Hook.depth;
+		h.calls         = ps3Hook.calls;
+		memcpy(h.stackFn, ps3Hook.stackFn, n * sizeof(void*));
+		memcpy(h.stackSite, ps3Hook.stackSite, n * sizeof(void*));
+	}
+	const Ps3HookState& h = to->hook;
+	const int n           = h.depth < SHADOW_DEPTH ? (h.depth > 0 ? h.depth : 0) : SHADOW_DEPTH;
+	ps3Hook.lastPc        = h.lastPc;
+	ps3Hook.depth         = h.depth;
+	ps3Hook.calls         = h.calls;
+	memcpy(ps3Hook.stackFn, h.stackFn, n * sizeof(void*));
+	memcpy(ps3Hook.stackSite, h.stackSite, n * sizeof(void*));
+}
 static u32 sSeq;
 static volatile int sIntrEnabled = 1;
 static volatile int sInInterrupt = 0;
@@ -221,6 +249,7 @@ static int deliverLocked(ThreadImpl* self, int force)
 		sInInterrupt = 0;
 		ran++;
 	}
+	ps3HookPending = sIntrHead != sIntrTail;
 	return ran;
 }
 
@@ -248,6 +277,7 @@ static void schedule(ThreadImpl* self)
 		self->intrEnabled = sIntrEnabled;
 		next->hasBaton    = 1;
 		next->os->state   = OS_THREAD_STATE_RUNNING;
+		switchHooks(self, next);
 		sRunning          = next;
 		sIntrEnabled      = next->intrEnabled;
 		sActivity++;
@@ -309,6 +339,7 @@ extern "C" void ps3PostInterrupt(Ps3InterruptFn fn, void* arg)
 		sIntr[sIntrTail % MAX_INTERRUPTS].fn  = fn;
 		sIntr[sIntrTail % MAX_INTERRUPTS].arg = arg;
 		sIntrTail++;
+		ps3HookPending = 1;
 	}
 	ps3b_cond_broadcast(sIdleCv);
 	unlockS();
@@ -386,7 +417,7 @@ static void noteNanOrigin(ThreadImpl* t, u32 fpscr)
 	// Clear the sticky bits (FX, the invalid-operation bits) so the next origin is seen too.
 	__asm__ volatile("mtfsb0 0\n\tmtfsb0 7\n\tmtfsb0 8\n\tmtfsb0 9\n\tmtfsb0 10\n\tmtfsb0 11\n\tmtfsb0 22");
 	sNanCount++;
-	void* pc = t->lastPc;
+	void* pc = hookOf(t).lastPc;
 	for (int i = 0; i < sNanSiteCount; i++) {
 		if (sNanSites[i] == pc) {
 			return;
@@ -424,10 +455,11 @@ extern "C" int ps3SchedSample(Ps3SchedSample* out)
 	if (!t || !t->os) {
 		return 0;
 	}
+	const Ps3HookState& h = hookOf(t);
 	out->thread  = t->index;
 	out->waiting = t->os->state != OS_THREAD_STATE_RUNNING;
-	out->pc      = t->lastPc;
-	int depth    = t->depth;
+	out->pc      = h.lastPc;
+	int depth    = h.depth;
 	if (depth > SHADOW_DEPTH) {
 		depth = SHADOW_DEPTH;
 	}
@@ -438,64 +470,66 @@ extern "C" int ps3SchedSample(Ps3SchedSample* out)
 		depth = 0;
 	}
 	for (int i = 0; i < depth; i++) {
-		out->fns[i] = t->stackFn[i];
+		out->fns[i] = h.stackFn[i];
 	}
 	out->depth = depth;
 	return 1;
 }
 
+// The hooks themselves are in ps3/hooks.h, compiled into each game source file (test build 36). These
+// out-of-line copies serve game code built without that header (and keep the NaN-origin checks, which
+// need PS3_TRACE_NAN and a build that leaves out the header).
 extern "C" void __cyg_profile_func_enter(void* fn, void* site)
 {
 	ThreadImpl* t = sRunning;
-	if (!t) {
-		return; // static constructors, before the scheduler starts
+	if (t) {
+		CHECK_NAN_ORIGIN(t); // before pushing: the caller is the function that ran last
 	}
-	CHECK_NAN_ORIGIN(t); // before pushing: the caller is the function that ran last
-	int d = t->depth;
+	const int d = ps3Hook.depth;
 	if (d < SHADOW_DEPTH) {
-		t->stackFn[d]   = fn;
-		t->stackSite[d] = site;
+		ps3Hook.stackFn[d]   = fn;
+		ps3Hook.stackSite[d] = site;
 	}
-	t->depth = d + 1;
-	t->calls++;
-	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
-		void* pc = t->lastPc;
-		ps3DeliverInterrupts();
-		t->lastPc = pc; // interrupt handlers ran on this thread: point back at the interrupted code
-	}
+	ps3Hook.depth  = d + 1;
+	ps3Hook.calls  = ps3Hook.calls + 1;
+	ps3Hook.lastPc = *(void* const*)fn;
 }
 
 extern "C" void __cyg_profile_func_exit(void* fn, void* site)
 {
 	(void)fn;
-	(void)site;
 	ThreadImpl* t = sRunning;
 	if (t) {
 		CHECK_NAN_ORIGIN(t); // before popping: the returning function is still on top
-		if (t->depth > 0) {
-			t->depth--;
-		}
+	}
+	if (ps3Hook.depth > 0) {
+		ps3Hook.depth--;
+	}
+	ps3Hook.lastPc = site;
+	if (ps3HookPending) {
+		ps3HookDeliver(site);
 	}
 }
 
-// Called at the start of every basic block of game code (-fsanitize-coverage=trace-pc). Records where
-// the thread is, which pinpoints a hang or the last code a crashed thread ran (lv2 stops a thread that
-// faults while the rest of the game keeps going), and makes every loop a switch point.
+// From the hooks, while interrupts are queued: run them if they may run now (not while they are disabled,
+// nor inside a handler).
+extern "C" void ps3HookDeliver(void* pc)
+{
+	if (sIntrEnabled && !sInInterrupt && sRunning) {
+		ps3DeliverInterrupts();
+		ps3Hook.lastPc = pc; // interrupt handlers ran on this thread: point back at the interrupted code
+	}
+}
+
+// Basic-block hooks (-fsanitize-coverage=trace-pc): game code was built with them up to test build 35, a
+// call every few instructions; now only the function hooks run. Kept for code built with them.
 extern "C" void __sanitizer_cov_trace_pc(void) __attribute__((no_instrument_function));
-// (It runs every few instructions of game code, so it does as little as it can: test build 32 also counted
-// blocks here, a read-modify-write of memory that the next block's hook read back before the store was done,
-// which costs the PPU's in-order pipeline dozens of cycles each time.)
 extern "C" void __sanitizer_cov_trace_pc(void)
 {
-	ThreadImpl* t = sRunning;
-	if (!t) {
-		return;
-	}
-	void* pc  = __builtin_return_address(0);
-	t->lastPc = pc;
-	if (__builtin_expect(sIntrHead != sIntrTail, 0) && sIntrEnabled && !sInInterrupt) {
-		ps3DeliverInterrupts();
-		t->lastPc = pc; // interrupt handlers ran on this thread: point back at the interrupted code
+	void* pc       = __builtin_return_address(0);
+	ps3Hook.lastPc = pc;
+	if (__builtin_expect(ps3HookPending != 0, 0)) {
+		ps3HookDeliver(pc);
 	}
 }
 
@@ -670,7 +704,8 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 	impl->hasBaton    = 0;
 	impl->intrEnabled = 1;
 	impl->waitKey     = NULL;
-	impl->depth       = 0;
+	memset(&impl->hook, 0, sizeof(impl->hook));
+	impl->reportedCalls = 0;
 	unlockS();
 	ps3Log("[ps3] thread %d created (priority %d)\n", impl->index, (int)priority);
 	return TRUE;
@@ -967,13 +1002,14 @@ extern "C" unsigned int ps3FramesDrawn(void);
 static void logStack(int index, ThreadImpl* t)
 {
 	// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
-	int depth = t->depth;
+	const Ps3HookState& h = hookOf(t);
+	int depth             = h.depth;
 	if (depth > 0) {
 		char line[512];
-		int n     = snprintf(line, sizeof(line), "[stack]   thread %d pc %p depth %d:", index, t->lastPc, depth);
+		int n     = snprintf(line, sizeof(line), "[stack]   thread %d pc %p depth %d:", index, h.lastPc, depth);
 		int shown = depth < SHADOW_DEPTH ? depth : SHADOW_DEPTH;
 		for (int f = shown - 1; f >= 0 && f >= shown - 10 && n < (int)sizeof(line) - 40; f--) {
-			n += snprintf(line + n, sizeof(line) - n, " %p<%p", t->stackFn[f], t->stackSite[f]);
+			n += snprintf(line + n, sizeof(line) - n, " %p<%p", h.stackFn[f], h.stackSite[f]);
 		}
 		ps3Log("%s\n", line);
 	}
@@ -990,7 +1026,7 @@ extern "C" void ps3ReportStack(const char* what)
 
 static void reportThreads(const char* title)
 {
-	char audio[512];
+	char audio[768];
 	ps3AudioStatus(audio, sizeof(audio));
 	char nans[40] = "";
 	if (PS3_TRACE_NAN) {
@@ -1020,9 +1056,9 @@ static void reportThreads(const char* title)
 		if (!t->os) {
 			continue;
 		}
-		u32 calls        = t->calls;
-		u32 recent       = calls - t->reportedCalls;
-		t->reportedCalls = calls;
+		unsigned long long calls = hookOf(t).calls;
+		u32 recent               = (u32)(calls - t->reportedCalls);
+		t->reportedCalls         = calls;
 		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls since last report\n", i, (int)t->os->priority, stateName(t->os->state),
 		       t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "", t == sRunning ? "  <- has the baton" : "",
 		       (unsigned)recent);
@@ -1033,7 +1069,7 @@ static void reportThreads(const char* title)
 static void watchdogThread(void*)
 {
 	u32 lastActivity = sActivity;
-	u32 lastCalls    = 0;
+	unsigned long long lastCalls = 0;
 	ThreadImpl* lastRunner = NULL;
 	int idleSdk      = 0;
 	int idleCalls    = 0;
@@ -1048,15 +1084,15 @@ static void watchdogThread(void*)
 		lastActivity = now;
 
 		// The baton holder is executing game code but has not called a function: a loop without calls,
-		// or (if not even a basic block ran) the thread has stopped: lv2 halts a thread that faults.
+		// or the thread has stopped (lv2 halts a thread that faults).
 		ThreadImpl* runner = sRunning;
-		u32 calls          = runner ? runner->calls : 0;
-		void* pc           = runner ? runner->lastPc : NULL;
+		unsigned long long calls = runner ? hookOf(runner).calls : 0;
+		void* pc           = runner ? hookOf(runner).lastPc : NULL;
 		int running        = runner && runner->os && runner->os->state == OS_THREAD_STATE_RUNNING;
 		int same           = running && runner == lastRunner;
 		idleCalls          = (same && calls == lastCalls) ? idleCalls + 1 : 0;
-		idleBlocks         = (same && calls == lastCalls && pc == lastPc) ? idleBlocks + 1 : 0; // (no block ran, or the
-		                                                                                           // same one each time)
+		idleBlocks         = (same && calls == lastCalls && pc == lastPc) ? idleBlocks + 1 : 0; // (no function ran:
+		                                                                                           // stopped, or a loop without calls)
 		lastRunner         = runner;
 		lastCalls          = calls;
 		lastPc             = pc;

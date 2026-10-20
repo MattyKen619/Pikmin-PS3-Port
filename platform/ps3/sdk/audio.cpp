@@ -609,7 +609,7 @@ void DSPAssertInt(void) { }
 
 extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 {
-	char voices[160];
+	char voices[256];
 	ps3DspStatus(voices, sizeof(voices));
 
 	// The music/movie stream (jaudio/syncstream.c): what a cutscene waits for.

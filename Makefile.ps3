@@ -51,17 +51,35 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 35
+TEST_BUILD := 36
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
-# Game code (C++ and jaudio) is instrumented: function entries keep a shadow call stack, basic blocks
-# record the last address each thread ran, and both are thread-switch points ("preemption points" in
-# platform/ps3/sdk/os_sched.cpp). -g1 adds line tables for tools/ps3/symbolize_log.py. The SDK layer
-# that implements the hooks is not instrumented.
-# Functions defined in headers (small inline accessors and vector math, mostly) are left out: each one
-# inlined got its own pair of hook calls (test build 33).
-INSTRUMENT       := -finstrument-functions -finstrument-functions-exclude-file-list=include/ -fsanitize-coverage=trace-pc -g1
+# Game code (C++ and jaudio) is instrumented: function entries and exits keep a shadow call stack and the
+# thread's last code address, and exits are thread-switch points ("preemption points" in
+# platform/ps3/sdk/os_sched.cpp). The hooks are defined in platform/ps3/include/ps3/hooks.h, included into
+# every game file, so the compiler inlines them (test build 36; they were calls through a TOC-switching
+# linker stub before). -g1 adds line tables for tools/ps3/symbolize_log.py. The SDK layer is not instrumented.
+# Left out:
+# - functions defined in headers (small inline accessors and vector math, mostly): each one inlined got its
+#   own pair of hooks (test build 33);
+# - basic-block hooks (-fsanitize-coverage=trace-pc: a call every few instructions, through a TOC-switching
+#   stub) in the code that runs every frame: creatures, AI, effects, models, collision, the sound engine's
+#   busiest files. They stay in the system and game-flow code (loading, memory card, movies, menus, sound
+#   start-up and streams), where a loop that waits for another thread without calling a function is likely:
+#   there they still let interrupts and other threads in. (Known waits use PS3_SPIN_WAIT(), types.h.)
+# - the busiest tiny functions, called in the creature search's inner loops (test build 35's profile; the
+#   names are matched as substrings): their hooks cost many times their own work.
+HOOK_EXCLUDE     := updatable,getChildCount,getCreature,getBoundingSphereRadius,getBoundingSphere,hasInfo,getState,isDone,aiCulling,aiCullable,doCulling,isAlive,available,getAnimMatrix
+INSTRUMENT       := -finstrument-functions -finstrument-functions-exclude-file-list=include/ \
+                    -finstrument-functions-exclude-function-list=$(HOOK_EXCLUDE) -include platform/ps3/include/ps3/hooks.h -g1
+BB_HOOKS         := -fsanitize-coverage=trace-pc
+BB_DIRS          := src/sysDolphin src/sysCore src/plugPikiColin src/plugPikiOgawa src/jaudio
+BB_SKIP          := src/sysDolphin/dgxGraphics.cpp src/sysDolphin/sysNew.cpp \
+                    $(addprefix src/plugPikiColin/,mapMgr.cpp dynsimulator.cpp animMgr.cpp) \
+                    $(addprefix src/jaudio/,jammain_2.c dspdriver.c dspbuf.c driverinterface.c dspinterface.c aictrl.c noteon.c \
+                      bankdrv.c seqsetup.c ja_calc.c oneshot.c jamosc.c)
+bb_hooks          = $(if $(filter-out $(BB_SKIP),$(filter $(addsuffix /%,$(BB_DIRS)),$(1))),$(BB_HOOKS))
 PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(GAME_DEFS) $(GAME_INC)
 GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
@@ -92,7 +110,7 @@ $(BUILD)/$(TARGET).elf: $(OBJECTS)
 $(call objs_of,$(GAME_CPP)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
-	@$(CXX) $(GAME_CXXFLAGS) -c $< -o $@
+	@$(CXX) $(GAME_CXXFLAGS) $(call bb_hooks,$<) -c $< -o $@
 
 # Nintendo SDK replacement (game headers, not instrumented)
 $(call objs_of,$(PLATFORM_CPP)): $(OBJDIR)/%.o: %
@@ -100,14 +118,11 @@ $(call objs_of,$(PLATFORM_CPP)): $(OBJDIR)/%.o: %
 	@echo $<
 	@$(CXX) $(PLATFORM_CXXFLAGS) -c $< -o $@
 
-# jaudio: .c files that the original build compiles as C++. The sound engine's busiest files (the
-# sequencer and the mixing set-up) have no loops that wait for another thread or an interrupt: no basic
-# block hooks there, only the function hooks.
-JAUDIO_BUSY := $(addprefix src/jaudio/,jammain_2.c dspdriver.c dspbuf.c driverinterface.c dspinterface.c aictrl.c)
+# jaudio: .c files that the original build compiles as C++.
 $(call objs_of,$(JAUDIO_C)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
-	@$(CXX) $(if $(filter $<,$(JAUDIO_BUSY)),$(filter-out -fsanitize-coverage=trace-pc,$(GAME_CXXFLAGS)),$(GAME_CXXFLAGS)) -x c++ -c $< -o $@
+	@$(CXX) $(GAME_CXXFLAGS) $(call bb_hooks,$<) -x c++ -c $< -o $@
 
 # Nintendo's GX library: C compiled as C++ (its write-gather pipe, GXWGFifo, is a C++ object on the PS3).
 # -fpermissive: the C code converts between ints and enums, and casts pointers to u32 (addresses fit).

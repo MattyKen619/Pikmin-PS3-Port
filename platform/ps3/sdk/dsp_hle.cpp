@@ -144,6 +144,9 @@ struct State {
 	// diagnostics
 	u32 subframes;
 	unsigned long long mixTicks; // timebase ticks spent mixing (ps3DspRenderSubframe)
+	unsigned long long sourceTicks, filterTicks, mixVoiceTicks; // ... of which: reading and resampling the voices'
+	                                                            // samples, their filters, mixing them into the buses
+	u32 voicesMixed;             // voices processed (all sub-frames)
 	u32 playing;   // voices processed in the last sub-frame
 	u32 finished;  // voices that reached "done"
 	u32 badVoices; // voices stopped because their data was out of range
@@ -164,15 +167,32 @@ static inline s16 clamp16(s64 v)
 	return (s16)(v < -0x8000 ? -0x8000 : (v > 0x7FFF ? 0x7FFF : v));
 }
 
+static inline s16 clamp16(s32 v)
+{
+	return (s16)(v < -0x8000 ? -0x8000 : (v > 0x7FFF ? 0x7FFF : v));
+}
+
+// (A note on speed: the PPU multiplies integers slowly, 64-bit ones more slowly still, so products of
+// 16-bit values are made as 32-bit ones (they fit) and only their sums are 64-bit where they could overflow.)
+
+// The bus a mixer channel names: by bits 4-11 of its id, which differ for every bus (then checked).
+static Bus* sBusById[256];
+static bool sBusTable;
+
 static Bus* busFor(u16 id)
 {
 	if (id == 0) {
 		return NULL;
 	}
-	for (int i = 0; i < BUS_COUNT; i++) {
-		if (sBus[i].id == id) {
-			return &sBus[i];
+	if (!sBusTable) {
+		sBusTable = true;
+		for (int i = 0; i < BUS_COUNT; i++) {
+			sBusById[(sBus[i].id >> 4) & 0xFF] = &sBus[i];
 		}
+	}
+	Bus* b = sBusById[(id >> 4) & 0xFF];
+	if (b && b->id == id) {
+		return b;
 	}
 	static int sLogged;
 	ps3LogOnce(&sLogged, "[ps3] audio: voice mixes to unknown DSP bus 0x%04x (ignored)\n", (unsigned)id);
@@ -207,15 +227,14 @@ static void resample(DSPchannel_* v, const s16* src, s16* dst)
 			dst[i] = src[pos >> 12];
 		}
 	} else {
+		const s16* coeffs = S.resampleCoeffs;
 		for (int i = 0; i < SUBFRAME; i++) {
-			// 4-tap filter; the top 6 bits of the fraction select the coefficients
-			const s16* c  = &S.resampleCoeffs[((pos & 0xFFF) >> 6) * 4];
+			// 4-tap filter; the top 6 bits of the fraction select the coefficients. (The microcode doubles the
+			// sum and keeps its top 16 bits: the same as the sum shifted by 15.)
+			const s16* c  = &coeffs[((pos & 0xFFF) >> 6) * 4];
 			const s16* in = &src[pos >> 12];
-			s64 acc       = 0;
-			for (int k = 0; k < 4; k++) {
-				acc += (s64)2 * c[k] * in[k];
-			}
-			dst[i] = clamp16(acc >> 16);
+			const s64 acc = (s64)((s32)c[0] * in[0]) + (s64)((s32)c[1] * in[1]) + (s64)((s32)c[2] * in[2]) + (s64)((s32)c[3] * in[3]);
+			dst[i]        = clamp16(acc >> 15);
 			pos += ratio;
 		}
 	}
@@ -290,8 +309,10 @@ static bool decodeAfc(DSPchannel_* v, s16* dst, u32 blocks)
 
 	s16* hist = (s16*)v->afcRemainingSamples; // [14] = yn2, [15] = yn1
 	for (u32 b = 0; b < blocks; b++) {
-		s32 scale = 1 << ((*src >> 4) & 0xF);
-		u32 pred  = *src & 0xF;
+		const u32 shift = (*src >> 4) & 0xF; // (the scale is 1 << shift)
+		const u32 pred  = *src & 0xF;
+		const s32 c0    = S.afcCoeffs[pred * 2];
+		const s32 c1    = S.afcCoeffs[pred * 2 + 1];
 		src++;
 		s16 delta[16];
 		if (blockBytes == SRC_AFC_HQ_ARAM) {
@@ -312,8 +333,8 @@ static bool decodeAfc(DSPchannel_* v, s16* dst, u32 blocks)
 		s32 yn1 = hist[15];
 		s32 yn2 = hist[14];
 		for (int i = 0; i < 16; i++) {
-			s64 acc    = (s64)scale * delta[i] + (s64)yn1 * S.afcCoeffs[pred * 2] + (s64)yn2 * S.afcCoeffs[pred * 2 + 1];
-			s32 sample = clamp16(acc >> 11);
+			const s64 acc = (s64)(s32)((u32)(s32)delta[i] << shift) + (s64)(yn1 * c0) + (s64)(yn2 * c1);
+			s32 sample    = clamp16(acc >> 11);
 			*dst++     = (s16)sample;
 			yn2        = yn1;
 			yn1        = sample;
@@ -587,9 +608,10 @@ static void biquad(DSPchannel_* v, s16* buf)
 	s16* h       = v->biquadHistory; // xn1, xn2, yn1, yn2
 	const s16* c = v->biquadFilterCoeffs; // bn1, bn2, an1, an2
 	s32 xn1 = h[0], xn2 = h[1], yn1 = h[2], yn2 = h[3];
+	const s32 c0 = c[0], c1 = c[1], c2 = c[2], c3 = c[3];
 	for (int i = 0; i < SUBFRAME; i++) {
 		s32 xn0 = buf[i];
-		s64 t   = (s64)c[0] * xn1 + (s64)c[1] * xn2 + (s64)c[2] * yn1 + (s64)c[3] * yn2;
+		s64 t   = (s64)(c0 * xn1) + (s64)(c1 * xn2) + (s64)(c2 * yn1) + (s64)(c3 * yn2);
 		s16 yn0 = clamp16(t >> 15);
 		buf[i]  = yn0;
 		xn2     = xn1;
@@ -606,8 +628,19 @@ static void biquad(DSPchannel_* v, s16* buf)
 // Mix with a volume ramp; volumes are 1.15, the ramp is in 1.31.
 static void mixRamp(Bus* bus, const s16* src, s32 vol, s32 step)
 {
+	s32* out = bus->s;
+	if (step == 0) {
+		const s32 v = vol >> 16;
+		for (int i = 0; i < SUBFRAME; i += 4) {
+			out[i] += (v * src[i]) >> 16;
+			out[i + 1] += (v * src[i + 1]) >> 16;
+			out[i + 2] += (v * src[i + 2]) >> 16;
+			out[i + 3] += (v * src[i + 3]) >> 16;
+		}
+		return;
+	}
 	for (int i = 0; i < SUBFRAME; i++) {
-		bus->s[i] += ((vol >> 16) * src[i]) >> 16;
+		out[i] += ((vol >> 16) * src[i]) >> 16;
 		vol += step;
 	}
 }
@@ -652,7 +685,10 @@ static void renderVoice(DSPchannel_* block)
 	}
 
 	s16 in[SUBFRAME];
+	const unsigned long long t0 = ps3b_timebase();
 	loadInput(&v, in);
+	const unsigned long long t1 = ps3b_timebase();
+	S.sourceTicks += t1 - t0;
 	if (tracked && S.loggedStops < 24) {
 		u16 pk = S.peakIn[index];
 		for (int i = 0; i < SUBFRAME; i++) {
@@ -671,6 +707,8 @@ static void renderVoice(DSPchannel_* block)
 		biquad(&v, in);
 	}
 
+	const unsigned long long t2 = ps3b_timebase();
+	S.filterTicks += t2 - t1;
 	if (v.useDolbyVolume) {
 		// Positional (Dolby) mixing is not part of the light microcode: silent, but stops correctly.
 		static int sLogged;
@@ -709,6 +747,7 @@ static void renderVoice(DSPchannel_* block)
 			ch->currentVolume = ch->targetVolume;
 		}
 	}
+	S.mixVoiceTicks += ps3b_timebase() - t2;
 
 	if (!v.useConstantSample) {
 		v.resetVpb = DSP_FALSE;
@@ -923,24 +962,36 @@ extern "C" void ps3DspRenderSubframe(void)
 		}
 		renderVoice(block);
 	}
+	S.voicesMixed += S.playing;
 	finishSubframe();
 	S.mixTicks += ps3b_timebase() - t0;
 }
 
 extern "C" void ps3DspStatus(char* buf, unsigned int size)
 {
-	// the mixing time since the last report: per sub-frame, and as a share of the time
-	static unsigned long long sLastTicks, sLastTb;
-	static u32 sLastSubframes;
+	// the mixing time since the last report: per sub-frame, and as a share of the time; per voice, in parts
+	static unsigned long long sLastTicks, sLastTb, sLastSource, sLastFilter, sLastMix;
+	static u32 sLastSubframes, sLastVoices;
 	const unsigned long long tb = ps3b_timebase(), freq = ps3b_timebase_freq();
 	const unsigned long long ticks = S.mixTicks - sLastTicks, wall = sLastTb ? tb - sLastTb : 0;
-	const u32 subframes = S.subframes - sLastSubframes;
+	const u32 subframes = S.subframes - sLastSubframes, voices = S.voicesMixed - sLastVoices;
+	const unsigned long long source = S.sourceTicks - sLastSource, filter = S.filterTicks - sLastFilter, mix = S.mixVoiceTicks - sLastMix;
 	sLastTicks     = S.mixTicks;
 	sLastTb        = tb;
 	sLastSubframes = S.subframes;
+	sLastVoices    = S.voicesMixed;
+	sLastSource    = S.sourceTicks;
+	sLastFilter    = S.filterTicks;
+	sLastMix       = S.mixVoiceTicks;
 	const u32 usPer    = subframes && freq ? (u32)(ticks * 1000000ULL / freq / subframes) : 0;
 	const u32 permille = wall ? (u32)(ticks * 1000ULL / wall) : 0;
-	snprintf(buf, size, "%u voices playing, %u sounds finished%s, mixing %u us per sub-frame (%u.%u%% of the time)", (unsigned)S.playing,
-	         (unsigned)S.finished, S.badVoices ? " (some with bad data)" : "", (unsigned)usPer, (unsigned)(permille / 10),
-	         (unsigned)(permille % 10));
+	const u32 voicesX10 = subframes ? voices * 10 / subframes : 0;
+	const unsigned long long d = voices && freq ? (unsigned long long)voices * freq / 10000000ULL : 0; // (ticks per 0.1 us, all voices)
+	snprintf(buf, size,
+	         "%u voices playing, %u sounds finished%s, mixing %u us per sub-frame (%u.%u%% of the time; %u.%u voices, each: samples %u.%u us, "
+	         "filters %u.%u, mixing %u.%u)",
+	         (unsigned)S.playing, (unsigned)S.finished, S.badVoices ? " (some with bad data)" : "", (unsigned)usPer,
+	         (unsigned)(permille / 10), (unsigned)(permille % 10), (unsigned)(voicesX10 / 10), (unsigned)(voicesX10 % 10),
+	         (unsigned)(d ? source / d / 10 : 0), (unsigned)(d ? source / d % 10 : 0), (unsigned)(d ? filter / d / 10 : 0),
+	         (unsigned)(d ? filter / d % 10 : 0), (unsigned)(d ? mix / d / 10 : 0), (unsigned)(d ? mix / d % 10 : 0));
 }
