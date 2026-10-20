@@ -207,8 +207,15 @@ struct TraceMemory : gpu::Memory {
 			if (a + size > mask + 1) {
 				return NULL;
 			}
-			for (gpu::u64 page = a >> 12; page <= (a + size - 1) >> 12; page++) {
+			// (a vertex array range: only its ends must have been recorded. The range of a draw run, from its
+			// smallest index to its largest, can take in pages that none of its draws read on the console,
+			// so they are not in the trace; nothing reads them here either.)
+			const gpu::u64 first = a >> 12, last = (a + size - 1) >> 12;
+			for (gpu::u64 page = first; page <= last; page++) {
 				if (!(present[g][page >> 3] & (1 << (page & 7)))) {
+					if (kind == gpu::MEM_ARRAY && page != first && page != last) {
+						continue;
+					}
 					return NULL;
 				}
 			}

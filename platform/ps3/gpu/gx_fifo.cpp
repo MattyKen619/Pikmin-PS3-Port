@@ -285,20 +285,31 @@ extern "C" unsigned int ps3FramesDrawn(void) { return sFrames; }
 
 class Events : public gpu::Listener {
 public:
+	// On check frames and recorded frames every draw's vertex arrays are read (checked, and recorded with the
+	// frame): by the command processor, or with draw runs, part by part in draw.
 	gpu::VertexDetail vertexDetail() override
 	{
 		if (sRenderer) {
 			gpu::VertexDetail d = sRenderer->vertexDetail();
-			return d == gpu::VERTICES_NONE && (sCheckFrame || ps3gx::traceRecording()) ? gpu::VERTICES_ARRAYS : d;
+			return d == gpu::VERTICES_NONE && !sRenderer->drawRuns() && (sCheckFrame || ps3gx::traceRecording()) ? gpu::VERTICES_ARRAYS : d;
 		}
 		return (sCheckFrame || ps3gx::traceRecording()) ? gpu::VERTICES_ARRAYS : gpu::VERTICES_NONE;
 	}
+
+	bool drawRuns() override { return sRenderer && sRenderer->drawRuns(); }
 
 	void draw(const gpu::DrawCall& call) override
 	{
 		if (sCheckFrame || ps3gx::traceRecording()) {
 			gpu::PhaseScope checks(gpu::GFX_CHECKS);
-			check(call);
+			if (call.arrays || call.vertices) {
+				check(call);
+			} else {
+				gpu::forEachDrawPart(call, [&](const gpu::DrawCall& c) {
+					sCp.resolveArrays(c);
+					check(c);
+				});
+			}
 		}
 		if (sRenderer) {
 			sRenderer->draw(call);

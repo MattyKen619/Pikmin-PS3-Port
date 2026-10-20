@@ -42,6 +42,7 @@ CommandProcessor::CommandProcessor()
     , mListener(NULL)
     , mBpMask(0xFFFFFF)
     , mDisplayListDepth(0)
+    , mRuns(false)
     , mPendingBuf(NULL)
     , mPending(0)
     , mPendingCap(0)
@@ -237,6 +238,13 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 		if (!inDisplayList) {
 			mCmdStart = base + pos;
 			mCmdEnd   = base + pos + len;
+		} else if (mRuns && p[0] >= PRIM_QUADS && p[0] < PRIM_LINES) {
+			// (a triangle draw: with the ones right after it, if any, one call)
+			const u32 n = drawRun(p, avail);
+			if (n) {
+				pos += n;
+				continue;
+			}
 		}
 		execute(p, len, inDisplayList);
 		mStats.commands++;
@@ -440,7 +448,9 @@ void CommandProcessor::callDisplayList(u32 address, u32 size)
 		__builtin_prefetch(list + at);
 	}
 	mDisplayListDepth++;
+	mRuns = mListener && mListener->drawRuns() && mListener->vertexDetail() == VERTICES_NONE;
 	run(list, size, true, 0);
+	mRuns = false;
 	mDisplayListDepth--;
 }
 
@@ -1116,12 +1126,64 @@ void CommandProcessor::drawCommand(const u8* data, bool inDisplayList)
 		call.vat           = op & 7;
 		call.count         = (u16)count;
 		call.inDisplayList = inDisplayList;
+		call.parts         = 1;
 		call.layout        = &L;
 		call.vertices      = (detail == VERTICES_DECODED && count <= mVertCap) ? mVerts : NULL;
 		call.data          = data + 3;
 		call.arrays        = detail != VERTICES_NONE ? mArrays : NULL;
 		mListener->draw(call);
 	}
+}
+
+// A display list's triangle draw at p (complete: avail bytes there) and the triangle draws with the same
+// vertex format right after it, as one call (Listener::drawRuns). Returns the bytes they take, or 0 for a
+// single draw (executed as usual).
+u32 CommandProcessor::drawRun(const u8* p, u32 avail)
+{
+	enum { RUN_BYTES = 64 * 1024 }; // (a listener keeps a run's bytes to compare: in pieces this size at most)
+	const u32 vat         = p[0] & 7;
+	const VertexLayout& L = layout(vat);
+	const u32 size        = L.size;
+	u32 total             = be16(p + 1);
+	u32 at                = 3 + total * size;
+	u32 parts             = 1;
+	u32 prims             = 1u << ((p[0] >> 3) & 7);
+	while (avail - at >= 3) {
+		const u8* q  = p + at;
+		const u32 op = q[0];
+		if (op < PRIM_QUADS || op >= PRIM_LINES || (op & 7) != vat) {
+			break;
+		}
+		const u32 n   = be16(q + 1);
+		const u32 len = 3 + n * size;
+		if (len > avail - at || total + n > 0xFFFF || at + len > RUN_BYTES) {
+			break;
+		}
+		__builtin_prefetch(q + 512);
+		total += n;
+		at += len;
+		parts++;
+		prims |= 1u << ((op >> 3) & 7);
+	}
+	if (parts == 1) {
+		return 0;
+	}
+	mStats.draws += parts;
+	mStats.commands += parts;
+	mStats.vertices += total;
+	mStats.primitives |= prims;
+	DrawCall call;
+	call.primitive     = p[0] & 0xF8;
+	call.vat           = (u8)vat;
+	call.count         = (u16)total;
+	call.inDisplayList = 1;
+	call.parts         = (u16)parts;
+	call.layout        = &L;
+	call.vertices      = NULL;
+	call.data          = p + 3;
+	call.arrays        = NULL;
+	mListener->draw(call);
+	return at;
 }
 
 // ---------------------------------------------------------------- textures

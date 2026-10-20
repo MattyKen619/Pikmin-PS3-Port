@@ -69,6 +69,9 @@ public:
 	// (with the transform on the RSX, vertices are unpacked straight into its memory, the vertex arrays
 	// worked out only for draws that are not in the vertex cache: nothing asked of the command processor)
 	gpu::VertexDetail vertexDetail() override { return mGpuXf ? gpu::VERTICES_NONE : gpu::VERTICES_DECODED; }
+	// (a run of display list draws is one vertex cache entry: test build 34 spent about 2 microseconds on each
+	// draw, and the Forest of Hope's ground has some 25000 of 1 triangle each)
+	bool drawRuns() override { return mGpuXf && mMode != MODE_NORUNS; }
 	void draw(const gpu::DrawCall& call) override;
 	void xfWritten(u32 address, u32 count) override;
 	// Transform on the RSX when it can (the default when the device's vertex programs work), or always on
@@ -91,6 +94,7 @@ public:
 		MODE_SLOW,    // as normal, the graphics thread paused 8 ms after each frame
 		MODE_INLINE,  // as normal, the vertex cache's triangles copied into the command buffer
 		MODE_NOCACHE, // as normal, the vertex cache off
+		MODE_NORUNS,  // as normal, display list draws one at a time (as test build 34)
 		MODE_COUNT
 	};
 	void requestSwitch(int which) { __sync_fetch_and_or(&mSwitchRequest, which); }
@@ -197,8 +201,10 @@ private:
 		bool cached;          // (false: changes too often, drawn from the ring)
 		u8 followLines;       // (follow's lines: read ahead)
 		u8 bytesOff;          // (the copy is as far into an 8-byte word as the display list's bytes: compared by words)
+		u16 parts;            // draw commands (a draw run: gpu::Listener::drawRuns)
+		u32 span() const { return count * size + 3u * (parts - 1u); } // (its bytes in the display list)
 		u8* bytes() { return (u8*)this + sizeof(CacheEntry) + bytesOff; }
-		CacheArray* arr() { return (CacheArray*)((u8*)this + sizeof(CacheEntry) + ((bytesOff + count * size + 15) & ~15u)); }
+		CacheArray* arr() { return (CacheArray*)((u8*)this + sizeof(CacheEntry) + ((bytesOff + span() + 15) & ~15u)); }
 		Rows rows() const { Rows r = { rowsLo, rowsHi }; return r; }
 		Rows nrows() const { Rows r = { nrowsLo, nrowsHi }; return r; }
 	};
@@ -233,6 +239,7 @@ private:
 
 	// draws
 	bool drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp); // false: not possible, use drawCpu
+	void drawRing(const gpu::DrawCall& call, XfProgramEntry* xp); // (unpacked into the ring: one part)
 	void drawCpu(const gpu::DrawCall& call, u32 texCoords);
 	XfProgramEntry* xfProgramFor(u32 texCoords);
 	void uploadSetup();
@@ -362,6 +369,8 @@ private:
 	} mAuditCounts;
 	Vec<u8> mAuditVerts;
 	Vec<u32> mAuditIdx;
+	Vec<u8> mRunVerts;  // (a draw run's vertices without the commands' headers)
+	const u8* runVertices(const gpu::DrawCall& call);
 	void auditEntry(CacheEntry* e, const gpu::DrawCall& call, XfProgramEntry* xp);
 	u32 mChainLength;   // (entries for the display list address of the last lookup)
 	u8* mArena;         // cache memory for vertices (the end of the scratch memory)

@@ -220,15 +220,44 @@ struct VertexArray {
 };
 
 struct DrawCall {
-	u8 primitive;   // Primitive
+	u8 primitive;   // Primitive (of the first part)
 	u8 vat;         // vertex format 0-7
-	u16 count;      // vertices
+	u16 count;      // vertices (of all the parts)
 	u8 inDisplayList;
+	u16 parts;      // draw commands (1, or a run: see Listener::drawRuns)
 	const VertexLayout* layout;
 	const Vertex* vertices; // decoded, count entries; NULL unless the listener asked for VERTICES_DECODED
-	const u8* data;         // the vertices as in the command stream (count * layout->size bytes)
+	const u8* data;         // the vertices as in the command stream (count * layout->size bytes; a run: see
+	                        // Listener::drawRuns)
 	const VertexArray* arrays; // by Array (ARRAY_POS ..), unless the listener asked for VERTICES_NONE
 };
+
+// A run's bytes, from its first vertex: (parts - 1) command headers of 3 bytes among the vertices.
+inline u32 drawBytes(const DrawCall& call, u32 vertexSize) { return call.count * vertexSize + 3u * (call.parts - 1u); }
+
+// Calls f with each part of a draw (a run: see Listener::drawRuns) as a draw of its own (no vertices or
+// arrays worked out).
+template <typename F>
+void forEachDrawPart(const DrawCall& call, F f)
+{
+	if (call.parts <= 1) {
+		f(call);
+		return;
+	}
+	const u32 size = call.layout->size;
+	const u8* p    = call.data - 3;
+	for (u32 k = 0; k < call.parts; k++) {
+		DrawCall c  = call;
+		c.primitive = p[0] & 0xF8;
+		c.count     = (u16)((p[1] << 8) | p[2]);
+		c.parts     = 1;
+		c.data      = p + 3;
+		c.vertices  = 0;
+		c.arrays    = 0;
+		f(c);
+		p += 3 + c.count * size;
+	}
+}
 
 // Where gatherVertices puts each attribute of a vertex (byte offsets; NO_OFFSET: not wanted). Positions are
 // 3 floats (z 0 for 2-component positions), normals 3 floats, colors R G B A bytes, texture coordinates 2
@@ -281,6 +310,11 @@ class Listener {
 public:
 	virtual ~Listener() { }
 	virtual VertexDetail vertexDetail() { return VERTICES_DECODED; } // asked at every draw
+	// Draw runs: consecutive triangle draw commands in a display list with the same vertex format (nothing
+	// between them: the same state) come as one call, `parts` commands. data is the first one's vertices;
+	// each part's 3-byte header (opcode, big-endian vertex count) comes before its vertices. Asked at each
+	// display list call; only for a listener that wants VERTICES_NONE.
+	virtual bool drawRuns() { return false; }
 	virtual void draw(const DrawCall& call) { (void)call; }
 	virtual void copy(const CopyInfo& info) { (void)info; }
 	virtual void drawDone() { }                         // BP 0x45: raise the PE finish interrupt
@@ -395,6 +429,7 @@ private:
 	u32 run(const u8* data, u32 size, bool inDisplayList, u64 base);
 	void execute(const u8* p, u32 length, bool inDisplayList);
 	void drawCommand(const u8* data, bool inDisplayList);
+	u32 drawRun(const u8* p, u32 avail);
 	void loadCp(u32 reg, u32 value);
 	void loadXf(u32 address, u32 count, const u8* values);
 	void loadIndexed(u32 op, u32 word);
@@ -409,6 +444,7 @@ private:
 	Stats mStats;
 	u32 mBpMask;
 	int mDisplayListDepth;
+	bool mRuns; // (the listener takes draw runs, in the display list running)
 
 	// partial command from the FIFO
 	u8* mPendingBuf;

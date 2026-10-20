@@ -104,6 +104,32 @@ u32 triangleCount(u32 prim, u32 n)
 	}
 }
 
+// (a draw run's parts, each as a draw of its own)
+template <typename F>
+inline void forEachPart(const gpu::DrawCall& call, F f)
+{
+	gpu::forEachDrawPart(call, f);
+}
+
+// The triangles of all of a draw's parts, their vertices one after the other from `first`.
+template <typename I>
+u32 drawIndices(const gpu::DrawCall& call, u32 first, I* ix)
+{
+	u32 n = 0;
+	forEachPart(call, [&](const gpu::DrawCall& c) {
+		n += triangleIndices<I>(c.primitive, c.count, first, ix + n);
+		first += c.count;
+	});
+	return n;
+}
+
+u32 drawTriangleCount(const gpu::DrawCall& call)
+{
+	u32 n = 0;
+	forEachPart(call, [&](const gpu::DrawCall& c) { n += triangleCount(c.primitive, c.count); });
+	return n;
+}
+
 const u8 kBlendSrc[8] = { BLEND_ZERO, BLEND_ONE, BLEND_DST_COLOR, BLEND_INV_DST_COLOR, BLEND_SRC_ALPHA, BLEND_INV_SRC_ALPHA, BLEND_DST_ALPHA, BLEND_INV_DST_ALPHA };
 const u8 kBlendDst[8] = { BLEND_ZERO, BLEND_ONE, BLEND_SRC_COLOR, BLEND_INV_SRC_COLOR, BLEND_SRC_ALPHA, BLEND_INV_SRC_ALPHA, BLEND_DST_ALPHA, BLEND_INV_DST_ALPHA };
 
@@ -936,7 +962,7 @@ void Renderer::bpWritten(u32 reg, u32 value)
 
 void Renderer::draw(const gpu::DrawCall& call)
 {
-	mStats.draws++;
+	mStats.draws += call.parts;
 	if (!call.count || !call.data) {
 		return;
 	}
@@ -982,7 +1008,7 @@ void Renderer::draw(const gpu::DrawCall& call)
 	}
 	XfProgramEntry* xp = mGpuXf ? xfProgramFor(texCoords) : NULL;
 	if (!xp || !drawGpu(call, xp)) {
-		drawCpu(call, texCoords);
+		forEachPart(call, [&](const gpu::DrawCall& c) { drawCpu(c, texCoords); });
 	}
 }
 
@@ -1205,7 +1231,6 @@ void Renderer::uploadMatrices(const Rows& need, const Rows& nneed)
 
 bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 {
-	const XfInfo& info = xp->info;
 	mStats.gpuDraws++;
 	const int sign = mFrontFaceSign;
 	u8 cull        = CULL_NONE;
@@ -1245,8 +1270,19 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 		}
 	}
 
-	// unpacked into the ring
-	gpu::DrawCall c = call;
+	// unpacked into the ring (a draw run: a part at a time)
+	if (call.parts > 1) {
+		forEachPart(call, [&](const gpu::DrawCall& c) { drawRing(c, xp); });
+	} else {
+		drawRing(call, xp);
+	}
+	return true;
+}
+
+void Renderer::drawRing(const gpu::DrawCall& call, XfProgramEntry* xp)
+{
+	const XfInfo& info = xp->info;
+	gpu::DrawCall c    = call;
 	if (!c.arrays) {
 		c.arrays = mCp.resolveArrays(call);
 	}
@@ -1260,7 +1296,7 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 	u8* out = batchVertices(call.count, info.format.stride, 0, xp, &first);
 	if (!out) {
 		mStats.skippedDraws++;
-		return true;
+		return;
 	}
 	mBatch.rows.lo |= rows.lo, mBatch.rows.hi |= rows.hi;
 	mBatch.nrows.lo |= nrows.lo, mBatch.nrows.hi |= nrows.hi;
@@ -1280,7 +1316,6 @@ bool Renderer::drawGpu(const gpu::DrawCall& call, XfProgramEntry* xp)
 	}
 	mStats.triangles += tris;
 	mBatch.vertexCount += call.count;
-	return true;
 }
 
 // ---- the vertex cache
@@ -1397,7 +1432,7 @@ Renderer::CacheEntry* Renderer::cacheLookup(const gpu::DrawCall& call, XfProgram
 	// end of a few minutes' play.)
 	CacheEntry* e = mLastEntry ? mLastEntry->follow : NULL;
 	if (e && e->data == call.data && e->xp == xp && e->count == call.count && e->prim == call.primitive
-	    && e->size == call.layout->size && cacheVariant(e, call)) {
+	    && e->size == call.layout->size && e->parts == call.parts && cacheVariant(e, call)) {
 		mStats.cacheFollowed++;
 		mChainLength = 1;
 	} else {
@@ -1415,7 +1450,8 @@ Renderer::CacheEntry* Renderer::cacheLookup(const gpu::DrawCall& call, XfProgram
 		CacheEntry* first = NULL;
 		for (e = head; e; e = e->next) {
 			mChainLength++;
-			if (e->xp == xp && e->count == call.count && e->prim == call.primitive && e->size == call.layout->size) {
+			if (e->xp == xp && e->count == call.count && e->prim == call.primitive && e->size == call.layout->size
+			    && e->parts == call.parts) {
 				if (!first) {
 					first = e;
 				}
@@ -1494,7 +1530,7 @@ bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
 	if (!cacheVariant(e, call)) {
 		return false;
 	}
-	if (!sameBytes(call.data, e->bytes(), e->count * e->size)) {
+	if (!sameBytes(call.data, e->bytes(), e->span())) {
 		mWhy = WHY_BYTES;
 		return false;
 	}
@@ -1583,6 +1619,19 @@ Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
 	return r;
 }
 
+// A draw run's vertices one after the other (valid until the next call).
+const u8* Renderer::runVertices(const gpu::DrawCall& call)
+{
+	const u32 size = call.layout->size;
+	mRunVerts.resize(call.count * size + 16);
+	u8* out = &mRunVerts[0];
+	forEachPart(call, [&](const gpu::DrawCall& c) {
+		memcpy(out, c.data, c.count * size);
+		out += c.count * size;
+	});
+	return &mRunVerts[0];
+}
+
 // Unpacks a display list draw into the vertex cache (into e: an out of date entry for it, or NULL for a new
 // one). NULL: not cached (it changes too often, or does not fit); the draw goes through the ring instead.
 Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry* e)
@@ -1644,8 +1693,8 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	}
 	const gpu::VertexLayout& L = *call.layout;
 	const u32 stride           = xp->info.format.stride;
-	const u32 indexCount       = triangleCount(call.primitive, call.count) * 3;
-	const u32 dataBytes        = call.count * L.size;
+	const u32 indexCount       = drawTriangleCount(call) * 3;
+	const u32 dataBytes        = gpu::drawBytes(call, L.size);
 	const u32 vertexBytes      = call.count * stride;
 	const u32 arrayCap         = L.indexedCount;
 	const u32 bytesOff         = (u32)((uintptr_t)call.data & 7);
@@ -1678,6 +1727,7 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 		e->count    = (u16)call.count;
 		e->prim     = (u8)call.primitive;
 		e->size     = (u8)L.size;
+		e->parts    = call.parts;
 		e->arrayCap = (u8)arrayCap;
 		e->bytesOff = (u8)bytesOff;
 		if (mNewVariant) {
@@ -1688,9 +1738,15 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	}
 	// (a refill keeps its place in the entries' memory: the bytes and arrays are the CPU's, the vertices
 	// the RSX reads are unpacked to new cache memory)
-	const gpu::VertexArray* arrays = call.arrays ? call.arrays : mCp.resolveArrays(call);
+	// (a draw run's vertices: copied together, without the headers between its parts)
 	gpu::DrawCall c = call;
-	c.arrays        = arrays;
+	if (call.parts > 1) {
+		c.data   = runVertices(call);
+		c.parts  = 1;
+		c.arrays = NULL;
+	}
+	const gpu::VertexArray* arrays = c.arrays ? c.arrays : mCp.resolveArrays(c);
+	c.arrays                       = arrays;
 	memcpy(e->bytes(), call.data, dataBytes);
 	const u32* cp = mCp.state().cp;
 	e->cp[0] = cp[0x50], e->cp[1] = cp[0x60], e->cp[2] = cp[0x70 + call.vat], e->cp[3] = cp[0x80 + call.vat];
@@ -1740,7 +1796,7 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	}
 	e->firstVertex = off / stride;
 	e->indexAt     = mIdxHead;
-	e->indexCount  = triangleIndices<u32>(call.primitive, call.count, e->firstVertex, mIdx + mIdxHead);
+	e->indexCount  = drawIndices<u32>(call, e->firstVertex, mIdx + mIdxHead);
 	mIdxHead += e->indexCount;
 	Rows rows, nrows;
 	matrixRowsUsed(c, xp->info, &rows, &nrows);
@@ -1776,7 +1832,12 @@ void Renderer::auditEntry(CacheEntry* e, const gpu::DrawCall& call, XfProgramEnt
 	const u32 stride = xp->info.format.stride;
 	const u32 bytes  = call.count * stride;
 	gpu::DrawCall c  = call;
-	c.arrays         = call.arrays ? call.arrays : mCp.resolveArrays(call);
+	if (call.parts > 1) {
+		c.data   = runVertices(call);
+		c.parts  = 1;
+		c.arrays = NULL;
+	}
+	c.arrays = c.arrays ? c.arrays : mCp.resolveArrays(c);
 	mAuditVerts.resize(bytes + 64);
 	{
 		gpu::GatherSpec G = xp->info.gather;
@@ -1816,8 +1877,8 @@ void Renderer::auditEntry(CacheEntry* e, const gpu::DrawCall& call, XfProgramEnt
 		}
 	}
 	if (!what) {
-		mAuditIdx.resize(e->indexCount + 8);
-		const u32 n = triangleIndices<u32>(call.primitive, call.count, e->firstVertex, &mAuditIdx[0]);
+		mAuditIdx.resize(drawTriangleCount(call) * 3 + 8);
+		const u32 n = drawIndices<u32>(call, e->firstVertex, &mAuditIdx[0]);
 		if (n != e->indexCount || (n && memcmp(&mAuditIdx[0], mIdx + e->indexAt, n * 4) != 0)) {
 			what = "triangles";
 		}
@@ -2190,6 +2251,7 @@ void Renderer::endFrame()
 				"normal, the graphics thread paused 8 ms after each frame",
 				"normal, vertex cache triangles in the command buffer",
 				"normal, vertex cache OFF",
+				"normal, display list draws one at a time (as test build 34)",
 			};
 			mMode = (mMode + 1) % MODE_COUNT;
 			if (mTableUsed) {

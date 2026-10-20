@@ -21,6 +21,7 @@
 // baton, so no other game code touches the voice blocks meanwhile.
 
 #include "sdk_internal.h"
+#include "../backend/ps3_backend.h"
 
 #include "jaudio/dspinterface.h"
 #include <stdio.h>
@@ -142,6 +143,7 @@ struct State {
 
 	// diagnostics
 	u32 subframes;
+	unsigned long long mixTicks; // timebase ticks spent mixing (ps3DspRenderSubframe)
 	u32 playing;   // voices processed in the last sub-frame
 	u32 finished;  // voices that reached "done"
 	u32 badVoices; // voices stopped because their data was out of range
@@ -900,6 +902,7 @@ extern "C" void ps3DspRenderSubframe(void)
 	if (!S.configured) {
 		return;
 	}
+	const unsigned long long t0 = ps3b_timebase();
 	S.subframes++;
 	S.playing = 0;
 	prepareSubframe();
@@ -921,10 +924,23 @@ extern "C" void ps3DspRenderSubframe(void)
 		renderVoice(block);
 	}
 	finishSubframe();
+	S.mixTicks += ps3b_timebase() - t0;
 }
 
 extern "C" void ps3DspStatus(char* buf, unsigned int size)
 {
-	snprintf(buf, size, "%u voices playing, %u sounds finished%s", (unsigned)S.playing, (unsigned)S.finished,
-	         S.badVoices ? " (some with bad data)" : "");
+	// the mixing time since the last report: per sub-frame, and as a share of the time
+	static unsigned long long sLastTicks, sLastTb;
+	static u32 sLastSubframes;
+	const unsigned long long tb = ps3b_timebase(), freq = ps3b_timebase_freq();
+	const unsigned long long ticks = S.mixTicks - sLastTicks, wall = sLastTb ? tb - sLastTb : 0;
+	const u32 subframes = S.subframes - sLastSubframes;
+	sLastTicks     = S.mixTicks;
+	sLastTb        = tb;
+	sLastSubframes = S.subframes;
+	const u32 usPer    = subframes && freq ? (u32)(ticks * 1000000ULL / freq / subframes) : 0;
+	const u32 permille = wall ? (u32)(ticks * 1000ULL / wall) : 0;
+	snprintf(buf, size, "%u voices playing, %u sounds finished%s, mixing %u us per sub-frame (%u.%u%% of the time)", (unsigned)S.playing,
+	         (unsigned)S.finished, S.badVoices ? " (some with bad data)" : "", (unsigned)usPer, (unsigned)(permille / 10),
+	         (unsigned)(permille % 10));
 }
