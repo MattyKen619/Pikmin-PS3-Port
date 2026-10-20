@@ -45,6 +45,8 @@ struct RendererStats {
 	u64 gpuDraws, cpuDraws, xfPrograms, xfProgramErrors, matrixRows, setupUploads, vertexProgramLoads;
 	u64 cacheHits, cacheFills, cacheUncached, cacheResets, regionChecks, regionChanges;
 	u64 cacheFollowed; // (draws whose entry was the one predicted)
+	u64 refillWhy[5];  // why entries were out of date: started over, CP registers, list bytes, array places, array contents
+	u64 cacheVariants; // (entries made for a draw already in the cache, drawn with other registers or array places)
 	u32 cacheBytes, cacheEntries;
 	u64 rsxBehind; // frames finished before the RSX had drawn the previous one
 	u32 textureBytes, textures;
@@ -188,6 +190,7 @@ private:
 		u32 rowsHi, nrowsHi;
 		u32 cp[7];            // vertex descriptor, the format's VAT A/B/C, MATINDEX A/B
 		u32 gen, okFrame;     // okFrame: the last frame its vertex arrays were found unchanged
+		u32 refillFrame;      // the last frame it was filled again (or, not cached, stopped being cached)
 		u32 indexAt, indexCount, firstVertex;
 		u16 count;
 		u8 size, prim, arrays, arrayCap, refills, lines; // lines: 128-byte lines from the entry to its end
@@ -242,6 +245,7 @@ private:
 	void cacheFollow(CacheEntry* e);
 	CacheEntry* cacheFill(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry* e);
 	bool cacheValid(CacheEntry* e, const gpu::DrawCall& call);
+	bool cacheVariant(const CacheEntry* e, const gpu::DrawCall& call);
 	void checkRegion(ArrayRegion& r);
 	ArrayRegion* regionFor(u32 array, u32 base, u32 stride);
 	void* poolAlloc(u32 bytes, u32 align);
@@ -346,6 +350,9 @@ private:
 	bool mCheckEveryFrame; // (the test switch: textures and vertex arrays checked every frame)
 	int mFrontFaceSign;   // (the device's, from its self-test)
 	CacheEntry* mLastEntry; // the entry of the last cached draw (its follow is the next one's)
+	enum { WHY_GEN, WHY_CP, WHY_BYTES, WHY_BASE, WHY_VERSION };
+	u32 mWhy, mWhyDetail; // (why cacheValid found the entry out of date: WHY_*, and which register or array)
+	bool mNewVariant;     // (cacheLookup found entries for the draw, none for its registers and arrays)
 
 	// audit frames (every AUDIT_FRAMES): everything the checks would skip is checked anyway, and what changed
 	// without being noticed is logged (and corrected)

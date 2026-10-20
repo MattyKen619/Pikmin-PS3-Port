@@ -185,11 +185,15 @@ void ps3rsx::status(char* buf, unsigned int size)
 		if (sRenderer->vertexCache()) {
 			snprintf(buf + at, size - at,
 			         "; vertex cache: per frame %llu draws from it (%llu found by following the last), %llu unpacked into it, %llu not "
-			         "cached; %u entries, %u KB; %llu array checks (%llu changed), started over %llu times",
+			         "cached; %u entries, %u KB; %llu array checks (%llu changed), started over %llu times; since the last report: "
+			         "%llu variants made, %llu refills (CP registers %llu, list bytes %llu, array places %llu, array contents %llu)",
 			         (s.cacheHits - last.cacheHits) / n, (s.cacheFollowed - last.cacheFollowed) / n, (s.cacheFills - last.cacheFills) / n,
 			         (s.cacheUncached - last.cacheUncached) / n,
 			         s.cacheEntries, s.cacheBytes >> 10, (s.regionChecks - last.regionChecks) / n, s.regionChanges - last.regionChanges,
-			         s.cacheResets);
+			         s.cacheResets, s.cacheVariants - last.cacheVariants,
+			         (s.refillWhy[1] + s.refillWhy[2] + s.refillWhy[3] + s.refillWhy[4]) - (last.refillWhy[1] + last.refillWhy[2] + last.refillWhy[3] + last.refillWhy[4]),
+			         s.refillWhy[1] - last.refillWhy[1], s.refillWhy[2] - last.refillWhy[2], s.refillWhy[3] - last.refillWhy[3],
+			         s.refillWhy[4] - last.refillWhy[4]);
 		} else {
 			snprintf(buf + at, size - at, "; vertex cache off");
 		}

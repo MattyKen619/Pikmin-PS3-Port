@@ -463,6 +463,7 @@ enum {
 
 static gpu::u8* sRing;
 static u32 sWritten;               // game thread only
+static u32 sWriteLimit;            // (game thread) sWritten can grow to this without the slow path (writeLimit)
 static volatile u32 sPublished;    // written by the game thread
 static volatile u32 sConsumed;     // written by the graphics thread
 static volatile int sConsumerWaiting;
@@ -544,15 +545,20 @@ static void graphicsThread(void*)
 	}
 }
 
+static void refreshWriteLimit();
+
 static void publish()
 {
 	if (!sRing || sPublished == sWritten) {
+		refreshWriteLimit();
 		return;
 	}
 	__sync_synchronize(); // the bytes before the counter
 	sPublished = sWritten;
+	refreshWriteLimit();
 	if (!sThreaded) {
 		drain(sWritten);
+		refreshWriteLimit();
 		return;
 	}
 	__sync_synchronize();
@@ -580,7 +586,25 @@ static void makeRoom(u32 n)
 	ps3b_mutex_unlock(sMutex);
 }
 
-static inline void put(const gpu::u8* b, u32 n)
+// How far the game thread can write before put's checks are needed: not past what the graphics thread has
+// yet to read, not past the end of the ring, and not as far as the next publishing point.
+static void refreshWriteLimit()
+{
+	const u32 w   = sWritten;
+	u32 room      = sConsumed + RING_SIZE - w;
+	const u32 end = RING_SIZE - (w & RING_MASK);
+	const u32 out = w - sPublished; // (written, not yet published)
+	const u32 pub = out < PUBLISH_CHUNK ? PUBLISH_CHUNK - 1 - out : 0;
+	if (end < room) {
+		room = end;
+	}
+	if (pub < room) {
+		room = pub;
+	}
+	sWriteLimit = w + (room <= RING_SIZE ? room : 0);
+}
+
+static void put(const gpu::u8* b, u32 n)
 {
 	if (sWritten - sConsumed + n > RING_SIZE) {
 		makeRoom(n);
@@ -599,6 +623,26 @@ static inline void put(const gpu::u8* b, u32 n)
 	if (sWritten - sPublished >= PUBLISH_CHUNK) {
 		publish();
 	}
+	refreshWriteLimit();
+}
+
+// The writes the GX library makes (every command word it sends): straight into the ring while there is room
+// before the limit, otherwise through put. (Test build 32 built each word in a small array on the stack and
+// copied it from there, a byte at a time, with the room and publishing checks on every write.)
+static inline bool putFast(u32 value, u32 n)
+{
+	const u32 w = sWritten;
+	if (sWriteLimit - w < n || !sRing) {
+		return false;
+	}
+	gpu::u8* p = sRing + (w & RING_MASK);
+	switch (n) {
+	case 4: p[0] = (gpu::u8)(value >> 24), p[1] = (gpu::u8)(value >> 16), p[2] = (gpu::u8)(value >> 8), p[3] = (gpu::u8)value; break;
+	case 2: p[0] = (gpu::u8)(value >> 8), p[1] = (gpu::u8)value; break;
+	default: p[0] = (gpu::u8)value; break;
+	}
+	sWritten = w + n;
+	return true;
 }
 
 void ps3gx::finish()
@@ -701,6 +745,9 @@ extern "C" void ps3GxFlush(void) { publish(); }
 
 extern "C" void ps3GxWrite8(unsigned int value)
 {
+	if (sLinked && putFast(value, 1)) {
+		return;
+	}
 	u8 b = (u8)value;
 	if (sLinked) {
 		put(&b, 1);
@@ -711,6 +758,9 @@ extern "C" void ps3GxWrite8(unsigned int value)
 
 extern "C" void ps3GxWrite16(unsigned int value)
 {
+	if (sLinked && putFast(value, 2)) {
+		return;
+	}
 	u8 b[2] = { (u8)(value >> 8), (u8)value };
 	if (sLinked) {
 		put(b, 2);
@@ -721,6 +771,9 @@ extern "C" void ps3GxWrite16(unsigned int value)
 
 extern "C" void ps3GxWrite32(unsigned int value)
 {
+	if (sLinked && putFast(value, 4)) {
+		return;
+	}
 	u8 b[4] = { (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value };
 	if (sLinked) {
 		put(b, 4);

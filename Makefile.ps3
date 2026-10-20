@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 32
+TEST_BUILD := 33
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -59,7 +59,9 @@ GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 # record the last address each thread ran, and both are thread-switch points ("preemption points" in
 # platform/ps3/sdk/os_sched.cpp). -g1 adds line tables for tools/ps3/symbolize_log.py. The SDK layer
 # that implements the hooks is not instrumented.
-INSTRUMENT       := -finstrument-functions -fsanitize-coverage=trace-pc -g1
+# Functions defined in headers (small inline accessors and vector math, mostly) are left out: each one
+# inlined got its own pair of hook calls (test build 33).
+INSTRUMENT       := -finstrument-functions -finstrument-functions-exclude-file-list=include/ -fsanitize-coverage=trace-pc -g1
 PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(GAME_DEFS) $(GAME_INC)
 GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
@@ -98,11 +100,14 @@ $(call objs_of,$(PLATFORM_CPP)): $(OBJDIR)/%.o: %
 	@echo $<
 	@$(CXX) $(PLATFORM_CXXFLAGS) -c $< -o $@
 
-# jaudio: .c files that the original build compiles as C++
+# jaudio: .c files that the original build compiles as C++. The sound engine's busiest files (the
+# sequencer and the mixing set-up) have no loops that wait for another thread or an interrupt: no basic
+# block hooks there, only the function hooks.
+JAUDIO_BUSY := $(addprefix src/jaudio/,jammain_2.c dspdriver.c dspbuf.c driverinterface.c dspinterface.c aictrl.c)
 $(call objs_of,$(JAUDIO_C)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
-	@$(CXX) $(GAME_CXXFLAGS) -x c++ -c $< -o $@
+	@$(CXX) $(if $(filter $<,$(JAUDIO_BUSY)),$(filter-out -fsanitize-coverage=trace-pc,$(GAME_CXXFLAGS)),$(GAME_CXXFLAGS)) -x c++ -c $< -o $@
 
 # Nintendo's GX library: C compiled as C++ (its write-gather pipe, GXWGFifo, is a C++ object on the PS3).
 # -fpermissive: the C code converts between ints and enums, and casts pointers to u32 (addresses fit).

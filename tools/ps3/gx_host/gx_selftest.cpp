@@ -428,6 +428,32 @@ int main(int argc, char** argv)
 		CHECK(replay.idle());
 	}
 
+	// 9. many writes of every size: around the ring several times, across many publishing points
+	{
+		const u64 bp0    = cp.stats().bpLoads;
+		const u64 draws0 = cp.stats().draws;
+		const u32 N      = 300000;
+		GXColor last     = { 0, 0, 0, 0 };
+		u32 quads        = 0;
+		for (u32 i = 0; i < N; i++) {
+			GXColor c = { (u8)i, (u8)(i >> 8), (u8)(i >> 16), (u8)(i * 7) };
+			GXSetTevColor(GX_TEVREG1, c);
+			last = c;
+			if (i % 997 == 0) {
+				quadDirect(); // (8-, 16- and 32-bit writes: the stream's alignment changes)
+				quads++;
+			}
+		}
+		GXFlush();
+		ps3gx::finish();
+		CHECK(cp.stats().bpLoads - bp0 == (u64)N * 4);
+		CHECK(cp.stats().draws - draws0 == quads);
+		const u32 ra = cp.state().bp[0xE0 + GX_TEVREG1 * 2], bg = cp.state().bp[0xE1 + GX_TEVREG1 * 2];
+		CHECK((ra & 0x7FF) == last.r && ((ra >> 12) & 0x7FF) == last.a);
+		CHECK((bg & 0x7FF) == last.b && ((bg >> 12) & 0x7FF) == last.g);
+		printf("stress: %u colors and %u quads written, %llu BP loads interpreted\n", N, quads, (unsigned long long)(cp.stats().bpLoads - bp0));
+	}
+
 	const gpu::Stats& st = cp.stats();
 	CHECK(st.badCommands == 0);
 	CHECK(st.memoryFailures == 0);

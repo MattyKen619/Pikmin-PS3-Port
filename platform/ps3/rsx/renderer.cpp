@@ -45,6 +45,9 @@ enum {
 	TEXTURE_CHECK_FRAMES = 8,
 	ARENA_BYTES     = RSX_VERTEX_CACHE_BYTES, // vertex cache memory (at most a third of the scratch memory)
 	CACHE_ENTRIES   = 32768,           // entries before the vertex cache starts over
+	CACHE_VARIANTS  = 8,               // entries for one display list draw with different registers or arrays
+	REFILL_WINDOW   = 120,             // frames: refills further apart than this are counted afresh
+	UNCACHED_RETRY  = 900,             // frames: a draw taken out of the vertex cache is tried again after this
 	POOL_CHUNK      = 1024 * 1024,
 	POOL_MAX        = 12 * 1024 * 1024, // CPU memory for the entries before the vertex cache starts over
 	AUDIT_FRAMES    = RSX_AUDIT_FRAMES, // one frame in this many is an audit frame (Renderer::mAudit)
@@ -220,6 +223,9 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mCheckEveryFrame(false)
     , mFrontFaceSign(0)
     , mLastEntry(NULL)
+    , mWhy(0)
+    , mWhyDetail(0)
+    , mNewVariant(false)
     , mAudit(false)
     , mChainLength(0)
     , mArena(NULL)
@@ -1382,11 +1388,16 @@ inline u32 tableSlot(const u8* data, u32 slots)
 // there, or out of date (then *reuse: the entry to fill again).
 Renderer::CacheEntry* Renderer::cacheLookup(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry** reuse)
 {
+	mNewVariant = false;
 	// (the draws come in the same order frame after frame: the entry that came after the last one, last
 	// time, is usually this draw's, and already read ahead)
+	// A display list draw can have several entries (variants), for the CP registers and array places it is
+	// drawn with: the same model drawn for different objects. (Test build 32: entries filled again whenever
+	// such a draw alternated, and taken out of the cache after 4 times; thousands of draws a frame by the
+	// end of a few minutes' play.)
 	CacheEntry* e = mLastEntry ? mLastEntry->follow : NULL;
 	if (e && e->data == call.data && e->xp == xp && e->count == call.count && e->prim == call.primitive
-	    && e->size == call.layout->size) {
+	    && e->size == call.layout->size && cacheVariant(e, call)) {
 		mStats.cacheFollowed++;
 		mChainLength = 1;
 	} else {
@@ -1400,13 +1411,24 @@ Renderer::CacheEntry* Renderer::cacheLookup(const gpu::DrawCall& call, XfProgram
 			i = (i + 1) & (mTableSlots - 1);
 		}
 		mChainLength = 0;
+		u32 variants      = 0;
+		CacheEntry* first = NULL;
 		for (e = head; e; e = e->next) {
 			mChainLength++;
 			if (e->xp == xp && e->count == call.count && e->prim == call.primitive && e->size == call.layout->size) {
-				break;
+				if (!first) {
+					first = e;
+				}
+				variants++;
+				if (cacheVariant(e, call)) {
+					break;
+				}
 			}
 		}
 		if (!e) {
+			// (no variant for these registers and array places: a new one, or with many, the first filled again)
+			*reuse      = variants >= CACHE_VARIANTS ? first : NULL;
+			mNewVariant = variants > 0 && !*reuse;
 			return NULL;
 		}
 	}
@@ -1434,52 +1456,79 @@ void Renderer::cacheFollow(CacheEntry* e)
 	}
 }
 
-bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
+// Whether the entry is the draw's variant: filled with the same CP registers and array places.
+bool Renderer::cacheVariant(const CacheEntry* e, const gpu::DrawCall& call)
 {
-	if (e->gen != mArenaGen) {
-		return false;
-	}
 	const u32* cp = mCp.state().cp;
 	const u32 vat = call.vat;
 	if (e->cp[0] != cp[0x50] || e->cp[1] != cp[0x60] || e->cp[2] != cp[0x70 + vat] || e->cp[3] != cp[0x80 + vat]
 	    || e->cp[4] != cp[0x90 + vat] || e->cp[5] != cp[0x30] || e->cp[6] != cp[0x40]) {
+		const u32 regs[7] = { 0x50u, 0x60u, 0x70u + vat, 0x80u + vat, 0x90u + vat, 0x30u, 0x40u };
+		mWhy = WHY_CP;
+		for (u32 i = 0; i < 7; i++) {
+			if (e->cp[i] != cp[regs[i]]) {
+				mWhyDetail = regs[i];
+				break;
+			}
+		}
 		return false;
 	}
-	if (!sameBytes(call.data, e->bytes(), e->count * e->size)) {
-		return false;
-	}
-	// the arrays: where they are, and whether they changed (unless they were found unchanged earlier in this
-	// frame: their versions change only when they are checked, at most once a frame)
-	const CacheArray* arr = e->arr();
-	const bool recheck    = e->okFrame != mFrame;
+	const CacheArray* arr = const_cast<CacheEntry*>(e)->arr();
 	for (u32 k = 0, n = e->arrays; k < n; k++) {
 		const CacheArray& a = arr[k];
 		if (cp[0xA0 + a.array] != a.base || (cp[0xB0 + a.array] & 0xFF) != a.stride) {
+			mWhy       = WHY_BASE;
+			mWhyDetail = a.array;
 			return false;
 		}
-		if (recheck) {
-			ArrayRegion& r = *a.region;
-			if (checkDue(r.checkedFrame, r.interval)) {
-				checkRegion(r);
-			} else if (mAudit && r.hashValid && r.checkedFrame != mFrame && r.auditFrame != mFrame) {
-				// (an audit frame: checked anyway, once)
-				r.auditFrame    = mFrame;
-				const u32 bytes = (r.hi - r.lo) * r.stride + r.stride;
-				const u8* p     = mMem.read(r.base + r.lo * r.stride, bytes, gpu::MEM_ARRAY);
-				mAuditCounts.regions++;
-				if (p && gpu::hashMemory(p, bytes) != r.hash) {
-					if (mAuditCounts.regionsChanged++ < AUDIT_LOGS) {
-						log("[audit] frame %u: vertex array %u at 0x%07x (entries %u-%u) changed without being noticed (checked %u frames "
-						    "ago, every %u)\n",
-						    mFrame, r.array, r.base, r.lo, r.hi, mFrame - r.checkedFrame, r.interval);
-					}
-					r.checkedFrame = mFrame - r.interval; // (due: checked, a new version)
-					checkRegion(r);
+	}
+	return true;
+}
+
+bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
+{
+	if (e->gen != mArenaGen) {
+		mWhy = WHY_GEN;
+		return false;
+	}
+	if (!cacheVariant(e, call)) {
+		return false;
+	}
+	if (!sameBytes(call.data, e->bytes(), e->count * e->size)) {
+		mWhy = WHY_BYTES;
+		return false;
+	}
+	if (e->okFrame == mFrame) {
+		return true; // (its arrays were found unchanged earlier in this frame: their versions change only when they
+		             // are checked, at most once a frame)
+	}
+	// whether its arrays changed
+	const CacheArray* arr = e->arr();
+	for (u32 k = 0, n = e->arrays; k < n; k++) {
+		const CacheArray& a = arr[k];
+		ArrayRegion& r      = *a.region;
+		if (checkDue(r.checkedFrame, r.interval)) {
+			checkRegion(r);
+		} else if (mAudit && r.hashValid && r.checkedFrame != mFrame && r.auditFrame != mFrame) {
+			// (an audit frame: checked anyway, once)
+			r.auditFrame    = mFrame;
+			const u32 bytes = (r.hi - r.lo) * r.stride + r.stride;
+			const u8* p     = mMem.read(r.base + r.lo * r.stride, bytes, gpu::MEM_ARRAY);
+			mAuditCounts.regions++;
+			if (p && gpu::hashMemory(p, bytes) != r.hash) {
+				if (mAuditCounts.regionsChanged++ < AUDIT_LOGS) {
+					log("[audit] frame %u: vertex array %u at 0x%07x (entries %u-%u) changed without being noticed (checked %u frames "
+					    "ago, every %u)\n",
+					    mFrame, r.array, r.base, r.lo, r.hi, mFrame - r.checkedFrame, r.interval);
 				}
+				r.checkedFrame = mFrame - r.interval; // (due: checked, a new version)
+				checkRegion(r);
 			}
-			if (r.version != a.version) {
-				return false;
-			}
+		}
+		if (r.version != a.version) {
+			mWhy       = WHY_VERSION;
+			mWhyDetail = a.array;
+			return false;
 		}
 	}
 	e->okFrame = mFrame;
@@ -1539,15 +1588,56 @@ Renderer::ArrayRegion* Renderer::regionFor(u32 array, u32 base, u32 stride)
 Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEntry* xp, CacheEntry* e)
 {
 	if (e && !e->cached) {
-		mStats.cacheUncached++;
-		return NULL;
+		if (mFrame - e->refillFrame < (u32)UNCACHED_RETRY) {
+			mStats.cacheUncached++;
+			return NULL;
+		}
+		e->cached  = true; // (tried again)
+		e->refills = 0;
+	}
+	if (e) {
+		mStats.refillWhy[mWhy < 5 ? mWhy : 0]++;
+		if (mFrame - e->refillFrame > (u32)REFILL_WINDOW) {
+			e->refills = 0; // (the last refill was long ago)
+		}
+		e->refillFrame = mFrame;
 	}
 	if (e && ++e->refills >= 4) {
-		e->cached = false; // (what it reads changes too often: from the ring from now on)
+		e->cached = false; // (what it reads changes too often: from the ring for a while)
 		mStats.cacheUncached++;
+		static u32 sLogged;
+		if (sLogged < 24) {
+			sLogged++;
+			static const char* const kWhy[5] = { "started over", "CP register", "list bytes", "array place", "array contents" };
+			const u32* cp = mCp.state().cp;
+			if (mWhy == WHY_CP) {
+				const u32 regs[7] = { 0x50u, 0x60u, 0x70u + call.vat, 0x80u + call.vat, 0x90u + call.vat, 0x30u, 0x40u };
+				u32 was = 0;
+				for (u32 i = 0; i < 7; i++) {
+					if (regs[i] == mWhyDetail) {
+						was = e->cp[i];
+					}
+				}
+				log("[rsx] frame %u: a draw (%u vertices, list bytes at %p) left the vertex cache: %s 0x%02x was 0x%08x, now 0x%08x\n", mFrame,
+				    call.count, (const void*)call.data, kWhy[mWhy], mWhyDetail, was, cp[mWhyDetail]);
+			} else if (mWhy == WHY_BASE) {
+				u32 was = 0;
+				const CacheArray* arr = e->arr();
+				for (u32 k = 0; k < e->arrays; k++) {
+					if (arr[k].array == mWhyDetail) {
+						was = arr[k].base;
+					}
+				}
+				log("[rsx] frame %u: a draw (%u vertices, list bytes at %p) left the vertex cache: %s %u was 0x%08x, now 0x%08x\n", mFrame,
+				    call.count, (const void*)call.data, kWhy[mWhy], mWhyDetail, was, cp[0xA0 + mWhyDetail]);
+			} else {
+				log("[rsx] frame %u: a draw (%u vertices, list bytes at %p) left the vertex cache: %s (%u)\n", mFrame, call.count,
+				    (const void*)call.data, kWhy[mWhy < 5 ? mWhy : 0], mWhyDetail);
+			}
+		}
 		return NULL;
 	}
-	if (!e && mChainLength >= 4) {
+	if (!e && mChainLength >= 2 * CACHE_VARIANTS) {
 		// (a display list address drawn in many different ways: probably made anew each frame)
 		mStats.cacheUncached++;
 		return NULL;
@@ -1590,6 +1680,9 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 		e->size     = (u8)L.size;
 		e->arrayCap = (u8)arrayCap;
 		e->bytesOff = (u8)bytesOff;
+		if (mNewVariant) {
+			mStats.cacheVariants++;
+		}
 		e->lines    = (u8)((entryBytes + 127) / 128 < 8 ? (entryBytes + 127) / 128 : 8);
 		e->cached   = true;
 	}

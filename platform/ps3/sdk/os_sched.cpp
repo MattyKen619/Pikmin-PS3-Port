@@ -46,8 +46,6 @@ struct ThreadImpl {
 
 	// Basic-block trace (-fsanitize-coverage=trace-pc): the last game-code address this thread ran.
 	void* volatile lastPc;
-	volatile u32 blocks;
-	u32 reportedBlocks;
 };
 
 struct Interrupt {
@@ -484,6 +482,9 @@ extern "C" void __cyg_profile_func_exit(void* fn, void* site)
 // the thread is, which pinpoints a hang or the last code a crashed thread ran (lv2 stops a thread that
 // faults while the rest of the game keeps going), and makes every loop a switch point.
 extern "C" void __sanitizer_cov_trace_pc(void) __attribute__((no_instrument_function));
+// (It runs every few instructions of game code, so it does as little as it can: test build 32 also counted
+// blocks here, a read-modify-write of memory that the next block's hook read back before the store was done,
+// which costs the PPU's in-order pipeline dozens of cycles each time.)
 extern "C" void __sanitizer_cov_trace_pc(void)
 {
 	ThreadImpl* t = sRunning;
@@ -492,8 +493,7 @@ extern "C" void __sanitizer_cov_trace_pc(void)
 	}
 	void* pc  = __builtin_return_address(0);
 	t->lastPc = pc;
-	t->blocks++;
-	if (sIntrHead != sIntrTail && sIntrEnabled && !sInInterrupt) {
+	if (__builtin_expect(sIntrHead != sIntrTail, 0) && sIntrEnabled && !sInInterrupt) {
 		ps3DeliverInterrupts();
 		t->lastPc = pc; // interrupt handlers ran on this thread: point back at the interrupted code
 	}
@@ -1020,15 +1020,12 @@ static void reportThreads(const char* title)
 		if (!t->os) {
 			continue;
 		}
-		u32 calls         = t->calls;
-		u32 recent        = calls - t->reportedCalls;
-		t->reportedCalls  = calls;
-		u32 blocks        = t->blocks;
-		u32 recentBlocks  = blocks - t->reportedBlocks;
-		t->reportedBlocks = blocks;
-		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls, %u blocks since last report\n", i, (int)t->os->priority,
-		       stateName(t->os->state), t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "",
-		       t == sRunning ? "  <- has the baton" : "", (unsigned)recent, (unsigned)recentBlocks);
+		u32 calls        = t->calls;
+		u32 recent       = calls - t->reportedCalls;
+		t->reportedCalls = calls;
+		ps3Log("[ps3]   thread %d prio %d %s%s%s%s, %u calls since last report\n", i, (int)t->os->priority, stateName(t->os->state),
+		       t->waitReason ? " in " : "", t->waitReason ? t->waitReason : "", t == sRunning ? "  <- has the baton" : "",
+		       (unsigned)recent);
 		logStack(i, t);
 	}
 }
@@ -1041,7 +1038,7 @@ static void watchdogThread(void*)
 	int idleSdk      = 0;
 	int idleCalls    = 0;
 	int idleBlocks   = 0;
-	u32 lastBlocks   = 0;
+	void* lastPc     = NULL;
 	int seconds      = 0;
 	for (;;) {
 		ps3b_sleep_us(1000 * 1000);
@@ -1054,18 +1051,19 @@ static void watchdogThread(void*)
 		// or (if not even a basic block ran) the thread has stopped: lv2 halts a thread that faults.
 		ThreadImpl* runner = sRunning;
 		u32 calls          = runner ? runner->calls : 0;
-		u32 blocks         = runner ? runner->blocks : 0;
+		void* pc           = runner ? runner->lastPc : NULL;
 		int running        = runner && runner->os && runner->os->state == OS_THREAD_STATE_RUNNING;
 		int same           = running && runner == lastRunner;
 		idleCalls          = (same && calls == lastCalls) ? idleCalls + 1 : 0;
-		idleBlocks         = (same && blocks == lastBlocks) ? idleBlocks + 1 : 0;
+		idleBlocks         = (same && calls == lastCalls && pc == lastPc) ? idleBlocks + 1 : 0; // (no block ran, or the
+		                                                                                           // same one each time)
 		lastRunner         = runner;
 		lastCalls          = calls;
-		lastBlocks         = blocks;
+		lastPc             = pc;
 
 		if (idleBlocks == 5 || (idleBlocks > 0 && idleBlocks % 30 == 0)) {
 			char title[112];
-			snprintf(title, sizeof(title), "STALL: thread %d stopped for %d s (crashed, or blocked outside game code)",
+			snprintf(title, sizeof(title), "STALL: thread %d stopped for %d s (crashed, blocked outside game code, or looping in one place)",
 			         runner->index, idleBlocks);
 			reportThreads(title);
 		} else if (idleCalls == 5 || (idleCalls > 0 && idleCalls % 30 == 0)) {
