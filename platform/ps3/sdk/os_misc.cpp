@@ -20,6 +20,31 @@ static unsigned long long sTb0;
 static unsigned long long sTbFreq;
 static long long sEpoch0;
 
+// stack_new (include/sysNew.h): objects the game takes the address of and keeps for the rest of a function.
+// A ring: an object's memory is reused only after STACK_NEW_RING bytes more have been allocated (a frame of
+// gameplay allocates a few kilobytes).
+enum { STACK_NEW_RING = 256 * 1024 };
+static u8 sStackNewRing[STACK_NEW_RING] __attribute__((aligned(128)));
+static volatile u32 sStackNewAt;
+
+extern "C" void* ps3StackNewAlloc(unsigned int size, unsigned int align)
+{
+	if (align < 16) {
+		align = 16;
+	}
+	const u32 need = (size + align - 1) & ~(align - 1);
+	for (;;) {
+		const u32 at   = sStackNewAt;
+		u32 start      = (at + align - 1) & ~(align - 1);
+		if (start + need > STACK_NEW_RING) {
+			start = 0;
+		}
+		if (__sync_bool_compare_and_swap(&sStackNewAt, at, start + need)) {
+			return sStackNewRing + start;
+		}
+	}
+}
+
 extern "C" void ps3OsMiscInit(void)
 {
 	sArenaLo = (u8*)ps3b_memalign(32, ARENA_SIZE);

@@ -39,38 +39,25 @@ void operator delete[](void* ptr);
 // name and use that.
 #define stack_new(type) &type
 #elif defined(__cplusplus) && __cplusplus >= 201103L
-// Legal C++11 equivalent (used by the PS3 port): `stack_new(T)(args...)` creates a temporary holder
-// whose storage lives until the end of the full-expression, exactly like the original temporary,
-// constructs T in it and yields a T*. The object is destroyed with the holder.
+// Legal C++11 equivalent (used by the PS3 port): `stack_new(T)(args...)` constructs T and yields a T*.
+// The game keeps these pointers past the end of the expression (`TekiAndCondition cond(stack_new(...)
+// (...), ...);` then `findClosest(pos, &cond)`), which with MetroWerks worked because the temporary's
+// stack slot stayed put for the rest of the function. A temporary that lives only to the end of the
+// expression does not: once the compiler reused its slot (test build 33, after the game's code was
+// optimized more), a condition pointed at itself and the loading of the second area never finished. So the
+// object goes into a ring of memory (ps3StackNewAlloc) that is reused only after much more has been
+// allocated there, and like the original it is not destroyed (these types have nothing to destroy).
 inline void* operator new(size_t, void* place) { return place; }
 inline void operator delete(void*, void*) { }
+extern "C" void* ps3StackNewAlloc(unsigned int size, unsigned int align);
 
 template <typename T>
 struct StackNewHolder {
-	StackNewHolder()
-	    : mConstructed(false)
-	{
-	}
-	~StackNewHolder()
-	{
-		if (mConstructed) {
-			reinterpret_cast<T*>(mStorage)->~T();
-		}
-	}
 	template <typename... Args>
 	T* operator()(Args&&... args)
 	{
-		T* obj        = new (static_cast<void*>(mStorage)) T(static_cast<Args&&>(args)...);
-		mConstructed = true;
-		return obj;
+		return new (ps3StackNewAlloc(sizeof(T), alignof(T))) T(static_cast<Args&&>(args)...);
 	}
-
-private:
-	StackNewHolder(const StackNewHolder&);
-	StackNewHolder& operator=(const StackNewHolder&);
-
-	alignas(T) unsigned char mStorage[sizeof(T)];
-	bool mConstructed;
 };
 #define stack_new(...) StackNewHolder<__VA_ARGS__>()
 #else
