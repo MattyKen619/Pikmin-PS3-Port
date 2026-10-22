@@ -121,46 +121,32 @@ void GXGetProjectionv(f32* ptr)
 }
 
 #if defined(TARGET_PS3) && defined(__cplusplus)
-// PS3 port: the GameCube writes matrices to the write-gather pipe with paired-single stores; here each
-// element goes through GX_WRITE_F32 (dest is always &GXWGFifo.f32).
+// PS3 port: the GameCube writes matrices to the write-gather pipe with paired-single stores; here the
+// elements are copied into the FIFO as they are in memory (dest is always &GXWGFifo.f32).
 static void WriteMTXPS4x3(const Mtx mtx, volatile Ps3GxPipeF32* dest)
 {
 	(void)dest;
-	for (int r = 0; r < 3; r++) {
-		for (int c = 0; c < 4; c++) {
-			GX_WRITE_F32(mtx[r][c]);
-		}
-	}
+	ps3GxPutWords(&mtx[0][0], 12);
 }
 
 static void WriteMTXPS3x3from3x4(const Mtx mtx, volatile Ps3GxPipeF32* dest)
 {
 	(void)dest;
 	for (int r = 0; r < 3; r++) {
-		for (int c = 0; c < 3; c++) {
-			GX_WRITE_F32(mtx[r][c]);
-		}
+		ps3GxPutWords(&mtx[r][0], 3);
 	}
 }
 
 static void WriteMTXPS3x3(const Mtx33 mtx, volatile Ps3GxPipeF32* dest)
 {
 	(void)dest;
-	for (int r = 0; r < 3; r++) {
-		for (int c = 0; c < 3; c++) {
-			GX_WRITE_F32(mtx[r][c]);
-		}
-	}
+	ps3GxPutWords(&mtx[0][0], 9);
 }
 
 static void WriteMTXPS4x2(const Mtx mtx, volatile Ps3GxPipeF32* dest)
 {
 	(void)dest;
-	for (int r = 0; r < 2; r++) {
-		for (int c = 0; c < 4; c++) {
-			GX_WRITE_F32(mtx[r][c]);
-		}
-	}
+	ps3GxPutWords(&mtx[0][0], 8);
 }
 #else
 /**

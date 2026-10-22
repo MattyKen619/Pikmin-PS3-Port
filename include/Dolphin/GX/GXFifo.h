@@ -51,26 +51,87 @@ typedef void (*GXBreakPtCallback)(void);
 // PS3 port: the GameCube's write-gather pipe is a hardware address; every store to it appends to the
 // graphics FIFO. Here each member of GXWGFifo is an object whose assignment hands the value to the
 // port's FIFO (platform/ps3/gpu/gx_fifo.cpp), in the same big-endian byte order the hardware uses.
+//
+// The writes go straight into the port's ring buffer while there is room up to ps3GxWriteLimit (the
+// common case), and through ps3GxWrite* otherwise. Up to test build 37 every write was a call into
+// gx_fifo.cpp, through a linker stub that switches TOCs, and a float went through memory to become an
+// integer first; a gameplay frame writes some 80000 times. (ps3GxWriteLimit equals ps3GxWritten whenever
+// the ring may not be written directly: before it exists, and while a display list is being made.)
 END_SCOPE_EXTERN_C
 extern "C" {
 void ps3GxWrite8(unsigned int value);
 void ps3GxWrite16(unsigned int value);
 void ps3GxWrite32(unsigned int value);
+void ps3GxWriteBytes(const void* bytes, unsigned int n);
+extern unsigned char* ps3GxRing;
+extern unsigned int ps3GxWritten;    // bytes written to the ring (mod 2^32)
+extern unsigned int ps3GxWriteLimit; // ps3GxWritten may grow to this without the checks in gx_fifo.cpp
 }
+#define PS3_GX_RING_MASK ((1u << 20) - 1) // (gx_fifo.cpp: RING_SIZE)
 // (Not instrumented: a write is too small to be worth a preemption point or a shadow-stack entry.)
 #define PS3_GX_PIPE_WRITE __attribute__((no_instrument_function, always_inline))
-struct Ps3GxPipe8 {
-	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxWrite8(value); }
-};
-struct Ps3GxPipe16 {
-	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxWrite16(value); }
-};
-struct Ps3GxPipe32 {
-	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxWrite32(value); }
-};
-struct Ps3GxPipeF32 {
-	PS3_GX_PIPE_WRITE void operator=(float value) volatile
-	{
+
+PS3_GX_PIPE_WRITE static inline void ps3GxPut8(unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 1, 1)) {
+		ps3GxRing[w & PS3_GX_RING_MASK] = (unsigned char)value;
+		ps3GxWritten = w + 1;
+	} else {
+		ps3GxWrite8(value);
+	}
+}
+
+PS3_GX_PIPE_WRITE static inline void ps3GxPut16(unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 2, 1)) {
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = (unsigned char)(value >> 8);
+		p[1]             = (unsigned char)value;
+		ps3GxWritten     = w + 2;
+	} else {
+		ps3GxWrite16(value);
+	}
+}
+
+PS3_GX_PIPE_WRITE static inline void ps3GxPut32(unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 4, 1)) {
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = (unsigned char)(value >> 24);
+		p[1]             = (unsigned char)(value >> 16);
+		p[2]             = (unsigned char)(value >> 8);
+		p[3]             = (unsigned char)value;
+		ps3GxWritten     = w + 4;
+	} else {
+		ps3GxWrite32(value);
+	}
+}
+
+// A float: stored as it is where the ring position is word-aligned (no trip through memory to an integer
+// register); bytes otherwise (the PPU faults on a floating-point store that is not word-aligned).
+PS3_GX_PIPE_WRITE static inline void ps3GxPutF32(float value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 4, 1)) {
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		if (((unsigned long)p & 3) == 0) {
+			*(float*)p = value;
+		} else {
+			union {
+				float f;
+				unsigned int u;
+			} bits;
+			bits.f = value;
+			p[0]   = (unsigned char)(bits.u >> 24);
+			p[1]   = (unsigned char)(bits.u >> 16);
+			p[2]   = (unsigned char)(bits.u >> 8);
+			p[3]   = (unsigned char)bits.u;
+		}
+		ps3GxWritten = w + 4;
+	} else {
 		union {
 			float f;
 			unsigned int u;
@@ -78,6 +139,45 @@ struct Ps3GxPipeF32 {
 		bits.f = value;
 		ps3GxWrite32(bits.u);
 	}
+}
+
+// Words already in memory (a matrix's floats, say), copied as they are.
+PS3_GX_PIPE_WRITE static inline void ps3GxPutWords(const void* src, unsigned int words)
+{
+	const unsigned int w = ps3GxWritten, n = words * 4;
+	if (__builtin_expect(ps3GxWriteLimit - w >= n, 1)) {
+		unsigned char* p      = ps3GxRing + (w & PS3_GX_RING_MASK);
+		const unsigned int* s = (const unsigned int*)src;
+		if (((unsigned long)p & 3) == 0) {
+			for (unsigned int i = 0; i < words; i++) {
+				((unsigned int*)p)[i] = s[i];
+			}
+		} else {
+			for (unsigned int i = 0; i < words; i++, p += 4) {
+				const unsigned int v = s[i];
+				p[0]                 = (unsigned char)(v >> 24);
+				p[1]                 = (unsigned char)(v >> 16);
+				p[2]                 = (unsigned char)(v >> 8);
+				p[3]                 = (unsigned char)v;
+			}
+		}
+		ps3GxWritten = w + n;
+	} else {
+		ps3GxWriteBytes(src, n);
+	}
+}
+
+struct Ps3GxPipe8 {
+	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxPut8(value); }
+};
+struct Ps3GxPipe16 {
+	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxPut16(value); }
+};
+struct Ps3GxPipe32 {
+	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxPut32(value); }
+};
+struct Ps3GxPipeF32 {
+	PS3_GX_PIPE_WRITE void operator=(float value) volatile { ps3GxPutF32(value); }
 };
 struct PPCWGPipe {
 	Ps3GxPipe8 u8;

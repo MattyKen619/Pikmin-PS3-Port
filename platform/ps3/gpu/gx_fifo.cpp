@@ -462,7 +462,7 @@ static Events sEvents;
 
 // ================================================================== the ring buffer and the graphics thread
 //
-// The game thread appends to the ring (sWritten) and publishes what it wrote (sPublished) every
+// The game thread appends to the ring (ps3GxWritten) and publishes what it wrote (sPublished) every
 // PUBLISH_CHUNK bytes and at GXFlush. The graphics thread interprets published bytes (sConsumed).
 // Counters run freely (mod 2^32); the ring index is counter & RING_MASK.
 
@@ -472,9 +472,14 @@ enum {
 	PUBLISH_CHUNK = 16 * 1024, // also the most the graphics thread interprets in one go
 };
 
-static gpu::u8* sRing;
-static u32 sWritten;               // game thread only
-static u32 sWriteLimit;            // (game thread) sWritten can grow to this without the slow path (writeLimit)
+// (The game's GX writes check ps3GxWriteLimit and write the ring themselves: Dolphin/GX/GXFifo.h.)
+extern "C" {
+gpu::u8* ps3GxRing;
+u32 ps3GxWritten;    // game thread only
+u32 ps3GxWriteLimit; // (game thread) ps3GxWritten can grow to this without the slow path (refreshWriteLimit)
+}
+static_assert(PS3_GX_RING_MASK == RING_MASK, "Dolphin/GX/GXFifo.h has the ring's size");
+static bool sLinked; // (the CPU FIFO goes to the graphics processor, not into a display list)
 static volatile u32 sPublished;    // written by the game thread
 static volatile u32 sConsumed;     // written by the graphics thread
 static volatile int sConsumerWaiting;
@@ -528,7 +533,7 @@ static void drain(u32 end)
 		if (n > PUBLISH_CHUNK) {
 			n = PUBLISH_CHUNK;
 		}
-		interpret(sRing + at, n);
+		interpret(ps3GxRing + at, n);
 		__sync_synchronize(); // done reading those bytes before the game may overwrite them
 		sConsumed = sConsumed + n;
 		__sync_synchronize();
@@ -560,15 +565,15 @@ static void refreshWriteLimit();
 
 static void publish()
 {
-	if (!sRing || sPublished == sWritten) {
+	if (!ps3GxRing || sPublished == ps3GxWritten) {
 		refreshWriteLimit();
 		return;
 	}
 	__sync_synchronize(); // the bytes before the counter
-	sPublished = sWritten;
+	sPublished = ps3GxWritten;
 	refreshWriteLimit();
 	if (!sThreaded) {
-		drain(sWritten);
+		drain(ps3GxWritten);
 		refreshWriteLimit();
 		return;
 	}
@@ -590,7 +595,7 @@ static void makeRoom(u32 n)
 	ps3b_mutex_lock(sMutex);
 	sProducerWaiting = 1;
 	__sync_synchronize();
-	while (sWritten - sConsumed + n > RING_SIZE) {
+	while (ps3GxWritten - sConsumed + n > RING_SIZE) {
 		ps3b_cond_wait(sSpaceCond, 5000);
 	}
 	sProducerWaiting = 0;
@@ -601,7 +606,11 @@ static void makeRoom(u32 n)
 // yet to read, not past the end of the ring, and not as far as the next publishing point.
 static void refreshWriteLimit()
 {
-	const u32 w   = sWritten;
+	const u32 w = ps3GxWritten;
+	if (!sLinked || !ps3GxRing) {
+		ps3GxWriteLimit = w; // (every write goes through ps3GxWrite*)
+		return;
+	}
 	u32 room      = sConsumed + RING_SIZE - w;
 	const u32 end = RING_SIZE - (w & RING_MASK);
 	const u32 out = w - sPublished; // (written, not yet published)
@@ -612,26 +621,26 @@ static void refreshWriteLimit()
 	if (pub < room) {
 		room = pub;
 	}
-	sWriteLimit = w + (room <= RING_SIZE ? room : 0);
+	ps3GxWriteLimit = w + (room <= RING_SIZE ? room : 0);
 }
 
 static void put(const gpu::u8* b, u32 n)
 {
-	if (sWritten - sConsumed + n > RING_SIZE) {
+	if (ps3GxWritten - sConsumed + n > RING_SIZE) {
 		makeRoom(n);
 	}
-	u32 at = sWritten & RING_MASK;
+	u32 at = ps3GxWritten & RING_MASK;
 	if (at + n <= RING_SIZE) {
 		for (u32 i = 0; i < n; i++) {
-			sRing[at + i] = b[i];
+			ps3GxRing[at + i] = b[i];
 		}
 	} else {
 		for (u32 i = 0; i < n; i++) {
-			sRing[(sWritten + i) & RING_MASK] = b[i];
+			ps3GxRing[(ps3GxWritten + i) & RING_MASK] = b[i];
 		}
 	}
-	sWritten += n;
-	if (sWritten - sPublished >= PUBLISH_CHUNK) {
+	ps3GxWritten += n;
+	if (ps3GxWritten - sPublished >= PUBLISH_CHUNK) {
 		publish();
 	}
 	refreshWriteLimit();
@@ -642,24 +651,24 @@ static void put(const gpu::u8* b, u32 n)
 // copied it from there, a byte at a time, with the room and publishing checks on every write.)
 static inline bool putFast(u32 value, u32 n)
 {
-	const u32 w = sWritten;
-	if (sWriteLimit - w < n || !sRing) {
+	const u32 w = ps3GxWritten;
+	if (ps3GxWriteLimit - w < n || !ps3GxRing) {
 		return false;
 	}
-	gpu::u8* p = sRing + (w & RING_MASK);
+	gpu::u8* p = ps3GxRing + (w & RING_MASK);
 	switch (n) {
 	case 4: p[0] = (gpu::u8)(value >> 24), p[1] = (gpu::u8)(value >> 16), p[2] = (gpu::u8)(value >> 8), p[3] = (gpu::u8)value; break;
 	case 2: p[0] = (gpu::u8)(value >> 8), p[1] = (gpu::u8)value; break;
 	default: p[0] = (gpu::u8)value; break;
 	}
-	sWritten = w + n;
+	ps3GxWritten = w + n;
 	return true;
 }
 
 void ps3gx::finish()
 {
 	publish();
-	while (sConsumed != sWritten) {
+	while (sConsumed != ps3GxWritten) {
 		ps3b_sleep_us(100);
 	}
 }
@@ -669,7 +678,6 @@ void ps3gx::forceSynchronous() { sForceSync = true; }
 // ================================================================== the CPU FIFO
 
 static __GXFifoObj* sCpuFifo;
-static bool sLinked;
 static bool sStarted;
 
 static void start()
@@ -684,8 +692,8 @@ static void start()
 		sRenderer      = ps3rsx::start(sCp, sMemory);
 		sRendererIsRsx = sRenderer != NULL;
 	}
-	sRing = (gpu::u8*)ps3b_memalign(128, RING_SIZE);
-	if (!sRing) {
+	ps3GxRing = (gpu::u8*)ps3b_memalign(128, RING_SIZE);
+	if (!ps3GxRing) {
 		ps3Log("[gpu] FAILED: no memory for the graphics command buffer\n");
 		return;
 	}
@@ -712,8 +720,9 @@ extern "C" void ps3GxSetCpuFifo(__GXFifoObj* fifo, int linkedToGp)
 	}
 	publish(); // what was written so far goes to the graphics processor first
 	sCpuFifo             = fifo;
-	sLinked              = linkedToGp != 0 && sRing;
+	sLinked              = linkedToGp != 0 && ps3GxRing;
 	sPiRegs[PI_FIFO_PTR] = 0; // clears the overflow (wrap) bit GXEndDisplayList checks
+	refreshWriteLimit();
 }
 
 extern "C" void ps3GxSaveCpuFifo(__GXFifoObj* fifo)
@@ -780,6 +789,15 @@ extern "C" void ps3GxWrite16(unsigned int value)
 	}
 }
 
+extern "C" void ps3GxWriteBytes(const void* bytes, unsigned int n)
+{
+	if (sLinked) {
+		put((const u8*)bytes, n);
+	} else {
+		store((const u8*)bytes, n);
+	}
+}
+
 extern "C" void ps3GxWrite32(unsigned int value)
 {
 	if (sLinked && putFast(value, 4)) {
@@ -811,7 +829,7 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 	char trace[96];
 	ps3gx::traceStatus(trace, sizeof(trace));
 	char pending[128];
-	u32 queued = sWritten - sConsumed;
+	u32 queued = ps3GxWritten - sConsumed;
 	if (sCp.idle()) {
 		snprintf(pending, sizeof(pending), "processor idle, %u KB queued", (unsigned)(queued >> 10));
 	} else {

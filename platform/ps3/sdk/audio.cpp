@@ -523,9 +523,61 @@ static int commandLength(u32 id)
 	}
 }
 
+// ---- the sub-frames, mixed on a thread of their own
+//
+// On the GameCube the DSP is a processor of its own: after mail 0 (DSPReleaseHalt) the CPU carries on while
+// the DSP mixes the sub-frame, and the DSP's interrupt says when it is done. Up to test build 37 the mixing
+// ran inside DSPSendMailToDSP, on the sound thread while it held the baton: 8-14% of the time in the Forest
+// of Hope, with no game code running meanwhile. Now a PS3 thread of its own mixes (on whichever of the PPU's
+// two hardware threads is free), and raises the interrupt when it is done, as the DSP would. JAudio
+// touches the voice blocks only between sub-frames, or the way it would while the real DSP was mixing.
+// PIKMIN/dsp_sync.txt: mix on the sound thread as before.
+static unsigned int sMixMutex, sMixCond;
+static volatile u32 sMixAsked, sMixDone; // sub-frames asked for, and mixed
+static int sMixThreaded = -1;            // (-1: not decided yet)
+
+static void mixThread(void*)
+{
+	ps3b_mutex_lock(sMixMutex);
+	for (;;) {
+		while (sMixDone == sMixAsked) {
+			ps3b_cond_wait(sMixCond, 100000);
+		}
+		ps3DspRenderSubframe();
+		sMixDone++;
+		ps3b_mutex_unlock(sMixMutex);
+		ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+		ps3b_mutex_lock(sMixMutex);
+	}
+}
+
+static bool mixThreaded()
+{
+	if (sMixThreaded < 0) {
+		sMixThreaded = 0;
+		bool sync    = false;
+		if (ps3b_data_root()) {
+			char path[256];
+			snprintf(path, sizeof(path), "%s/dsp_sync.txt", ps3b_data_root());
+			sync = ps3b_file_exists(path) != 0;
+		}
+		if (!sync && ps3b_mutex_create(&sMixMutex) == 0 && ps3b_cond_create(&sMixCond, sMixMutex) == 0
+		    && ps3b_thread_create(mixThread, NULL, 1300, 0x10000, "pikmin_dsp") == 0) {
+			sMixThreaded = 1;
+		}
+		ps3Log("[ps3] audio: DSP sub-frames are mixed %s\n", sMixThreaded ? "on a thread of their own" : "on the sound thread");
+	}
+	return sMixThreaded > 0;
+}
+
 static void runCommand()
 {
 	u32 id = sCmd[0] >> 24;
+	// (not while a sub-frame is being mixed)
+	const bool threaded = mixThreaded();
+	if (threaded) {
+		ps3b_mutex_lock(sMixMutex);
+	}
 	if (id == 0x81) {
 		ps3DspSetup(sCmd[0] & 0xFFFF, sCmd[1], sCmd[2], sCmd[3], sCmd[4]);
 	}
@@ -533,6 +585,9 @@ static void runCommand()
 		sSubframesLeft = (sCmd[0] >> 16) & 0xFF;
 		sDspFrames++;
 		ps3DspStartFrame(sSubframesLeft, sCmd[0] & 0xFFFF, sCmd[1], sCmd[2]);
+	}
+	if (threaded) {
+		ps3b_mutex_unlock(sMixMutex);
 	}
 	dspReply(0xF3550000 | (id << 8)); // acknowledgement
 }
@@ -590,8 +645,15 @@ void DSPSendMailToDSP(u32 mail)
 			if (sSubframesLeft > 0) {
 				sSubframesLeft--;
 				sDspSyncs++;
-				ps3DspRenderSubframe();
-				ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+				if (mixThreaded()) {
+					ps3b_mutex_lock(sMixMutex);
+					sMixAsked++;
+					ps3b_cond_signal(sMixCond);
+					ps3b_mutex_unlock(sMixMutex);
+				} else {
+					ps3DspRenderSubframe();
+					ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+				}
 			}
 			return;
 		}
