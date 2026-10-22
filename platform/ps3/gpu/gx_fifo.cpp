@@ -521,6 +521,11 @@ static void interpret(const gpu::u8* p, u32 n)
 	sCpTime += ps3b_timebase() - t0;
 }
 
+// The graphics thread also mixes the sound DSP's sub-frames (platform/ps3/sdk/audio.cpp): when it waits for
+// work, and between batches of commands.
+extern "C" int ps3DspMixPending(void);
+extern "C" void ps3DspMixRun(void);
+
 // Interprets the published bytes up to `end` (graphics thread, or the game thread when not threaded).
 static void drain(u32 end)
 {
@@ -542,6 +547,9 @@ static void drain(u32 end)
 			ps3b_cond_signal(sSpaceCond);
 			ps3b_mutex_unlock(sMutex);
 		}
+		if (sThreaded) {
+			ps3DspMixRun(); // (a sub-frame asked for meanwhile)
+		}
 	}
 }
 
@@ -551,14 +559,29 @@ static void graphicsThread(void*)
 		ps3b_mutex_lock(sMutex);
 		sConsumerWaiting = 1;
 		__sync_synchronize();
-		while (sPublished == sConsumed) {
+		while (sPublished == sConsumed && !ps3DspMixPending()) {
 			ps3b_cond_wait(sWorkCond, 5000);
 		}
 		sConsumerWaiting = 0;
 		ps3b_mutex_unlock(sMutex);
 		__sync_synchronize();
+		ps3DspMixRun();
 		drain(sPublished);
 	}
+}
+
+extern "C" int ps3GxThreaded(void) { return sThreaded; }
+
+extern "C" void ps3GxWake(void)
+{
+	if (!sThreaded) {
+		return;
+	}
+	ps3b_mutex_lock(sMutex);
+	if (sConsumerWaiting) {
+		ps3b_cond_signal(sWorkCond);
+	}
+	ps3b_mutex_unlock(sMutex);
 }
 
 static void refreshWriteLimit();

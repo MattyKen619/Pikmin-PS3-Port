@@ -523,59 +523,77 @@ static int commandLength(u32 id)
 	}
 }
 
-// ---- the sub-frames, mixed on a thread of their own
+// ---- the sub-frames, mixed alongside the game
 //
 // On the GameCube the DSP is a processor of its own: after mail 0 (DSPReleaseHalt) the CPU carries on while
 // the DSP mixes the sub-frame, and the DSP's interrupt says when it is done. Up to test build 37 the mixing
 // ran inside DSPSendMailToDSP, on the sound thread while it held the baton: 8-14% of the time in the Forest
-// of Hope, with no game code running meanwhile. Now a PS3 thread of its own mixes (on whichever of the PPU's
-// two hardware threads is free), and raises the interrupt when it is done, as the DSP would. JAudio
-// touches the voice blocks only between sub-frames, or the way it would while the real DSP was mixing.
+// of Hope, with no game code running meanwhile. JAudio touches the voice blocks only between sub-frames, or
+// the way it would while the real DSP was mixing, so the mixing can run elsewhere, as it does on the
+// GameCube; the DSP's interrupt follows when it is done.
+//
+// Test build 38 mixed on a PS3 thread of its own with a higher lv2 priority than the game's threads. lv2
+// ran that thread at once on the hardware thread of the sound thread that woke it, so the sound thread (with
+// the baton) waited out every mix anyway and nothing was gained. Now the graphics thread mixes: it runs on
+// the PPU's other hardware thread, is idle for a good part of each frame, and has the same priority as the
+// game's threads (waking it does not stop the sound thread). It looks for sub-frames to mix whenever it
+// waits for work and between batches of graphics commands (gx_fifo.cpp: ps3DspMixPending, ps3DspMixRun).
 // PIKMIN/dsp_sync.txt: mix on the sound thread as before.
-static unsigned int sMixMutex, sMixCond;
-static volatile u32 sMixAsked, sMixDone; // sub-frames asked for, and mixed
-static int sMixThreaded = -1;            // (-1: not decided yet)
+extern "C" int ps3GxThreaded(void); // gx_fifo.cpp: whether there is a graphics thread
+extern "C" void ps3GxWake(void);     // gx_fifo.cpp: wakes it if it waits for work
 
-static void mixThread(void*)
-{
-	ps3b_mutex_lock(sMixMutex);
-	for (;;) {
-		while (sMixDone == sMixAsked) {
-			ps3b_cond_wait(sMixCond, 100000);
-		}
-		ps3DspRenderSubframe();
-		sMixDone++;
-		ps3b_mutex_unlock(sMixMutex);
-		ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
-		ps3b_mutex_lock(sMixMutex);
-	}
-}
+static unsigned int sMixMutex;            // (held while a sub-frame is mixed, or a command changes the set-up)
+static bool sMixMutexOk;
+static volatile u32 sMixAsked, sMixDone;  // sub-frames asked for, and mixed
+static int sMixAllowed = -1;              // (-1: not decided yet)
+static unsigned long long sMixAskedTb;    // when the last one was asked for
+static unsigned long long sMixWaitTicks, sMixWaitMax; // from asked to started (diagnostics, ps3AudioStatus)
+static u32 sMixWaits;
 
-static bool mixThreaded()
+static bool mixAllowed()
 {
-	if (sMixThreaded < 0) {
-		sMixThreaded = 0;
-		bool sync    = false;
+	if (sMixAllowed < 0) {
+		sMixAllowed = 0;
+		bool sync   = false;
 		if (ps3b_data_root()) {
 			char path[256];
 			snprintf(path, sizeof(path), "%s/dsp_sync.txt", ps3b_data_root());
 			sync = ps3b_file_exists(path) != 0;
 		}
-		if (!sync && ps3b_mutex_create(&sMixMutex) == 0 && ps3b_cond_create(&sMixCond, sMixMutex) == 0
-		    && ps3b_thread_create(mixThread, NULL, 1300, 0x10000, "pikmin_dsp") == 0) {
-			sMixThreaded = 1;
+		if (ps3b_mutex_create(&sMixMutex) == 0) {
+			sMixMutexOk = true;
+			sMixAllowed = sync ? 0 : 1;
 		}
-		ps3Log("[ps3] audio: DSP sub-frames are mixed %s\n", sMixThreaded ? "on a thread of their own" : "on the sound thread");
+		ps3Log("[ps3] audio: DSP sub-frames are mixed %s\n", sMixAllowed > 0 ? "by the graphics thread" : "on the sound thread");
 	}
-	return sMixThreaded > 0;
+	return sMixAllowed > 0;
+}
+
+// (graphics thread)
+extern "C" int ps3DspMixPending(void) { return sMixDone != sMixAsked; }
+
+extern "C" void ps3DspMixRun(void)
+{
+	while (sMixDone != sMixAsked) {
+		ps3b_mutex_lock(sMixMutex);
+		const unsigned long long wait = ps3b_timebase() - sMixAskedTb;
+		sMixWaitTicks += wait;
+		sMixWaitMax = wait > sMixWaitMax ? wait : sMixWaitMax;
+		sMixWaits++;
+		ps3DspRenderSubframe();
+		sMixDone = sMixDone + 1;
+		ps3b_mutex_unlock(sMixMutex);
+		ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+	}
 }
 
 static void runCommand()
 {
 	u32 id = sCmd[0] >> 24;
 	// (not while a sub-frame is being mixed)
-	const bool threaded = mixThreaded();
-	if (threaded) {
+	mixAllowed();
+	const bool locked = sMixMutexOk;
+	if (locked) {
 		ps3b_mutex_lock(sMixMutex);
 	}
 	if (id == 0x81) {
@@ -586,7 +604,7 @@ static void runCommand()
 		sDspFrames++;
 		ps3DspStartFrame(sSubframesLeft, sCmd[0] & 0xFFFF, sCmd[1], sCmd[2]);
 	}
-	if (threaded) {
+	if (locked) {
 		ps3b_mutex_unlock(sMixMutex);
 	}
 	dspReply(0xF3550000 | (id << 8)); // acknowledgement
@@ -645,13 +663,20 @@ void DSPSendMailToDSP(u32 mail)
 			if (sSubframesLeft > 0) {
 				sSubframesLeft--;
 				sDspSyncs++;
-				if (mixThreaded()) {
+				if (mixAllowed() && ps3GxThreaded()) {
 					ps3b_mutex_lock(sMixMutex);
-					sMixAsked++;
-					ps3b_cond_signal(sMixCond);
+					sMixAskedTb = ps3b_timebase();
+					sMixAsked   = sMixAsked + 1;
 					ps3b_mutex_unlock(sMixMutex);
+					ps3GxWake();
 				} else {
+					if (sMixMutexOk) {
+						ps3b_mutex_lock(sMixMutex);
+					}
 					ps3DspRenderSubframe();
+					if (sMixMutexOk) {
+						ps3b_mutex_unlock(sMixMutex);
+					}
 					ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
 				}
 			}
@@ -673,6 +698,17 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 {
 	char voices[256];
 	ps3DspStatus(voices, sizeof(voices));
+	char mixWait[96] = "";
+	if (sMixWaits) {
+		// how long sub-frames waited for the graphics thread to start on them (since the last report)
+		const unsigned long long freq = ps3b_timebase_freq();
+		const u32 n = sMixWaits;
+		snprintf(mixWait, sizeof(mixWait), ", mixed by the graphics thread after %u us on average (longest %u us)",
+		         n && freq ? (unsigned)(sMixWaitTicks * 1000000ULL / freq / n) : 0u, freq ? (unsigned)(sMixWaitMax * 1000000ULL / freq) : 0u);
+		sMixWaitTicks = 0;
+		sMixWaitMax   = 0;
+		sMixWaits     = 0;
+	}
 
 	// The music/movie stream (jaudio/syncstream.c): what a cutscene waits for.
 	static const char* const kStates[] = { "starting", "playing", "ready", "stopping", "idle", "buffering", "paused" };
@@ -697,6 +733,6 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 	} else {
 		snprintf(output, sizeof(output), "sound out: off, %u repeats", (unsigned)sRepeats);
 	}
-	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s, %u overload checks; %s; %s", (unsigned)sAiBlocks,
-	         (unsigned)sDspFrames, (unsigned)sDspSyncs, voices, (unsigned)sDspOverloads, stream, output);
+	snprintf(buf, size, "audio: %u AI blocks, %u DSP frames, %u DSP syncs, %s%s, %u overload checks; %s; %s", (unsigned)sAiBlocks,
+	         (unsigned)sDspFrames, (unsigned)sDspSyncs, voices, mixWait, (unsigned)sDspOverloads, stream, output);
 }

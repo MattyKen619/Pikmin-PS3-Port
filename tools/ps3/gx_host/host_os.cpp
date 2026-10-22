@@ -271,6 +271,10 @@ int ps3b_file_pwrite(int fd, const void* buf, unsigned long long offset, unsigne
 }
 void ps3b_file_close(int fd) { close(fd); }
 
+// (the sound DSP's sub-frames: none on the host)
+int ps3DspMixPending(void) { return 0; }
+void ps3DspMixRun(void) { }
+
 } // extern "C"
 
 extern "C" unsigned long long ps3b_timebase(void)
