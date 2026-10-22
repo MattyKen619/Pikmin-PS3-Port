@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 36
+TEST_BUILD := 37
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -81,8 +81,15 @@ BB_SKIP          := src/sysDolphin/dgxGraphics.cpp src/sysDolphin/sysNew.cpp \
                       bankdrv.c seqsetup.c ja_calc.c oneshot.c jamosc.c)
 bb_hooks          = $(if $(filter-out $(BB_SKIP),$(filter $(addsuffix /%,$(BB_DIRS)),$(1))),$(BB_HOOKS))
 PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(GAME_DEFS) $(GAME_INC)
-GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(INSTRUMENT)
-GAME_CFLAGS      := $(COMMON) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
+# -mstrict-align (game code, Nintendo's libraries): the PPU stops a thread whose floating-point load or store
+# is not word-aligned (lv2 does not emulate it). Short of registers, GCC may hold an 8-byte integer in a
+# floating-point register and store it with stfd to wherever the integer was going; test build 36 died that
+# way copying a string into a member at an odd halfword (zen::ogScrMessageMgr, on the way to the map
+# screen). With strict alignment GCC makes no access wider than the alignment it knows. (The port's own
+# graphics code is left as it was: GCC 7 crashes compiling gpu_xf.cpp with it.)
+STRICT_ALIGN     := -mstrict-align
+GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(STRICT_ALIGN) $(INSTRUMENT)
+GAME_CFLAGS      := $(COMMON) $(STRICT_ALIGN) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
 BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUILD) $(LIBPSL1GHT_INC)
 
 # The graphics code (command processor, transform, renderer): square roots as one instruction (no errno).
@@ -131,7 +138,7 @@ $(call objs_of,$(JAUDIO_C)): $(OBJDIR)/%.o: %
 $(call objs_of,$(GXSDK_C)): $(OBJDIR)/%.o: %
 	@mkdir -p $(dir $@)
 	@echo $<
-	@$(CXX) $(PLATFORM_CXXFLAGS) -g1 -fpermissive -x c++ -c $< -o $@
+	@$(CXX) $(PLATFORM_CXXFLAGS) $(STRICT_ALIGN) -g1 -fpermissive -x c++ -c $< -o $@
 
 # C libraries (mtx, hvqm4dec, MSL float constants)
 $(call objs_of,$(LIBS_C)): $(OBJDIR)/%.o: %
