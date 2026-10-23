@@ -539,6 +539,11 @@ static int commandLength(u32 id)
 // game's threads (waking it does not stop the sound thread). It looks for sub-frames to mix whenever it
 // waits for work and between batches of graphics commands (gx_fifo.cpp: ps3DspMixPending, ps3DspMixRun).
 // PIKMIN/dsp_sync.txt: mix on the sound thread as before.
+//
+// Test build 39: the graphics thread started on a sub-frame 0.7 ms after it was asked for on average, but
+// some waited 130-420 ms: the graphics thread's own long jobs (the minute's check frame, a recorded frame's
+// picture written to the USB drive) held them up, and the sound stuttered. A rescue thread now looks every
+// millisecond and mixes a sub-frame that has waited more than 2 ms itself.
 extern "C" int ps3GxThreaded(void); // gx_fifo.cpp: whether there is a graphics thread
 extern "C" void ps3GxWake(void);     // gx_fifo.cpp: wakes it if it waits for work
 
@@ -548,7 +553,9 @@ static volatile u32 sMixAsked, sMixDone;  // sub-frames asked for, and mixed
 static int sMixAllowed = -1;              // (-1: not decided yet)
 static unsigned long long sMixAskedTb;    // when the last one was asked for
 static unsigned long long sMixWaitTicks, sMixWaitMax; // from asked to started (diagnostics, ps3AudioStatus)
-static u32 sMixWaits;
+static u32 sMixWaits, sMixRescued;
+
+static void mixRescueThread(void*);
 
 static bool mixAllowed()
 {
@@ -563,6 +570,9 @@ static bool mixAllowed()
 		if (ps3b_mutex_create(&sMixMutex) == 0) {
 			sMixMutexOk = true;
 			sMixAllowed = sync ? 0 : 1;
+			if (sMixAllowed && ps3b_thread_create(mixRescueThread, NULL, 1000, 0x10000, "pikmin_dsp_rescue") != 0) {
+				sMixAllowed = 0; // (without it, a sub-frame could wait too long)
+			}
 		}
 		ps3Log("[ps3] audio: DSP sub-frames are mixed %s\n", sMixAllowed > 0 ? "by the graphics thread" : "on the sound thread");
 	}
@@ -572,10 +582,16 @@ static bool mixAllowed()
 // (graphics thread)
 extern "C" int ps3DspMixPending(void) { return sMixDone != sMixAsked; }
 
-extern "C" void ps3DspMixRun(void)
+// Mixes the sub-frames asked for (graphics thread, rescue thread). Returns how many.
+static u32 mixAsked()
 {
-	while (sMixDone != sMixAsked) {
+	u32 mixed = 0;
+	for (;;) {
 		ps3b_mutex_lock(sMixMutex);
+		if (sMixDone == sMixAsked) {
+			ps3b_mutex_unlock(sMixMutex); // (the other mixing thread got to it first)
+			return mixed;
+		}
 		const unsigned long long wait = ps3b_timebase() - sMixAskedTb;
 		sMixWaitTicks += wait;
 		sMixWaitMax = wait > sMixWaitMax ? wait : sMixWaitMax;
@@ -584,6 +600,25 @@ extern "C" void ps3DspMixRun(void)
 		sMixDone = sMixDone + 1;
 		ps3b_mutex_unlock(sMixMutex);
 		ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+		mixed++;
+	}
+}
+
+extern "C" void ps3DspMixRun(void)
+{
+	if (sMixDone != sMixAsked) {
+		mixAsked();
+	}
+}
+
+static void mixRescueThread(void*)
+{
+	const unsigned long long late = ps3b_timebase_freq() * 2 / 1000;
+	for (;;) {
+		ps3b_sleep_us(1000);
+		if (sMixDone != sMixAsked && ps3b_timebase() - sMixAskedTb > late) {
+			sMixRescued += mixAsked();
+		}
 	}
 }
 
@@ -698,16 +733,18 @@ extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 {
 	char voices[256];
 	ps3DspStatus(voices, sizeof(voices));
-	char mixWait[96] = "";
+	char mixWait[128] = "";
 	if (sMixWaits) {
 		// how long sub-frames waited for the graphics thread to start on them (since the last report)
 		const unsigned long long freq = ps3b_timebase_freq();
 		const u32 n = sMixWaits;
-		snprintf(mixWait, sizeof(mixWait), ", mixed by the graphics thread after %u us on average (longest %u us)",
-		         n && freq ? (unsigned)(sMixWaitTicks * 1000000ULL / freq / n) : 0u, freq ? (unsigned)(sMixWaitMax * 1000000ULL / freq) : 0u);
+		snprintf(mixWait, sizeof(mixWait), ", mixed by the graphics thread after %u us on average (longest %u us; %u by the rescue thread)",
+		         n && freq ? (unsigned)(sMixWaitTicks * 1000000ULL / freq / n) : 0u, freq ? (unsigned)(sMixWaitMax * 1000000ULL / freq) : 0u,
+		         (unsigned)sMixRescued);
 		sMixWaitTicks = 0;
 		sMixWaitMax   = 0;
 		sMixWaits     = 0;
+		sMixRescued   = 0;
 	}
 
 	// The music/movie stream (jaudio/syncstream.c): what a cutscene waits for.

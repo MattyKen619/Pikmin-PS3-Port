@@ -80,6 +80,8 @@ public:
 	bool gpuTransform() const { return mGpuXf; }
 	// The vertex cache (on by default with the transform on the RSX, if the device draws 32-bit indices).
 	void setVertexCache(bool on);
+	// One frame in `frames` is an audit frame (0: none).
+	void setAuditFrames(u32 frames) { mAuditEvery = frames; }
 	bool vertexCache() const { return mCacheOn; }
 	// Starts the vertex cache over at the end of the frame (from any thread).
 	void requestCacheReset() { mResetRequest = 1; }
@@ -364,6 +366,7 @@ private:
 	// audit frames (every AUDIT_FRAMES): everything the checks would skip is checked anyway, and what changed
 	// without being noticed is logged (and corrected)
 	bool mAudit;
+	u32 mAuditEvery;      // (0: no audit frames)
 	struct Audit {
 		u32 draws, drawsWrong, textures, texturesChanged, regions, regionsChanged;
 	} mAuditCounts;

@@ -253,6 +253,7 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mWhyDetail(0)
     , mNewVariant(false)
     , mAudit(false)
+    , mAuditEvery(AUDIT_FRAMES)
     , mChainLength(0)
     , mArena(NULL)
     , mArenaSize(0)
@@ -2232,7 +2233,7 @@ void Renderer::endFrame()
 		    mFrame - 1, a.draws, a.drawsWrong, a.textures, a.regions, a.texturesChanged, a.regionsChanged);
 		memset(&mAuditCounts, 0, sizeof(mAuditCounts));
 	}
-	mAudit = mFrame % AUDIT_FRAMES == 0;
+	mAudit = mAuditEvery && mFrame % mAuditEvery == 0;
 	if (mResetRequest) {
 		mResetRequest = 0;
 		if (mTableUsed) {

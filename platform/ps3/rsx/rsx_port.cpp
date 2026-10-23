@@ -9,6 +9,7 @@
 #include "../backend/ps3_backend.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static gfx::RsxDevice* sDev;
@@ -77,10 +78,53 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 		if (sTestButtons) {
 			ps3b_log_write("[rsx] PIKMIN/test_buttons.txt exists: R3, L3 and Select are test buttons\n");
 		}
+		// Audit frames (the vertex cache and the change checks compared with a fresh look, once a minute)
+		// found nothing wrong since test build 30, and each one held the graphics thread up for about 100 ms:
+		// a hitch, and (test build 39) sound waiting to be mixed. Only with PIKMIN/audit.txt now.
+		snprintf(path, sizeof(path), "%s/audit.txt", ps3b_data_root());
+		const bool audit = ps3b_file_exists(path) != 0;
+		sRenderer->setAuditFrames(audit ? 1800 : 0);
+		if (audit) {
+			ps3b_log_write("[rsx] PIKMIN/audit.txt exists: one frame a minute is an audit frame\n");
+		}
 	}
 	sRenderer->begin();
 	return sRenderer;
 }
+
+// The picture is written to the USB drive by a thread of its own: up to test build 39 the graphics thread
+// wrote it, 300-600 ms during which it drew nothing (a hitch) and mixed no sound (a stutter).
+namespace {
+
+struct CaptureFile {
+	char path[256];
+	char name[64];
+	unsigned char* data;
+	unsigned int size, w, h;
+	unsigned long long readMs;
+};
+
+void captureWriter(void* arg)
+{
+	CaptureFile* c         = (CaptureFile*)arg;
+	unsigned long long t0  = ps3b_timebase();
+	int fd                 = ps3b_file_open_rw(c->path, 1);
+	int wrote              = -1;
+	if (fd >= 0) {
+		wrote = ps3b_file_pwrite(fd, c->data, 0, c->size);
+		ps3b_file_close(fd);
+	}
+	unsigned long long ms = (ps3b_timebase() - t0) * 1000ULL / ps3b_timebase_freq();
+	char line[220];
+	snprintf(line, sizeof(line), "[rsx] frame drawn by the RSX written to PIKMIN/%s.ppm (%ux%u, %s; read back in %llu ms, written in %llu ms)\n",
+	         c->name, c->w, c->h, wrote == (int)c->size ? "ok" : "write FAILED", c->readMs, ms);
+	ps3b_log_write(line);
+	free(c->data);
+	free(c);
+	ps3b_thread_exit();
+}
+
+} // namespace
 
 void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 {
@@ -96,30 +140,35 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 		ps3b_log_write("[rsx] could not read the frame back from the RSX\n");
 		return;
 	}
+	CaptureFile* c = (CaptureFile*)malloc(sizeof(CaptureFile));
 	char header[64];
-	int hl = snprintf(header, sizeof(header), "P6\n%u %u\n255\n", w, h);
-	gfx::Vec<unsigned char> file(hl + w * h * 3);
-	memcpy(&file[0], header, hl);
-	for (gfx::u32 i = 0; i < w * h; i++) {
-		gfx::u32 c          = px[i];
-		file[hl + i * 3]     = (unsigned char)(c >> 16);
-		file[hl + i * 3 + 1] = (unsigned char)(c >> 8);
-		file[hl + i * 3 + 2] = (unsigned char)c;
-	}
-	char path[256];
-	snprintf(path, sizeof(path), "%s/%s.ppm", ps3b_data_root(), name);
-	int fd = ps3b_file_open_rw(path, 1);
-	if (fd < 0) {
-		ps3b_log_write("[rsx] could not create the frame capture file\n");
+	int hl         = snprintf(header, sizeof(header), "P6\n%u %u\n255\n", w, h);
+	unsigned char* file = (unsigned char*)malloc(hl + w * h * 3);
+	if (!c || !file) {
+		free(c);
+		free(file);
+		ps3b_log_write("[rsx] no memory to write the frame capture\n");
 		return;
 	}
-	int wrote = ps3b_file_pwrite(fd, &file[0], 0, (unsigned int)file.size());
-	ps3b_file_close(fd);
-	unsigned long long ms = (ps3b_timebase() - t0) * 1000ULL / ps3b_timebase_freq();
-	char line[200];
-	snprintf(line, sizeof(line), "[rsx] frame drawn by the RSX written to PIKMIN/%s.ppm (%ux%u, %s, %llu ms)\n", name, w, h,
-	         wrote == (int)file.size() ? "ok" : "write FAILED", ms);
-	ps3b_log_write(line);
+	memcpy(file, header, hl);
+	for (gfx::u32 i = 0; i < w * h; i++) {
+		gfx::u32 v          = px[i];
+		file[hl + i * 3]     = (unsigned char)(v >> 16);
+		file[hl + i * 3 + 1] = (unsigned char)(v >> 8);
+		file[hl + i * 3 + 2] = (unsigned char)v;
+	}
+	snprintf(c->path, sizeof(c->path), "%s/%s.ppm", ps3b_data_root(), name);
+	snprintf(c->name, sizeof(c->name), "%s", name);
+	c->data   = file;
+	c->size   = (unsigned int)(hl + w * h * 3);
+	c->w      = w;
+	c->h      = h;
+	c->readMs = (ps3b_timebase() - t0) * 1000ULL / ps3b_timebase_freq();
+	if (ps3b_thread_create(captureWriter, c, 1450, 0x8000, "pikmin_capture_ppm") != 0) {
+		ps3b_log_write("[rsx] could not start the thread that writes the frame capture\n");
+		free(file);
+		free(c);
+	}
 }
 
 extern "C" void ps3GxRecordRequested(void); // (gx_trace.cpp)
