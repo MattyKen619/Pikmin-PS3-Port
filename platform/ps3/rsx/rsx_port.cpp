@@ -211,6 +211,7 @@ void ps3rsx::status(char* buf, unsigned int size)
 	}
 	static gfx::RendererStats last;
 	static gfx::u32 lastFrames;
+	static gfx::u32 sLastVpLoads, sLastVpStarts;
 	const gfx::RendererStats& s = sRenderer->stats();
 	gfx::u32 frames             = sRenderer->framesPresented();
 	gfx::u32 n                  = frames - lastFrames ? frames - lastFrames : 1;
@@ -226,9 +227,12 @@ void ps3rsx::status(char* buf, unsigned int size)
 	if (at > 0 && at < (int)size) {
 		at += snprintf(buf + at, size - at,
 		               "; transform: per frame %llu draws on the RSX, %llu on the CPU, %llu matrix rows and %llu set-ups loaded; %llu vertex "
-		               "programs (%llu failed)",
+		               "programs (%llu failed), per frame %u loaded into the RSX and %u switched to there",
 		               (s.gpuDraws - last.gpuDraws) / n, (s.cpuDraws - last.cpuDraws) / n, (s.matrixRows - last.matrixRows) / n,
-		               (s.setupUploads - last.setupUploads) / n, s.xfPrograms, s.xfProgramErrors);
+		               (s.setupUploads - last.setupUploads) / n, s.xfPrograms, s.xfProgramErrors, (sDev->vertexProgramLoads() - sLastVpLoads) / n,
+		               (sDev->vertexProgramStarts() - sLastVpStarts) / n);
+		sLastVpLoads  = sDev->vertexProgramLoads();
+		sLastVpStarts = sDev->vertexProgramStarts();
 	}
 	if (at > 0 && at < (int)size) {
 		if (sRenderer->vertexCache()) {

@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 41
+TEST_BUILD := 42
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -105,6 +105,7 @@ GFX_PROFILED     := $(addprefix platform/ps3/gpu/,gpu_cp.cpp gpu_xf.cpp gpu_tex.
                     $(addprefix platform/ps3/rsx/,renderer.cpp device_rsx.cpp tev_program.cpp xf_program.cpp vp_builder.cpp)
 GFX_HOOK_EXCLUDE := be16,be32,bits,readComp,readColor,component,element,asFloat,selectF,clamp01,clampi,maxf,sqrtF,alignUp,cover
 GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),sameBytes,tableSlot,offsetOf,rgb565,rgb5a3,ia8,c3to8,c4to8,c5to8,c6to8,forEachPart,operator,checkStop,rotl
+GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),bindAttr,xfWritten,cacheFollow,cacheVariant,setDeviceCull,reserve,checked,missingTexture
 GFX_PROFILE      := -finstrument-functions -finstrument-functions-exclude-file-list=.h \
                     -finstrument-functions-exclude-function-list=$(GFX_HOOK_EXCLUDE) -include platform/ps3/include/ps3/gfx_hooks.h -g1
 $(call objs_of,$(GFX_PROFILED)): PLATFORM_CXXFLAGS += $(GFX_PROFILE)

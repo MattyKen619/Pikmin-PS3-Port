@@ -75,6 +75,12 @@ RsxDevice::RsxDevice()
     , mLocalUsed(0)
     , mVertexProgram(NULL)
     , mVertexProgramValid(false)
+    , mFormatValid(false)
+    , mFormatOffset(0)
+    , mResidentCount(0)
+    , mResidentHead(0)
+    , mResidentLoads(0)
+    , mResidentStarts(0)
     , mFrontFaceSign(0)
     , mVertexProgramsWork(false)
     , mVertexIndexType(0)
@@ -488,6 +494,7 @@ void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 	// (the scratch ring reuses memory: what the chip's vertex cache holds from earlier batches is stale.
 	// PSL1GHT's draw calls do not invalidate it.)
 	rsxInvalidateVertexCache(ctx);
+	mFormatValid = false;
 	bindAttr(GCM_VERTEX_ATTRIB_POS, o, stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
 	bindAttr(GCM_VERTEX_ATTRIB_COLOR0, o + 16, stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
 	bindAttr(GCM_VERTEX_ATTRIB_COLOR1, o + 32, stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
@@ -499,6 +506,40 @@ void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 		bindAttr(GCM_VERTEX_ATTRIB_TEX0 + t, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
 	}
 	mBoundTexCoords = texCoords;
+}
+
+// RSX methods (rsx/nv40.h names them NV40TCL_VP_START_FROM_ID, _VP_ATTRIB_EN, _VP_RESULT_EN,
+// _TRANSFORM_TIMEOUT)
+enum { M_VP_START = 0x1ea0, M_VP_ATTRIB_EN = 0x1ff0, M_VP_RESULT_EN = 0x1ff4, M_TRANSFORM_TIMEOUT = 0x1ef8 };
+
+// (PSL1GHT's own: makes room in the command buffer, calling the context's callback)
+extern "C" s32 rsxContextCallback(gcmContextData* context, u32 count);
+
+// Room for n more command words. False: none (the command buffer is stopped).
+bool RsxDevice::reserve(u32 n)
+{
+	gcmContextData* ctx = CTX;
+	if (ctx->current + n > ctx->end) {
+		return rsxContextCallback(ctx, n) == 0;
+	}
+	return true;
+}
+
+// Vertex programs stay in the RSX's program memory (512 instructions) once loaded: switching to one that is
+// there only sets where the RSX starts and its inputs and outputs (a few command words). Programs are put
+// one after another, around the memory as a ring; a program overwritten by another is loaded again when
+// next used. (Test builds up to 41 loaded each one at instruction 0 whenever it changed: about 290 times a
+// frame in a busy gameplay frame, 75 instructions each, some 350 KB of commands a frame for the RSX.)
+void RsxDevice::forgetResidentPrograms(u32 start, u32 end)
+{
+	for (u32 i = 0; i < mResidentCount;) {
+		ResidentProgram& r = mResident[i];
+		if (r.start < end && start < r.start + r.size) {
+			r = mResident[--mResidentCount];
+		} else {
+			i++;
+		}
+	}
 }
 
 void RsxDevice::setVertexProgram(const VertexProgram* program)
@@ -514,16 +555,54 @@ void RsxDevice::setVertexProgram(const VertexProgram* program)
 		u32 vpSize;
 		rsxVertexProgramGetUCode(vp, &vpUcode, &vpSize);
 		rsxLoadVertexProgram(ctx, vp, vpUcode);
+		forgetResidentPrograms(vp->insn_start, vp->insn_start + vp->num_insn);
 	} else {
-		// (the program header PSL1GHT's loader reads: where, how much, which inputs and outputs)
-		rsxVertexProgram h;
-		memset(&h, 0, sizeof(h));
-		h.num_regs    = (u16)program->numRegs;
-		h.num_insn    = (u16)program->instructions;
-		h.input_mask  = program->inputMask;
-		h.output_mask = program->outputMask;
-		h.insn_start  = 0;
-		rsxLoadVertexProgramBlock(ctx, &h, &program->ucode[0]);
+		ResidentProgram* r = NULL;
+		for (u32 i = 0; i < mResidentCount; i++) {
+			if (mResident[i].program == program) {
+				r = &mResident[i];
+				break;
+			}
+		}
+		if (r && reserve(8)) {
+			// (as PSL1GHT's loader ends: the start, the inputs and outputs, the temporaries' timeout)
+			u32* c = ctx->current;
+			c[0]   = (1u << 18) | M_VP_START;
+			c[1]   = r->start;
+			c[2]   = (1u << 18) | M_VP_ATTRIB_EN;
+			c[3]   = program->inputMask;
+			c[4]   = (1u << 18) | M_VP_RESULT_EN;
+			c[5]   = program->outputMask | GCM_ATTRIB_OUTPUT_MASK_POINTSIZE;
+			c[6]   = (1u << 18) | M_TRANSFORM_TIMEOUT;
+			c[7]   = program->numRegs <= 32 ? 0x0020FFFF : 0x0030FFFF;
+			ctx->current += 8;
+			mResidentStarts++;
+		} else {
+			// (loaded where the ring is, or at 0 when it does not fit before the end)
+			const u32 size = program->instructions;
+			u32 start      = mResidentHead;
+			if (start + size > VP_SLOTS) {
+				start = 0;
+			}
+			forgetResidentPrograms(start, start + size);
+			// (the program header PSL1GHT's loader reads: where, how much, which inputs and outputs)
+			rsxVertexProgram h;
+			memset(&h, 0, sizeof(h));
+			h.num_regs    = (u16)program->numRegs;
+			h.num_insn    = (u16)size;
+			h.input_mask  = program->inputMask;
+			h.output_mask = program->outputMask;
+			h.insn_start  = (u16)start;
+			rsxLoadVertexProgramBlock(ctx, &h, &program->ucode[0]);
+			mResidentLoads++;
+			if (size <= VP_SLOTS && mResidentCount < MAX_RESIDENT) {
+				ResidentProgram& n = mResident[mResidentCount++];
+				n.program          = program;
+				n.start            = (u16)start;
+				n.size             = (u16)size;
+				mResidentHead      = start + size;
+			}
+		}
 	}
 	mVertexProgram      = program;
 	mVertexProgramValid = true;
@@ -544,6 +623,25 @@ void RsxDevice::setVertexFormat(const void* base, const VertexFormat& f)
 	gcmContextData* ctx = CTX;
 	const u32 o         = offsetOf(base);
 	rsxInvalidateVertexCache(ctx);
+	// (the same place and format as the last time, the usual case for draws from the vertex cache: bound)
+	static_assert(sizeof(VertexFormat) % 4 == 0, "VertexFormat compared as words");
+	const u32* fw = (const u32*)&f;
+	u32* mw       = (u32*)&mFormat;
+	if (mFormatValid && o == mFormatOffset) {
+		u32 d = 0;
+		for (u32 k = 0; k < sizeof(VertexFormat) / 4; k++) {
+			d |= fw[k] ^ mw[k];
+		}
+		if (!d) {
+			mBoundTexCoords = 8;
+			return;
+		}
+	}
+	mFormatValid  = true;
+	mFormatOffset = o;
+	for (u32 k = 0; k < sizeof(VertexFormat) / 4; k++) {
+		mw[k] = fw[k];
+	}
 	for (u32 i = 0; i < 16; i++) {
 		const VertexAttrib& a = f.attr[i];
 		if (a.components) {

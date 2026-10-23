@@ -1108,34 +1108,48 @@ void Renderer::xfWritten(u32 address, u32 count)
 // The pending batch's draws read the copy when the batch is drawn, so before a row they read is loaded
 // again, the batch is drawn.
 
+// (Test build 41's profile: a tenth of the graphics thread's time was here, comparing and copying the
+// 83 rows with the C library's byte-at-a-time memcmp and memcpy. Rows are compared and copied as 64-bit
+// words now.)
 void Renderer::uploadSetup()
 {
 	if (!mSetupDirty && mSetupValid) {
 		return;
 	}
-	float setup[XC_SETUP_COUNT][4];
+	mSetupDirty = false;
+	float setup[XC_SETUP_COUNT][4] __attribute__((aligned(16)));
 	xfSetupConstants(mXf, setup);
-	if (!mSetupValid || memcmp(setup, mSetup, sizeof(setup)) != 0) {
-		flushBatch();
-		gpu::PhaseScope rsx(gpu::GFX_RSX);
-		// (only the rows that changed, in runs)
-		for (u32 r = 0; r < XC_SETUP_COUNT;) {
-			if (mSetupValid && memcmp(setup[r], mSetup[r], sizeof(setup[r])) == 0) {
-				r++;
-				continue;
-			}
-			u32 e = r + 1;
-			while (e < XC_SETUP_COUNT && (!mSetupValid || memcmp(setup[e], mSetup[e], sizeof(setup[e])) != 0)) {
-				e++;
-			}
-			mDev.setVertexConstants(r, e - r, &setup[r][0]);
-			r = e;
+	typedef u64 __attribute__((may_alias)) Word;
+	const Word* a = (const Word*)&setup[0][0];
+	Word* b       = (Word*)&mSetup[0][0];
+	const bool valid = mSetupValid;
+	bool flushed     = false;
+	for (u32 r = 0; r < XC_SETUP_COUNT;) {
+		if (valid && a[2 * r] == b[2 * r] && a[2 * r + 1] == b[2 * r + 1]) {
+			r++;
+			continue;
 		}
-		memcpy(mSetup, setup, sizeof(setup));
-		mSetupValid = true;
+		u32 e = r + 1;
+		while (e < XC_SETUP_COUNT && !(valid && a[2 * e] == b[2 * e] && a[2 * e + 1] == b[2 * e + 1])) {
+			e++;
+		}
+		if (!flushed) {
+			flushBatch(); // (its draws read the old values)
+			flushed = true;
+		}
+		{
+			gpu::PhaseScope rsx(gpu::GFX_RSX);
+			mDev.setVertexConstants(r, e - r, &setup[r][0]);
+		}
+		for (u32 k = 2 * r; k < 2 * e; k++) {
+			b[k] = a[k];
+		}
+		r = e;
+	}
+	if (flushed) {
 		mStats.setupUploads++;
 	}
-	mSetupDirty = false;
+	mSetupValid = true;
 }
 
 namespace {
@@ -1387,44 +1401,6 @@ void Renderer::cacheReset()
 
 namespace {
 
-// Whether n bytes at a and b are the same, for a and b equally far into an 8-byte word: compared a word at a
-// time, the bytes before and after the range masked off (they are in the same words: readable). (The
-// library's memcmp compares unaligned bytes one at a time.)
-typedef u64 __attribute__((may_alias)) AliasU64;
-inline bool sameBytes(const u8* a, const u8* b, u32 n)
-{
-	if (!n) {
-		return true;
-	}
-	const u32 head     = (u32)((uintptr_t)a & 7);
-	const AliasU64* wa = (const AliasU64*)(a - head);
-	const AliasU64* wb = (const AliasU64*)(b - head);
-	const u32 total    = n + head;
-	const u32 words    = (total + 7) >> 3;
-	const u32 tail     = total & 7;
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-	const u64 first = ~0ULL >> (head * 8);
-	const u64 last  = tail ? ~(~0ULL >> (tail * 8)) : ~0ULL;
-#else
-	const u64 first = ~0ULL << (head * 8);
-	const u64 last  = tail ? ~(~0ULL << (tail * 8)) : ~0ULL;
-#endif
-	if (words == 1) {
-		return ((wa[0] ^ wb[0]) & first & last) == 0;
-	}
-	u64 d = (wa[0] ^ wb[0]) & first;
-	for (u32 i = 1; i + 1 < words; i++) {
-		if ((i & 15) == 0) {
-			// (both read ahead: long runs are not in the cache)
-			__builtin_prefetch(wa + i + 64);
-			__builtin_prefetch(wb + i + 64);
-		}
-		d |= wa[i] ^ wb[i];
-	}
-	d |= (wa[words - 1] ^ wb[words - 1]) & last;
-	return d == 0;
-}
-
 inline u32 tableSlot(const u8* data, u32 slots)
 {
 	const u64 a = (u64)(uintptr_t)data;
@@ -1544,7 +1520,7 @@ bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
 	if (!cacheVariant(e, call)) {
 		return false;
 	}
-	if (!sameBytes(call.data, e->bytes(), e->span())) {
+	if (gpu::hashMemory(call.data, e->span()) != e->bytesHash) {
 		mWhy = WHY_BYTES;
 		return false;
 	}
@@ -1711,8 +1687,7 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	const u32 dataBytes        = gpu::drawBytes(call, L.size);
 	const u32 vertexBytes      = call.count * stride;
 	const u32 arrayCap         = L.indexedCount;
-	const u32 bytesOff         = (u32)((uintptr_t)call.data & 7);
-	const u32 entryBytes       = sizeof(CacheEntry) + ((bytesOff + dataBytes + 15) & ~15u) + arrayCap * sizeof(CacheArray);
+	const u32 entryBytes       = sizeof(CacheEntry) + arrayCap * sizeof(CacheArray);
 	if (!stride || vertexBytes > mArenaSize / 4 || indexCount > mIdxSize / 4 || entryBytes > POOL_CHUNK / 4 || L.size > 255
 	    || arrayCap > CACHE_ARRAYS || (e && arrayCap > e->arrayCap)) {
 		mStats.cacheUncached++;
@@ -1743,7 +1718,6 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 		e->size     = (u8)L.size;
 		e->parts    = call.parts;
 		e->arrayCap = (u8)arrayCap;
-		e->bytesOff = (u8)bytesOff;
 		if (mNewVariant) {
 			mStats.cacheVariants++;
 		}
@@ -1761,7 +1735,7 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	}
 	const gpu::VertexArray* arrays = c.arrays ? c.arrays : mCp.resolveArrays(c);
 	c.arrays                       = arrays;
-	memcpy(e->bytes(), call.data, dataBytes);
+	e->bytesHash = gpu::hashMemory(call.data, dataBytes);
 	const u32* cp = mCp.state().cp;
 	e->cp[0] = cp[0x50], e->cp[1] = cp[0x60], e->cp[2] = cp[0x70 + call.vat], e->cp[3] = cp[0x80 + call.vat];
 	e->cp[4] = cp[0x90 + call.vat], e->cp[5] = cp[0x30], e->cp[6] = cp[0x40];

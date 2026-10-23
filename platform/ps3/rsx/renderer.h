@@ -185,8 +185,10 @@ private:
 	// firstVertex), its triangles (32-bit indices into the cache memory, at indexAt in the index memory:
 	// the entries filled one after another have their triangles one after another, and draws in that order
 	// are drawn as one), and what it was unpacked from. In the entries' memory: this (one 128-byte cache
-	// line, what every draw from it reads), then a copy of the display list's vertex bytes, then the vertex
-	// arrays it reads (arrayCap of them).
+	// line, what every draw from it reads), then the vertex arrays it reads (arrayCap of them). (Up to test
+	// build 41 a copy of the display list's bytes came between, compared with the list at every draw: the
+	// PPU read a megabyte a frame of copies that were never in its cache. Now a hash of them is kept, and
+	// the list's bytes, just read by the command processor, are hashed again.)
 	struct CacheEntry {
 		const u8* data;       // the draw's vertices in the display list
 		XfProgramEntry* xp;
@@ -202,11 +204,10 @@ private:
 		u8 size, prim, arrays, arrayCap, refills, lines; // lines: 128-byte lines from the entry to its end
 		bool cached;          // (false: changes too often, drawn from the ring)
 		u8 followLines;       // (follow's lines: read ahead)
-		u8 bytesOff;          // (the copy is as far into an 8-byte word as the display list's bytes: compared by words)
 		u16 parts;            // draw commands (a draw run: gpu::Listener::drawRuns)
+		u64 bytesHash;        // gpu::hashMemory of its bytes in the display list
 		u32 span() const { return count * size + 3u * (parts - 1u); } // (its bytes in the display list)
-		u8* bytes() { return (u8*)this + sizeof(CacheEntry) + bytesOff; }
-		CacheArray* arr() { return (CacheArray*)((u8*)this + sizeof(CacheEntry) + ((bytesOff + span() + 15) & ~15u)); }
+		CacheArray* arr() { return (CacheArray*)((u8*)this + sizeof(CacheEntry)); }
 		Rows rows() const { Rows r = { rowsLo, rowsHi }; return r; }
 		Rows nrows() const { Rows r = { nrowsLo, nrowsHi }; return r; }
 	};

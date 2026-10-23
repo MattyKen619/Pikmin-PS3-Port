@@ -62,6 +62,8 @@ public:
 	u32 displayHeight() const { return mDispHeight; }
 	u32 flips() const { return mFlips; }
 	u32 localMemoryUsed() const { return mLocalUsed; }
+	u32 vertexProgramLoads() const { return mResidentLoads; }
+	u32 vertexProgramStarts() const { return mResidentStarts; }
 
 private:
 	void surface(u32 colorOffset, u32 colorPitch, u32 width, u32 height, u32 depthOffset, u32 depthPitch, bool argb);
@@ -97,12 +99,25 @@ private:
 		u8 stride, components, type, location;
 	} mAttr[16]; // (vertex attributes as bound)
 	void bindAttr(u32 i, u32 offset, u32 stride, u32 components, u32 type, u32 location);
+	bool mFormatValid; // (setVertexFormat's last place and format are bound)
+	u32 mFormatOffset;
+	VertexFormat mFormat;
 	bool mInvalidateTextures;
 	bool mProgramCacheDrop; // (setProgramCacheDrop)
 	u32 mReadLabelValue;
 	u32 mLocalUsed;
 	const VertexProgram* mVertexProgram; // bound (NULL: the pass-through program)
 	bool mVertexProgramValid;
+	// vertex programs in the RSX's program memory (setVertexProgram)
+	enum { VP_SLOTS = 512, MAX_RESIDENT = 64 };
+	struct ResidentProgram {
+		const VertexProgram* program;
+		u16 start, size;
+	} mResident[MAX_RESIDENT];
+	u32 mResidentCount, mResidentHead;
+	u32 mResidentLoads, mResidentStarts; // (programs loaded, switches to one already there)
+	bool reserve(u32 n);
+	void forgetResidentPrograms(u32 start, u32 end);
 	int mFrontFaceSign;       // (self-test)
 	bool mVertexProgramsWork; // (self-test)
 	u32 mVertexIndexType;     // (self-test)

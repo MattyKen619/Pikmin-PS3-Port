@@ -269,6 +269,8 @@ extern "C" u8* ps3AramRange(u32 address, u32 size)
 }
 void ARQInit(void) { }
 
+extern "C" void ps3DspNoteAramWrite(u32 dest, u32 length); // (dsp_hle.cpp)
+
 // Transfers complete immediately and call back before returning: the game busy-waits for some of
 // these callbacks (System::copyWaitUntilDone), which would never end if they were deferred.
 void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 source, u32 dest, u32 length, ARQCallback callback)
@@ -286,6 +288,7 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
 		if (!sAram || (u64)dest + length > ARAM_SIZE) {
 			ps3Log("[ps3] FAILED: ARAM write out of range (0x%x + 0x%x)\n", (unsigned)dest, (unsigned)length);
 		} else {
+			ps3DspNoteAramWrite(dest, length);
 			memcpy(sAram + dest, (void*)(uptr)source, length);
 		}
 	} else {

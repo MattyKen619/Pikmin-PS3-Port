@@ -150,6 +150,8 @@ struct State {
 	u32 playing;   // voices processed in the last sub-frame
 	u32 finished;  // voices that reached "done"
 	u32 badVoices; // voices stopped because their data was out of range
+	u32 aramOverwrites; // ARAM writes over the sound data of a voice that was playing (ps3DspNoteAramWrite)
+	u32 loggedAramOverwrites;
 	u32 loggedStarts;
 	u32 loggedStops;
 	// per voice, for the start/stop lines of the first sounds of a session
@@ -967,6 +969,43 @@ extern "C" void ps3DspRenderSubframe(void)
 	S.mixTicks += ps3b_timebase() - t0;
 }
 
+// A write to ARAM [dest, dest + length) (ARQPostRequest, which copies at once): logged when a voice that is
+// playing reads its sound data there. (Test build 41: the music sounded wrong for a few seconds while the
+// third level loaded. A suspicion: the level's sound bank is written over the data of music still fading
+// out, which the GameCube's slower disc would have let finish first.)
+extern "C" void ps3DspNoteAramWrite(u32 dest, u32 length)
+{
+	if (!S.configured || !length || !S.voices) {
+		return;
+	}
+	for (u32 i = 0; i < S.voiceCount; i++) {
+		const DSPchannel_* v = &S.voices[i];
+		if (!v->enabled || v->done) {
+			continue;
+		}
+		u32 bytes;
+		switch (v->samplesSourceType) {
+		case SRC_AFC_LQ_ARAM:
+		case SRC_AFC_HQ_ARAM: bytes = ((v->loopStartPosition + 15) >> 4) * v->samplesSourceType; break;
+		case SRC_PCM8_ARAM: bytes = v->loopStartPosition; break;
+		case SRC_PCM16_ARAM: bytes = v->loopStartPosition * 2; break;
+		default: continue;
+		}
+		const u32 lo = v->baseAddress, hi = v->baseAddress + bytes;
+		if (lo < dest + length && dest < hi) {
+			S.aramOverwrites++;
+			if (S.loggedAramOverwrites < 16) {
+				S.loggedAramOverwrites++;
+				ps3Log("[sound] ARAM 0x%06x-0x%06x written while voice %u plays from 0x%06x-0x%06x (source %u, %s, volume %d/%d, "
+				       "pitch 0x%04x)\n",
+				       (unsigned)dest, (unsigned)(dest + length), (unsigned)i, (unsigned)lo, (unsigned)hi, (unsigned)v->samplesSourceType,
+				       v->isLooping ? "looping" : "not looping", (int)(s16)v->mixChannels[0].currentVolume,
+				       (int)(s16)v->mixChannels[1].currentVolume, (unsigned)v->resamplingRatio);
+			}
+		}
+	}
+}
+
 extern "C" void ps3DspStatus(char* buf, unsigned int size)
 {
 	// the mixing time since the last report: per sub-frame, and as a share of the time; per voice, in parts
@@ -988,9 +1027,9 @@ extern "C" void ps3DspStatus(char* buf, unsigned int size)
 	const u32 voicesX10 = subframes ? voices * 10 / subframes : 0;
 	const unsigned long long d = voices && freq ? (unsigned long long)voices * freq / 10000000ULL : 0; // (ticks per 0.1 us, all voices)
 	snprintf(buf, size,
-	         "%u voices playing, %u sounds finished%s, mixing %u us per sub-frame (%u.%u%% of the time; %u.%u voices, each: samples %u.%u us, "
-	         "filters %u.%u, mixing %u.%u)",
-	         (unsigned)S.playing, (unsigned)S.finished, S.badVoices ? " (some with bad data)" : "", (unsigned)usPer,
+	         "%u voices playing, %u sounds finished%s, %u ARAM writes under playing voices, mixing %u us per sub-frame (%u.%u%% of the "
+	         "time; %u.%u voices, each: samples %u.%u us, filters %u.%u, mixing %u.%u)",
+	         (unsigned)S.playing, (unsigned)S.finished, S.badVoices ? " (some with bad data)" : "", (unsigned)S.aramOverwrites, (unsigned)usPer,
 	         (unsigned)(permille / 10), (unsigned)(permille % 10), (unsigned)(voicesX10 / 10), (unsigned)(voicesX10 % 10),
 	         (unsigned)(d ? source / d / 10 : 0), (unsigned)(d ? source / d % 10 : 0), (unsigned)(d ? filter / d / 10 : 0),
 	         (unsigned)(d ? filter / d % 10 : 0), (unsigned)(d ? mix / d / 10 : 0), (unsigned)(d ? mix / d % 10 : 0));
