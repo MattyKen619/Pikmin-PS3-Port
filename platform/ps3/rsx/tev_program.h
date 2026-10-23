@@ -34,13 +34,18 @@ struct TevKey {
 		}
 		return true;
 	}
+	// (adds and rotations in two lanes, a multiply only at the end: the PPU multiplies slowly, and a chain of
+	// 51 waited for each other)
 	u32 hash() const
 	{
-		u32 h = 2166136261u;
-		for (int i = 0; i < WORDS; i++) {
-			h = (h ^ w[i]) * 16777619u;
+		u32 a = 0x9E3779B9u, b = 0x85EBCA6Bu;
+		for (int i = 0; i + 1 < WORDS; i += 2) {
+			a = ((a + w[i]) << 7 | (a + w[i]) >> 25) ^ w[i];
+			b = ((b + w[i + 1]) << 11 | (b + w[i + 1]) >> 21) ^ w[i + 1];
 		}
-		return h;
+		a += w[WORDS - 1];
+		const u32 h = (a ^ (b << 13 | b >> 19)) * 0x2C1B3C6Du;
+		return h ^ (h >> 15);
 	}
 };
 

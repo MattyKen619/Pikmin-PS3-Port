@@ -47,6 +47,8 @@ CommandProcessor::CommandProcessor()
     : mMemory(NULL)
     , mListener(NULL)
     , mRegs(NULL)
+    , mBpUse(NULL)
+    , mBpDirty(0)
     , mBpMask(0xFFFFFF)
     , mDisplayListDepth(0)
     , mRuns(false)
@@ -200,7 +202,7 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 	// those jumps.) Counters are kept in locals and added at the end: a counter in memory, stored and loaded
 	// straight back by the next command, stalls the PPU's pipeline every time (a load-hit-store).
 	u32 pos      = 0;
-	u32 commands = 0, bpLoads = 0, xfLoads = 0, cpLoads = 0, indexedLoads = 0;
+	u32 commands = 0, bpLoads = 0, xfLoads = 0, cpLoads = 0, indexedLoads = 0, bpChanged = 0, xfChanged = 0, cpChanged = 0;
 	while (pos < size) {
 		const u8* p     = data + pos;
 		const u32 avail = size - pos;
@@ -231,7 +233,7 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 				mCmdEnd   = base + pos + len;
 			}
 			bpLoads++;
-			loadBp(be32(p + 1));
+			bpChanged += loadBp(be32(p + 1));
 			break;
 		case OP_LOAD_XF:
 			if (avail < 5) {
@@ -246,7 +248,7 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 				mCmdEnd   = base + pos + len;
 			}
 			xfLoads++;
-			loadXf(be16(p + 3), ((p[2] & 0xF) + 1), p + 5);
+			xfChanged += loadXf(be16(p + 3), ((p[2] & 0xF) + 1), p + 5);
 			break;
 		case OP_LOAD_CP:
 			if (avail < 6) {
@@ -258,7 +260,7 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 				mCmdEnd   = base + pos + len;
 			}
 			cpLoads++;
-			loadCp(p[1], be32(p + 2));
+			cpChanged += loadCp(p[1], be32(p + 2));
 			break;
 		case OP_LOAD_INDX_A:
 		case OP_LOAD_INDX_B:
@@ -273,7 +275,7 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 				mCmdEnd   = base + pos + len;
 			}
 			indexedLoads++;
-			loadIndexed(op, be32(p + 1));
+			xfChanged += loadIndexed(op, be32(p + 1));
 			break;
 		case OP_CALL_DL:
 			if (avail < 9) {
@@ -326,6 +328,9 @@ u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base
 	mStats.xfLoads += xfLoads;
 	mStats.cpLoads += cpLoads;
 	mStats.indexedLoads += indexedLoads;
+	mStats.bpUnchanged += bpLoads - bpChanged;
+	mStats.xfUnchanged += xfLoads + indexedLoads - xfChanged;
+	mStats.cpUnchanged += cpLoads - cpChanged;
 	return pos;
 
 incomplete:
@@ -334,6 +339,9 @@ incomplete:
 	mStats.xfLoads += xfLoads;
 	mStats.cpLoads += cpLoads;
 	mStats.indexedLoads += indexedLoads;
+	mStats.bpUnchanged += bpLoads - bpChanged;
+	mStats.xfUnchanged += xfLoads + indexedLoads - xfChanged;
+	mStats.cpUnchanged += cpLoads - cpChanged;
 	if (inDisplayList) {
 		mStats.badCommands++;
 		if (mListener) {
@@ -350,12 +358,11 @@ incomplete:
 // state work for each. BP registers whose writes act (draw done, tokens, copies, TLUT loads, texture cache
 // invalidation, the mask) are passed on every time.
 
-void CommandProcessor::loadCp(u32 reg, u32 value)
+u32 CommandProcessor::loadCp(u32 reg, u32 value)
 {
 	reg &= 0xFF;
 	if (mState.cp[reg] == value) {
-		mStats.cpUnchanged++;
-		return;
+		return 0;
 	}
 	mState.cp[reg] = value;
 	if (reg == 0x50 || reg == 0x60) {
@@ -363,9 +370,10 @@ void CommandProcessor::loadCp(u32 reg, u32 value)
 	} else if (reg >= 0x70 && reg < 0xA0 && (reg & 0xF) < 8) {
 		mLayoutValid &= (u8)~(1u << (reg & 7)); // VAT A/B/C of one format
 	}
+	return 1;
 }
 
-void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
+u32 CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
 {
 	u32 changed = 0;
 	for (u32 i = 0; i < count; i++) {
@@ -379,8 +387,7 @@ void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
 		}
 	}
 	if (!changed) {
-		mStats.xfUnchanged++;
-		return;
+		return 0;
 	}
 	if (address + count > 0x600) {
 		mStats.xfSetupLoads++; // (lights or registers: not just matrices)
@@ -388,9 +395,10 @@ void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
 	if (mRegs) {
 		mRegs->xfWritten(address, count);
 	}
+	return 1;
 }
 
-void CommandProcessor::loadIndexed(u32 op, u32 word)
+u32 CommandProcessor::loadIndexed(u32 op, u32 word)
 {
 	u32 array  = ARRAY_INDX_A + ((op - OP_LOAD_INDX_A) >> 3);
 	u32 index  = word >> 16;
@@ -404,7 +412,7 @@ void CommandProcessor::loadIndexed(u32 op, u32 word)
 		if (mListener) {
 			mListener->memoryFailed(base + index * stride, count * 4, MEM_ARRAY);
 		}
-		return;
+		return 1;
 	}
 	u32 changed = 0;
 	for (u32 i = 0; i < count; i++) {
@@ -416,8 +424,7 @@ void CommandProcessor::loadIndexed(u32 op, u32 word)
 		}
 	}
 	if (!changed) {
-		mStats.xfUnchanged++;
-		return;
+		return 0;
 	}
 	if (xfAddr + count > 0x600) {
 		mStats.xfSetupLoads++;
@@ -425,15 +432,16 @@ void CommandProcessor::loadIndexed(u32 op, u32 word)
 	if (mRegs) {
 		mRegs->xfWritten(xfAddr, count);
 	}
+	return 1;
 }
 
-void CommandProcessor::loadBp(u32 word)
+u32 CommandProcessor::loadBp(u32 word)
 {
 	const u32 reg = word >> 24;
 	u32 value     = word & 0xFFFFFF;
 	if (reg == 0xFE) {
 		mBpMask = value; // applies to the next BP write only
-		return;
+		return 1;
 	}
 	const u32 old = mState.bp[reg];
 	if (mBpMask != 0xFFFFFF) {
@@ -441,8 +449,7 @@ void CommandProcessor::loadBp(u32 word)
 		mBpMask = 0xFFFFFF; // (stored only when it was used: stored every time, the next load of it would stall)
 	}
 	if (value == old && !sBpActs[reg]) {
-		mStats.bpUnchanged++;
-		return;
+		return 0;
 	}
 	mState.bp[reg] = value;
 
@@ -499,9 +506,16 @@ void CommandProcessor::loadBp(u32 word)
 	default:
 		break;
 	}
-	if (mRegs) {
+	if (mBpUse) {
+		const u32 use = mBpUse[reg];
+		mBpDirty |= use & 0x7F;
+		if (use & Listener::BP_CALL) {
+			mRegs->bpWritten(reg, value);
+		}
+	} else if (mRegs) {
 		mRegs->bpWritten(reg, value);
 	}
+	return 1;
 }
 
 void CommandProcessor::callDisplayList(u32 address, u32 size)

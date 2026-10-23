@@ -269,7 +269,44 @@ extern "C" u8* ps3AramRange(u32 address, u32 size)
 }
 void ARQInit(void) { }
 
-extern "C" void ps3DspNoteAramWrite(u32 dest, u32 length); // (dsp_hle.cpp)
+extern "C" void ps3DspNoteAramWrite(u32 dest, u32 length, int stop); // (dsp_hle.cpp)
+extern "C" int ps3DspVoicesReadingAram(u32 dest, u32 length);
+extern "C" int ps3CanYield(void); // (os_sched.cpp)
+
+// JAudio's sound bank loader (DVDT_LoadtoARAM: the disc to ARAM, 64 KB at a time) names itself this way.
+enum { JAUDIO_LOADER = 0x12345678, BANK_WAIT_RETRACES = 60 };
+static u32 sBankWaits, sBankWaitedRetraces;
+
+// Before the loader writes over the sound data of voices that are still playing (music fading out when a
+// level or menu loads): it waits for them, as the GameCube's slower disc did, up to about a second.
+// (dsp_hle.cpp: ps3DspNoteAramWrite.)
+static void waitForVoices(u32 dest, u32 length)
+{
+	// (after a wait that ran out, the rest of that load does not wait again: a few seconds at most in all)
+	static u32 sGaveUpAt;
+	static bool sGaveUp;
+	if (!ps3CanYield() || !ps3DspVoicesReadingAram(dest, length) || (sGaveUp && sRetraceCount - sGaveUpAt < 2 * BANK_WAIT_RETRACES)) {
+		return;
+	}
+	const u32 start = sRetraceCount;
+	while (ps3DspVoicesReadingAram(dest, length) && sRetraceCount - start < BANK_WAIT_RETRACES) {
+		const u32 at = sRetraceCount;
+		while (sRetraceCount == at) {
+			ps3WaitOn(&sRetraceKey, "sound bank load (voices still playing its ARAM)");
+		}
+	}
+	if (ps3DspVoicesReadingAram(dest, length)) {
+		sGaveUp   = true;
+		sGaveUpAt = sRetraceCount;
+	}
+	sBankWaits++;
+	sBankWaitedRetraces += sRetraceCount - start;
+	if (sBankWaits <= 8) {
+		ps3Log("[sound] a sound bank load waited %u ms for voices playing from ARAM 0x%06x-0x%06x%s\n",
+		       (unsigned)((sRetraceCount - start) * 1001 / 60), (unsigned)dest, (unsigned)(dest + length),
+		       ps3DspVoicesReadingAram(dest, length) ? " (some still playing: stopped)" : "");
+	}
+}
 
 // Transfers complete immediately and call back before returning: the game busy-waits for some of
 // these callbacks (System::copyWaitUntilDone), which would never end if they were deferred.
@@ -288,7 +325,10 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
 		if (!sAram || (u64)dest + length > ARAM_SIZE) {
 			ps3Log("[ps3] FAILED: ARAM write out of range (0x%x + 0x%x)\n", (unsigned)dest, (unsigned)length);
 		} else {
-			ps3DspNoteAramWrite(dest, length);
+			if (owner == JAUDIO_LOADER) {
+				waitForVoices(dest, length);
+			}
+			ps3DspNoteAramWrite(dest, length, owner == JAUDIO_LOADER);
 			memcpy(sAram + dest, (void*)(uptr)source, length);
 		}
 	} else {

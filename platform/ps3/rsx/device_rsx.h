@@ -99,6 +99,10 @@ private:
 		u8 stride, components, type, location;
 	} mAttr[16]; // (vertex attributes as bound)
 	void bindAttr(u32 i, u32 offset, u32 stride, u32 components, u32 type, u32 location);
+	const u8* mHostBase; // main memory the RSX reads (ioOffset)
+	u32 mHostSize, mHostOffset;
+	bool mHostLinear;
+	u32 ioOffset(const void* p) const;
 	bool mFormatValid; // (setVertexFormat's last place and format are bound)
 	u32 mFormatOffset;
 	VertexFormat mFormat;

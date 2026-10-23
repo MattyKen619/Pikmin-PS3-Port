@@ -83,8 +83,18 @@ struct XfInfo {
 // False: not supported (transform on the CPU).
 bool makeXfKey(const gpu::XfSetup& setup, const gpu::VertexLayout& layout, u32 texCoords, u32 indexType, XfKey& key);
 bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, const char** error);
-// Constants c[0 .. XC_SETUP_COUNT - 1] for a set-up.
-void xfSetupConstants(const gpu::XfSetup& setup, float out[XC_SETUP_COUNT][4]);
+// Groups of the set-up constants, by what they come from: the projection (and the fixed rows), the channels'
+// colors, the lights, the post-transform texture matrices.
+enum { SG_PROJ = 1, SG_CHAN = 2, SG_LIGHTS = 4, SG_POST = 8, SG_ALL = 15 };
+// The groups that XF memory or registers [address, end) feed.
+u32 xfSetupGroups(u32 address, u32 end);
+// The rows of the set-up constants that a set-up's programs read, in the groups in `groups` (the lights in
+// use, the post-transform matrices of the texture coordinates that have one): [first, last) pairs, in order,
+// in ranges (room for 20). Returns how many.
+u32 xfSetupRows(const gpu::XfSetup& setup, u32 groups, u32 ranges[][2]);
+// Constants c[0 .. XC_SETUP_COUNT - 1] for a set-up: the rows xfSetupRows gives for `groups` (the others are
+// left as they are in out).
+void xfSetupConstants(const gpu::XfSetup& setup, float out[XC_SETUP_COUNT][4], u32 groups = SG_ALL);
 
 } // namespace gfx
 

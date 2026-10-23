@@ -321,6 +321,12 @@ public:
 	virtual void token(u16 value, bool interrupt) { (void)value; (void)interrupt; } // BP 0x47/0x48
 	// A BP register was loaded with a new value (or one whose write acts: draw done, a copy, ...).
 	virtual void bpWritten(u32 reg, u32 value) { (void)reg; (void)value; }
+	// The BP registers bpWritten is wanted for (bit BP_CALL), and for each register bits the processor ORs into
+	// its bpDirty() instead when one is loaded with a new value (the low 7 bits): a table of 256 bytes, or NULL
+	// for bpWritten at every load. Asked when the listener is set. (A call per register load was a good part of
+	// the graphics thread's time in test build 42.)
+	enum { BP_CALL = 0x80 };
+	virtual const u8* bpUse() { return NULL; }
 	// XF memory or registers [address, address + count) were loaded, changing at least one (after the values
 	// are in State::xf)
 	virtual void xfWritten(u32 address, u32 count) { (void)address; (void)count; }
@@ -363,10 +369,21 @@ public:
 	void setListener(Listener* listener)
 	{
 		mListener = listener;
-		mRegs     = listener;
+		setRegisterListener(listener);
 	}
 	// Where register loads go (Listener::bpWritten, xfWritten), if not to the listener (after setListener).
-	void setRegisterListener(Listener* listener) { mRegs = listener; }
+	void setRegisterListener(Listener* listener)
+	{
+		mRegs  = listener;
+		mBpUse = listener ? listener->bpUse() : NULL;
+	}
+	// What the BP registers loaded with new values since the last call affect (Listener::bpUse).
+	u32 takeBpDirty()
+	{
+		const u32 d = mBpDirty;
+		mBpDirty    = 0;
+		return d;
+	}
 
 	// The FIFO: bytes in the order the CPU wrote them (values are written big-endian).
 	void write8(u32 value);
@@ -438,10 +455,11 @@ private:
 	u32 run(const u8* data, u32 size, bool inDisplayList, u64 base);
 	void drawCommand(const u8* data, bool inDisplayList);
 	u32 drawRun(const u8* p, u32 avail);
-	void loadCp(u32 reg, u32 value);
-	void loadXf(u32 address, u32 count, const u8* values);
-	void loadIndexed(u32 op, u32 word);
-	void loadBp(u32 word);
+	// (the loads return 0 when they changed nothing)
+	u32 loadCp(u32 reg, u32 value);
+	u32 loadXf(u32 address, u32 count, const u8* values);
+	u32 loadIndexed(u32 op, u32 word);
+	u32 loadBp(u32 word);
 	void callDisplayList(u32 address, u32 size);
 	void decodeVertices(const VertexLayout& layout, const u8* data, u32 count, bool decode);
 	void hold(const u8* bytes, u32 n);
@@ -449,6 +467,8 @@ private:
 	Memory* mMemory;
 	Listener* mListener;
 	Listener* mRegs; // (register loads)
+	const u8* mBpUse;
+	u32 mBpDirty;
 	State mState;
 	Stats mStats;
 	u32 mBpMask;

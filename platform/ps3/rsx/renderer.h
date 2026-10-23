@@ -102,6 +102,7 @@ public:
 	void requestSwitch(int which) { __sync_fetch_and_or(&mSwitchRequest, which); }
 	void copy(const gpu::CopyInfo& info) override;
 	void bpWritten(u32 reg, u32 value) override;
+	const u8* bpUse() override;
 
 	const RendererStats& stats() const { return mStats; }
 
@@ -205,7 +206,10 @@ private:
 		bool cached;          // (false: changes too often, drawn from the ring)
 		u8 followLines;       // (follow's lines: read ahead)
 		u16 parts;            // draw commands (a draw run: gpu::Listener::drawRuns)
-		u64 bytesHash;        // gpu::hashMemory of its bytes in the display list
+		u32 bytesHash;        // gpu::hashMemory of its bytes in the display list (low 32 bits)
+		u16 bytesFrame;       // (low 16 bits of) the frame they were last hashed
+		u8 bytesInterval;     // frames between hashes (cacheValid)
+		u8 pad;
 		u32 span() const { return count * size + 3u * (parts - 1u); } // (its bytes in the display list)
 		CacheArray* arr() { return (CacheArray*)((u8*)this + sizeof(CacheEntry)); }
 		Rows rows() const { Rows r = { rowsLo, rowsHi }; return r; }
@@ -316,6 +320,8 @@ private:
 	bool mStateValid;
 	u32 mCull;
 	Map<u32, Vec<ProgramEntry*> > mPrograms;
+	enum { RECENT_PROGRAMS = 256 };
+	ProgramEntry* mRecentPrograms[RECENT_PROGRAMS]; // (by key hash: updateState)
 	ProgramEntry* mProgram;
 	float mParams[NUM_TEV_PARAMS][4];
 	bool mProgramBound;
@@ -346,7 +352,8 @@ private:
 	XfProgramEntry* mBoundXp;             // the vertex program of the last batch drawn (NULL: pass-through)
 	bool mBoundXpValid;
 	float mSetup[XC_SETUP_COUNT][4]; // set-up constants on the device
-	bool mSetupValid, mSetupDirty;
+	bool mSetupValid;
+	u32 mSetupDirty; // SG_*: groups of the set-up constants that XF loads changed
 	// XF matrix memory in the constants (xf_program.h): the XF load each row was copied from
 	u32 mXfWrites;      // XF loads so far
 	Rows mStale, mNStale; // rows of the copy that XF loads have changed since they were copied

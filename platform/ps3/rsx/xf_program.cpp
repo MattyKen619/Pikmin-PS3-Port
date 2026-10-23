@@ -452,12 +452,125 @@ bool buildXfProgram(const XfKey& key, VertexProgram& program, XfInfo& info, cons
 	return b.finish(program, error);
 }
 
-void xfSetupConstants(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
+static void xfSetupProj(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4]);
+static void xfSetupChan(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4]);
+static void xfSetupLights(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4]);
+static void xfSetupPost(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4]);
+
+u32 xfSetupGroups(u32 address, u32 end)
 {
-	memset(out, 0, sizeof(float) * 4 * XC_SETUP_COUNT);
-	out[XC_MISC0][0] = 0, out[XC_MISC0][1] = 1, out[XC_MISC0][2] = 0.5f, out[XC_MISC0][3] = 2;
-	out[XC_MISC1][0] = 1e-30f, out[XC_MISC1][1] = 0, out[XC_MISC1][2] = 0, out[XC_MISC1][3] = 1;
-	out[XC_MISC2][0] = 255.0f, out[XC_MISC2][1] = 0.5f;
+	u32 g = 0;
+	if (address < 0x600 && 0x500 < end) {
+		g |= SG_POST; // post-transform matrices
+	}
+	if (address < 0x680 && 0x600 < end) {
+		g |= SG_LIGHTS;
+	}
+	if (address < 0x1012 && 0x1009 < end) {
+		g |= SG_CHAN | SG_LIGHTS; // channel count, colors, controls (which lights)
+	}
+	if (address < 0x1013 && 0x1012 < end) {
+		g |= SG_POST; // dual texture transform
+	}
+	if (address < 0x1027 && 0x1020 < end) {
+		g |= SG_PROJ;
+	}
+	if ((address < 0x1048 && 0x103F < end) || (address < 0x1058 && 0x1050 < end)) {
+		g |= SG_POST; // texture coordinate generation
+	}
+	return g;
+}
+
+// The lights a set-up's programs read.
+static u32 setupLights(const gpu::XfSetup& s)
+{
+	u32 lights = 0;
+	for (int c = 0; c < 2; c++) {
+		for (int part = 0; part < 2; part++) {
+			if (s.part[c][part].lighting && (u32)c < s.numChans) {
+				lights |= s.part[c][part].lightMask;
+			}
+		}
+	}
+	return lights;
+}
+
+// The texture coordinates whose post-transform matrix a set-up's programs read.
+static u32 setupPosts(const gpu::XfSetup& s)
+{
+	u32 posts = 0;
+	for (u32 t = 0; t < 8 && t < s.numTexGens; t++) {
+		if (s.texgen[t].post && s.texgen[t].type == 0) {
+			posts |= 1u << t;
+		}
+	}
+	return posts;
+}
+
+u32 xfSetupRows(const gpu::XfSetup& s, u32 groups, u32 ranges[][2])
+{
+	u32 n = 0;
+	if (groups & SG_PROJ) {
+		ranges[n][0] = XC_MISC0, ranges[n][1] = XC_PROJ + 4, n++;
+	}
+	if (groups & SG_CHAN) {
+		ranges[n][0] = XC_CHAN, ranges[n][1] = XC_CHAN + 4, n++;
+	}
+	if (groups & SG_LIGHTS) {
+		const u32 lights = setupLights(s);
+		for (u32 l = 0; l < 8; l++) {
+			if (lights & (1u << l)) {
+				const u32 first = XC_LIGHTS + l * XC_LIGHT_ROWS;
+				if (n && ranges[n - 1][1] == first) {
+					ranges[n - 1][1] = first + XC_LIGHT_ROWS;
+				} else {
+					ranges[n][0] = first, ranges[n][1] = first + XC_LIGHT_ROWS, n++;
+				}
+			}
+		}
+	}
+	if (groups & SG_POST) {
+		const u32 posts = setupPosts(s);
+		for (u32 t = 0; t < 8; t++) {
+			if (posts & (1u << t)) {
+				const u32 first = XC_POST + t * 3;
+				if (n && ranges[n - 1][1] == first) {
+					ranges[n - 1][1] = first + 3;
+				} else {
+					ranges[n][0] = first, ranges[n][1] = first + 3, n++;
+				}
+			}
+		}
+	}
+	if (groups & SG_PROJ) {
+		ranges[n][0] = XC_MISC2, ranges[n][1] = XC_MISC2 + 1, n++;
+	}
+	return n;
+}
+
+void xfSetupConstants(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4], u32 groups)
+{
+	if (groups & SG_PROJ) {
+		memset(out[XC_MISC0], 0, sizeof(float) * 4 * (XC_PROJ + 4 - XC_MISC0));
+		memset(out[XC_MISC2], 0, sizeof(float) * 4);
+		out[XC_MISC0][0] = 0, out[XC_MISC0][1] = 1, out[XC_MISC0][2] = 0.5f, out[XC_MISC0][3] = 2;
+		out[XC_MISC1][0] = 1e-30f, out[XC_MISC1][1] = 0, out[XC_MISC1][2] = 0, out[XC_MISC1][3] = 1;
+		out[XC_MISC2][0] = 255.0f, out[XC_MISC2][1] = 0.5f;
+		xfSetupProj(s, out);
+	}
+	if (groups & SG_CHAN) {
+		xfSetupChan(s, out);
+	}
+	if (groups & SG_LIGHTS) {
+		xfSetupLights(s, out);
+	}
+	if (groups & SG_POST) {
+		xfSetupPost(s, out);
+	}
+}
+
+static void xfSetupProj(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
+{
 	const float* p = s.proj;
 	float* r0 = out[XC_PROJ];
 	float* r1 = out[XC_PROJ + 1];
@@ -474,6 +587,10 @@ void xfSetupConstants(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
 		r2[2] = p[4], r2[3] = p[5];
 		r3[3] = 1.0f;
 	}
+}
+
+static void xfSetupChan(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
+{
 	for (int c = 0; c < 2; c++) {
 		for (int i = 0; i < 4; i++) {
 			// (both parts hold the whole register; alpha in the alpha part's)
@@ -481,20 +598,18 @@ void xfSetupConstants(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
 			out[XC_CHAN + c * 2 + 1][i] = s.part[c][i == 3 ? 1 : 0].amb[i];
 		}
 	}
-	u32 lights = 0;
-	for (int c = 0; c < 2; c++) {
-		for (int part = 0; part < 2; part++) {
-			if (s.part[c][part].lighting && (u32)c < s.numChans) {
-				lights |= s.part[c][part].lightMask;
-			}
-		}
-	}
+}
+
+static void xfSetupLights(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
+{
+	const u32 lights = setupLights(s);
 	for (int l = 0; l < 8; l++) {
 		if (!(lights & (1u << l))) {
-			continue; // (xfPrepare reads only the lights in use)
+			continue; // (xfPrepare reads only the lights in use; the programs too)
 		}
 		const gpu::XfSetup::Light& lt = s.light[l];
 		float* L                      = out[XC_LIGHTS + l * XC_LIGHT_ROWS];
+		memset(L, 0, sizeof(float) * 4 * XC_LIGHT_ROWS);
 		for (int i = 0; i < 4; i++) {
 			L[i] = lt.color[i];
 		}
@@ -510,10 +625,14 @@ void xfSetupConstants(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
 			L[20 + i] = len > 0 ? lt.pos[i] / len : 0.0f;
 		}
 	}
-	for (u32 t = 0; t < 8 && t < s.numTexGens; t++) {
-		const float* post = s.texgen[t].post;
-		if (post && s.texgen[t].type == 0) {
-			memcpy(out[XC_POST + t * 3], post, sizeof(float) * 12);
+}
+
+static void xfSetupPost(const gpu::XfSetup& s, float out[XC_SETUP_COUNT][4])
+{
+	const u32 posts = setupPosts(s);
+	for (u32 t = 0; t < 8; t++) {
+		if (posts & (1u << t)) {
+			memcpy(out[XC_POST + t * 3], s.texgen[t].post, sizeof(float) * 12);
 		}
 	}
 }

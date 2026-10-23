@@ -75,6 +75,10 @@ RsxDevice::RsxDevice()
     , mLocalUsed(0)
     , mVertexProgram(NULL)
     , mVertexProgramValid(false)
+    , mHostBase(NULL)
+    , mHostSize(0)
+    , mHostOffset(0)
+    , mHostLinear(false)
     , mFormatValid(false)
     , mFormatOffset(0)
     , mResidentCount(0)
@@ -136,6 +140,15 @@ bool RsxDevice::init()
 	mFlipped     = d.flipped != 0;
 	mScratch     = (u8*)d.host + d.commandSize;
 	mScratchSize = (d.hostSize - d.commandSize) & ~127u;
+	// (the RSX's offsets in the main memory it reads: one mapping, worked out once if it is linear)
+	mHostBase   = (const u8*)d.host;
+	mHostSize   = d.hostSize;
+	mHostOffset = offsetOf(d.host);
+	mHostLinear = mHostSize > 128 && offsetOf(mHostBase + mHostSize - 128) == mHostOffset + mHostSize - 128
+	              && offsetOf(mHostBase + mHostSize / 2) == mHostOffset + mHostSize / 2;
+	if (!mHostLinear) {
+		logf("[rsx] main memory the RSX reads is not mapped in one piece: offsets looked up each time\n");
+	}
 
 	// local memory: the frame buffer, its depth buffer, and a depth buffer for drawing to the display
 	mEfbColorMem   = (u32*)rsxMemalign(128, EFB_PITCH * EFB_HEIGHT); // (also read as a texture)
@@ -434,7 +447,7 @@ void RsxDevice::setProgram(const void* ucode, const FragmentProgram& fp)
 		// have brought the next one's memory, with its earlier contents, into the cache.)
 		rsxInvalidateTextureCache(CTX, GCM_INVALIDATE_TEXTURE);
 	}
-	rsxLoadFragmentProgramLocation(CTX, &h, offsetOf(ucode), GCM_LOCATION_CELL);
+	rsxLoadFragmentProgramLocation(CTX, &h, ioOffset(ucode), GCM_LOCATION_CELL);
 }
 
 void RsxDevice::setTexture(u32 unit, const Texture* t, const Sampler& s)
@@ -470,6 +483,17 @@ void RsxDevice::setTexture(u32 unit, const Texture* t, const Sampler& s)
 	                   GCM_TEXTURE_CLAMP_TO_EDGE, 0, GCM_TEXTURE_ZFUNC_LESS, 0);
 }
 
+// The RSX's offset of main memory it reads (draw data, programs): by arithmetic in the mapped block
+// (rsxAddressToOffset is a call into the system's library for each: test build 42 spent about 1% there).
+u32 RsxDevice::ioOffset(const void* p) const
+{
+	const u8* q = (const u8*)p;
+	if (mHostLinear && q >= mHostBase && q < mHostBase + mHostSize) {
+		return mHostOffset + (u32)(q - mHostBase);
+	}
+	return offsetOf(p);
+}
+
 // Binds vertex attribute i, unless it is bound that way already. (Test builds up to 40 bound all 16 for every
 // batch: about 16,000 commands a frame, most of them repeating what was set.)
 void RsxDevice::bindAttr(u32 i, u32 offset, u32 stride, u32 components, u32 type, u32 location)
@@ -490,7 +514,7 @@ void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 {
 	checkStop();
 	gcmContextData* ctx = CTX;
-	const u32 o         = offsetOf(base);
+	const u32 o         = ioOffset(base);
 	// (the scratch ring reuses memory: what the chip's vertex cache holds from earlier batches is stale.
 	// PSL1GHT's draw calls do not invalidate it.)
 	rsxInvalidateVertexCache(ctx);
@@ -621,7 +645,7 @@ void RsxDevice::setVertexFormat(const void* base, const VertexFormat& f)
 {
 	checkStop();
 	gcmContextData* ctx = CTX;
-	const u32 o         = offsetOf(base);
+	const u32 o         = ioOffset(base);
 	rsxInvalidateVertexCache(ctx);
 	// (the same place and format as the last time, the usual case for draws from the vertex cache: bound)
 	static_assert(sizeof(VertexFormat) % 4 == 0, "VertexFormat compared as words");
@@ -676,7 +700,7 @@ void RsxDevice::drawTriangles32(const u32* indices, u32 count)
 		rsxInvalidateTextureCache(ctx, GCM_INVALIDATE_TEXTURE);
 		mInvalidateTextures = false;
 	}
-	rsxDrawIndexArray(ctx, GCM_TYPE_TRIANGLES, offsetOf(indices), count, GCM_INDEX_TYPE_32B, GCM_LOCATION_CELL);
+	rsxDrawIndexArray(ctx, GCM_TYPE_TRIANGLES, ioOffset(indices), count, GCM_INDEX_TYPE_32B, GCM_LOCATION_CELL);
 }
 
 void RsxDevice::drawTriangles32Inline(const u32* indices, u32 count)

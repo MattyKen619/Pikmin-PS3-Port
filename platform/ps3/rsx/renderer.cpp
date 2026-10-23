@@ -43,6 +43,7 @@ enum {
 	TEXTURE_BUDGET  = 96 * 1024 * 1024, // device memory for decoded textures before old ones are evicted
 	MAX_BATCH_VERTS = 65535,
 	TEXTURE_CHECK_FRAMES = 8,
+	BYTES_CHECK_FRAMES   = 8, // (cacheValid)
 	ARENA_BYTES     = RSX_VERTEX_CACHE_BYTES, // vertex cache memory (at most a third of the scratch memory)
 	CACHE_ENTRIES   = 32768,           // entries before the vertex cache starts over
 	CACHE_VARIANTS  = 8,               // entries for one display list draw with different registers or arrays
@@ -156,6 +157,9 @@ void tevRegFromBp(int regs[4][4], int konst[4][4], u32 reg, u32 value)
 
 // Which parts of the state a BP register affects (updateState redoes only those).
 u8 sBpDirty[256];
+u8 sBpUse[256];
+float sTev11[2048];
+float sU8F[256];
 bool sBpDirtyReady;
 
 void initBpDirty()
@@ -183,6 +187,22 @@ void initBpDirty()
 		}
 	}
 	sBpDirty[0x64] = sBpDirty[0x65] = D_TEX;                 // palettes
+	// (bpWritten is called for the registers it converts or acts on; the command processor notes the others'
+	// dirty bits itself: gpu::Listener::bpUse)
+	for (u32 r = 0; r < 256; r++) {
+		sBpUse[r] = sBpDirty[r];
+	}
+	for (u32 r = 0xE0; r <= 0xE7; r++) sBpUse[r] |= gpu::Listener::BP_CALL;
+	sBpUse[0xF3] |= gpu::Listener::BP_CALL;
+	sBpUse[0x65] |= gpu::Listener::BP_CALL;
+	// (TEV register values, 11-bit signed, as the program parameters' floats: the PPU converts integers to
+	// floats through memory, a stall each)
+	for (int i = 0; i < 2048; i++) {
+		sTev11[i] = (float)(i - 1024) * (1.0f / 255.0f);
+	}
+	for (int i = 0; i < 256; i++) {
+		sU8F[i] = (float)i;
+	}
 	sBpDirtyReady = true;
 }
 
@@ -248,7 +268,7 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
     , mBoundXp(NULL)
     , mBoundXpValid(false)
     , mSetupValid(false)
-    , mSetupDirty(true)
+    , mSetupDirty(SG_ALL)
     , mXfWrites(1)
     , mCacheOn(false)
     , mResetRequest(0)
@@ -296,6 +316,7 @@ Renderer::Renderer(gpu::CommandProcessor& cp, gpu::Memory& memory, Device& devic
 	mTlutSerial = 1;
 	memset(&mState, 0, sizeof(mState));
 	initBpDirty();
+	memset(mRecentPrograms, 0, sizeof(mRecentPrograms));
 	mTmem = (u8*)calloc(1, 0x100000);
 	mScratch     = mDev.scratchBase();
 	mScratchSize = mDev.scratchSize();
@@ -380,7 +401,7 @@ void Renderer::begin()
 	mXfValid   = false;
 	mXfLookupValid = false;
 	mXfLimitFp     = NULL;
-	mSetupDirty    = true;
+	mSetupDirty    = SG_ALL;
 	// (XF memory came from somewhere else: no row of the copy in the constants is known to be current)
 	flushBatch();
 	mStale.lo = mNStale.lo = ~0ULL;
@@ -794,9 +815,20 @@ bool Renderer::updateState()
 	const gpu::State& S = mCp.state();
 	const u32* bp       = S.bp;
 	const u32* xf       = S.xf;
-	if (memcmp(mViewport, xf + 0x101A, sizeof(mViewport)) != 0) {
-		memcpy(mViewport, xf + 0x101A, sizeof(mViewport));
-		mDirtyBits |= D_STATE;
+	mDirtyBits |= mCp.takeBpDirty(); // (gpu::Listener::bpUse)
+	{
+		// (the viewport: compared by words, the C library's memcmp goes a byte at a time)
+		const u32* v = xf + 0x101A;
+		u32 d        = 0;
+		for (int i = 0; i < 6; i++) {
+			d |= v[i] ^ mViewport[i];
+		}
+		if (d) {
+			for (int i = 0; i < 6; i++) {
+				mViewport[i] = v[i];
+			}
+			mDirtyBits |= D_STATE;
+		}
 	}
 	if (!mDirtyBits) {
 		return mDrawable;
@@ -857,12 +889,18 @@ bool Renderer::updateState()
 		TevKey key;
 		makeTevKey(bp, key);
 		if (!mProgram || !(mProgram->key == key)) {
-			Vec<ProgramEntry*>& chain = mPrograms[key.hash()];
-			ProgramEntry* found       = NULL;
-			for (size_t i = 0; i < chain.size(); i++) {
-				if (chain[i]->key == key) {
-					found = chain[i];
-					break;
+			// (a small table of recent programs by hash first: the map's lookup goes through a tree, a cache miss
+			// at each step)
+			const u32 h            = key.hash();
+			ProgramEntry*& recent  = mRecentPrograms[h & (RECENT_PROGRAMS - 1)];
+			ProgramEntry* found    = recent && recent->key == key ? recent : NULL;
+			if (!found) {
+				Vec<ProgramEntry*>& chain = mPrograms[h];
+				for (size_t i = 0; i < chain.size(); i++) {
+					if (chain[i]->key == key) {
+						found = chain[i];
+						break;
+					}
 				}
 			}
 			if (!found) {
@@ -889,8 +927,9 @@ bool Renderer::updateState()
 						log("\n");
 					}
 				}
-				chain.push_back(found);
+				mPrograms[h].push_back(found);
 			}
+			recent = found;
 			if (found != mProgram) {
 				mProgram      = found;
 				mProgramBound = false;
@@ -937,6 +976,8 @@ bool Renderer::updateState()
 	return mDrawable;
 }
 
+const u8* Renderer::bpUse() { return sBpUse; }
+
 void Renderer::bpWritten(u32 reg, u32 value)
 {
 	mDirtyBits |= sBpDirty[reg & 0xFF];
@@ -948,11 +989,11 @@ void Renderer::bpWritten(u32 reg, u32 value)
 		const int* rv = k ? mKonst[n] : mTevReg[n];
 		float* f      = mRegF[k ? 4 + n : n];
 		for (int c = 0; c < 4; c++) {
-			f[c] = rv[c] * (1.0f / 255.0f);
+			f[c] = sTev11[(rv[c] + 1024) & 2047];
 		}
 	} else if (reg == 0xF3) {
-		mRegF[8][0] = (float)bits(value, 0, 8);
-		mRegF[8][1] = (float)bits(value, 8, 8);
+		mRegF[8][0] = sU8F[bits(value, 0, 8)];
+		mRegF[8][1] = sU8F[bits(value, 8, 8)];
 	} else if (reg == 0x65) {
 		// TLUT load: from memory (BP 0x64) into texture memory
 		mTlutSerial++;
@@ -999,9 +1040,7 @@ void Renderer::draw(const gpu::DrawCall& call)
 			gpu::PhaseScope phase(gpu::GFX_XF_SETUP);
 			mXfLayout = *call.layout;
 			gpu::xfPrepare(S.xf, mXfLayout, mXf);
-			if (xfSerial != mXfSerial) {
-				mSetupDirty = true; // (the set-up constants do not depend on the layout)
-			}
+			// (the set-up constants do not depend on the layout; xfWritten notes what XF loads change)
 			mXfSerial      = xfSerial;
 			mXfValid       = true;
 			mXfLookupValid = false;
@@ -1097,7 +1136,7 @@ void Renderer::xfWritten(u32 address, u32 count)
 		}
 	}
 	if (end > 0x500) {
-		mSetupDirty = true; // (post-transform matrices, lights, registers)
+		mSetupDirty |= xfSetupGroups(address, end); // (post-transform matrices, lights, registers)
 	}
 }
 
@@ -1110,41 +1149,49 @@ void Renderer::xfWritten(u32 address, u32 count)
 
 // (Test build 41's profile: a tenth of the graphics thread's time was here, comparing and copying the
 // 83 rows with the C library's byte-at-a-time memcmp and memcpy. Rows are compared and copied as 64-bit
-// words now.)
+// words now, and only the rows that programs read, in the groups whose XF registers changed, are worked out:
+// test build 42 still spent 5-7% here, mostly on rows that could not have changed or are not read.)
 void Renderer::uploadSetup()
 {
-	if (!mSetupDirty && mSetupValid) {
+	const u32 groups = mSetupValid ? mSetupDirty : (u32)SG_ALL;
+	mSetupDirty      = 0;
+	if (!groups) {
 		return;
 	}
-	mSetupDirty = false;
 	float setup[XC_SETUP_COUNT][4] __attribute__((aligned(16)));
-	xfSetupConstants(mXf, setup);
+	xfSetupConstants(mXf, setup, groups);
 	typedef u64 __attribute__((may_alias)) Word;
 	const Word* a = (const Word*)&setup[0][0];
 	Word* b       = (Word*)&mSetup[0][0];
 	const bool valid = mSetupValid;
 	bool flushed     = false;
-	for (u32 r = 0; r < XC_SETUP_COUNT;) {
-		if (valid && a[2 * r] == b[2 * r] && a[2 * r + 1] == b[2 * r + 1]) {
-			r++;
-			continue;
+	// (the rows the programs read: the lights in use, the post-transform matrices used)
+	u32 ranges[20][2];
+	const u32 n = xfSetupRows(mXf, groups, ranges);
+	for (u32 k = 0; k < n; k++) {
+		const u32 last = ranges[k][1];
+		for (u32 r = ranges[k][0]; r < last;) {
+			if (valid && a[2 * r] == b[2 * r] && a[2 * r + 1] == b[2 * r + 1]) {
+				r++;
+				continue;
+			}
+			u32 e = r + 1;
+			while (e < last && !(valid && a[2 * e] == b[2 * e] && a[2 * e + 1] == b[2 * e + 1])) {
+				e++;
+			}
+			if (!flushed) {
+				flushBatch(); // (its draws read the old values)
+				flushed = true;
+			}
+			{
+				gpu::PhaseScope rsx(gpu::GFX_RSX);
+				mDev.setVertexConstants(r, e - r, &setup[r][0]);
+			}
+			for (u32 w = 2 * r; w < 2 * e; w++) {
+				b[w] = a[w];
+			}
+			r = e;
 		}
-		u32 e = r + 1;
-		while (e < XC_SETUP_COUNT && !(valid && a[2 * e] == b[2 * e] && a[2 * e + 1] == b[2 * e + 1])) {
-			e++;
-		}
-		if (!flushed) {
-			flushBatch(); // (its draws read the old values)
-			flushed = true;
-		}
-		{
-			gpu::PhaseScope rsx(gpu::GFX_RSX);
-			mDev.setVertexConstants(r, e - r, &setup[r][0]);
-		}
-		for (u32 k = 2 * r; k < 2 * e; k++) {
-			b[k] = a[k];
-		}
-		r = e;
 	}
 	if (flushed) {
 		mStats.setupUploads++;
@@ -1520,9 +1567,17 @@ bool Renderer::cacheValid(CacheEntry* e, const gpu::DrawCall& call)
 	if (!cacheVariant(e, call)) {
 		return false;
 	}
-	if (gpu::hashMemory(call.data, e->span()) != e->bytesHash) {
-		mWhy = WHY_BYTES;
-		return false;
+	// The list's bytes: hashed every frame at first, then less and less often while they do not change, down
+	// to every BYTES_CHECK_FRAMES frames, and when the entry was not drawn for a while. (Display lists are
+	// models' data: the same for the whole level, and the cache starts over at a new section. Hashing them
+	// all took about 4% of the graphics thread's time in test build 42.)
+	if (mAudit || mCheckEveryFrame || (u16)(mFrame - e->bytesFrame) >= e->bytesInterval || mFrame - e->okFrame > (u32)BYTES_CHECK_FRAMES) {
+		if ((u32)gpu::hashMemory(call.data, e->span()) != e->bytesHash) {
+			mWhy = WHY_BYTES;
+			return false;
+		}
+		e->bytesFrame    = (u16)mFrame;
+		e->bytesInterval = (u8)(e->bytesInterval * 2 > BYTES_CHECK_FRAMES ? BYTES_CHECK_FRAMES : e->bytesInterval * 2);
 	}
 	if (e->okFrame == mFrame) {
 		return true; // (its arrays were found unchanged earlier in this frame: their versions change only when they
@@ -1735,7 +1790,9 @@ Renderer::CacheEntry* Renderer::cacheFill(const gpu::DrawCall& call, XfProgramEn
 	}
 	const gpu::VertexArray* arrays = c.arrays ? c.arrays : mCp.resolveArrays(c);
 	c.arrays                       = arrays;
-	e->bytesHash = gpu::hashMemory(call.data, dataBytes);
+	e->bytesHash     = (u32)gpu::hashMemory(call.data, dataBytes);
+	e->bytesFrame    = (u16)mFrame;
+	e->bytesInterval = 1;
 	const u32* cp = mCp.state().cp;
 	e->cp[0] = cp[0x50], e->cp[1] = cp[0x60], e->cp[2] = cp[0x70 + call.vat], e->cp[3] = cp[0x80 + call.vat];
 	e->cp[4] = cp[0x90 + call.vat], e->cp[5] = cp[0x30], e->cp[6] = cp[0x40];
