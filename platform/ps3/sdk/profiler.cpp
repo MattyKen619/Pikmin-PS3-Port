@@ -6,12 +6,22 @@
 //
 // Time in code that is not instrumented (the SDK replacement, Nintendo's GX library, the C library)
 // counts towards the game function that called it.
+//
+// It also samples the graphics thread while it interprets commands (ps3GfxPhase not idle): its code is
+// instrumented too (include/ps3/gfx_hooks.h), and its busiest code is logged as "[prof] gfx" lines.
 
 #include "sdk_internal.h"
 
 #include "../backend/ps3_backend.h"
+#define PS3_GFX_HOOKS_NO_DEFINITIONS
+#include "ps3/gfx_hooks.h"
 #include <stdio.h>
 #include <string.h>
+
+extern "C" {
+struct Ps3GfxHookState ps3GfxHook;
+extern volatile unsigned int ps3GfxPhase; // (gpu_cp.h: 0 is idle)
+}
 
 namespace {
 
@@ -21,12 +31,17 @@ enum {
 	MAX_THREADS  = 32,
 	TOP_SELF     = 50,
 	TOP_INCL     = 50,
+	GFX_SELF_SLOTS = 1 << 12,
+	GFX_INCL_SLOTS = 1 << 11,
+	TOP_GFX_SELF = 60,
+	TOP_GFX_INCL = 50,
 	REPORT_EVERY = 60 * 1000, // samples
 };
 
+template <u32 SLOTS>
 struct Table {
-	void* key[SELF_SLOTS];
-	u32 count[SELF_SLOTS];
+	void* key[SLOTS];
+	u32 count[SLOTS];
 	u32 used;
 	u32 slots;
 	u32 dropped;
@@ -59,8 +74,11 @@ struct Table {
 	}
 };
 
-Table sSelf;
-Table sIncl;
+Table<SELF_SLOTS> sSelf;
+Table<SELF_SLOTS> sIncl;
+Table<GFX_SELF_SLOTS> sGfxSelf;
+Table<GFX_INCL_SLOTS> sGfxIncl;
+u32 sGfxBusySamples;
 u32 sRunningSamples[MAX_THREADS];
 u32 sWaitingSamples;
 u32 sNoThreadSamples;
@@ -72,7 +90,8 @@ volatile int sSectionChanged;
 volatile int sStopped;
 bool sStarted;
 
-void logTop(Table& t, const char* what, int top)
+template <typename T>
+void logTop(T& t, const char* what, int top)
 {
 	for (int n = 0; n < top; n++) {
 		u32 best = 0, at = 0;
@@ -109,9 +128,15 @@ void report(const char* why)
 	       secs, threads, (unsigned)(sWaitingSamples * 100ULL / sSamples), (unsigned)(sNoThreadSamples * 100ULL / sSamples));
 	logTop(sSelf, "self", TOP_SELF);
 	logTop(sIncl, "incl", TOP_INCL);
+	ps3Log("[prof] gfx busy %u of %u samples\n", (unsigned)sGfxBusySamples, (unsigned)sSamples);
+	logTop(sGfxSelf, "gfx self", TOP_GFX_SELF);
+	logTop(sGfxIncl, "gfx incl", TOP_GFX_INCL);
 	ps3Log("[prof] end\n");
 	sSelf.clear();
 	sIncl.clear();
+	sGfxSelf.clear();
+	sGfxIncl.clear();
+	sGfxBusySamples = 0;
 	memset(sRunningSamples, 0, sizeof(sRunningSamples));
 	sWaitingSamples = sNoThreadSamples = sSamples = 0;
 	sStartedAt                                    = now;
@@ -151,6 +176,28 @@ void samplerThread(void*)
 				}
 			}
 		}
+		// The graphics thread, while it interprets commands.
+		if (ps3GfxPhase != 0) {
+			sGfxBusySamples++;
+			sGfxSelf.add(ps3GfxHook.lastPc);
+			int depth = ps3GfxHook.depth;
+			if (depth > PS3_GFX_SHADOW_DEPTH) {
+				depth = PS3_GFX_SHADOW_DEPTH;
+			}
+			void* fns[PS3_GFX_SHADOW_DEPTH];
+			for (int i = 0; i < depth; i++) {
+				fns[i] = ps3GfxHook.stackFn[i];
+			}
+			for (int i = 0; i < depth; i++) {
+				bool seen = false;
+				for (int j = 0; j < i && !seen; j++) {
+					seen = fns[j] == fns[i];
+				}
+				if (!seen) {
+					sGfxIncl.add(fns[i]);
+				}
+			}
+		}
 		if (sSamples >= REPORT_EVERY) {
 			report("1 minute");
 		}
@@ -174,8 +221,12 @@ extern "C" void ps3ProfilerStart(void)
 	sStarted    = true;
 	sSelf.slots = SELF_SLOTS;
 	sIncl.slots = INCL_SLOTS;
+	sGfxSelf.slots = GFX_SELF_SLOTS;
+	sGfxIncl.slots = GFX_INCL_SLOTS;
 	sSelf.clear();
 	sIncl.clear();
+	sGfxSelf.clear();
+	sGfxIncl.clear();
 	sStartedAt = ps3b_timebase();
 	ps3b_set_exit_hook(onExit);
 	ps3b_thread_create(samplerThread, NULL, 900, 0x8000, "pikmin_profiler");

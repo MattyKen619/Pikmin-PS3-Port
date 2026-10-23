@@ -22,6 +22,12 @@ const u8 kColorSize[8] = { 2, 3, 4, 2, 3, 4, 4, 4 };
 // sum of two exact parts: high byte * 256 + low byte.
 static float sU8Float[256], sS8Float[256], sU16Hi[256], sS16Hi[256], sPow2Inv[32];
 
+// How far ahead display lists are read (bytes).
+enum { READ_AHEAD = 1024 };
+
+// BP registers whose writes do something besides setting the register (loadBp).
+static u8 sBpActs[256];
+
 } // namespace gpu
 
 extern "C" {
@@ -40,6 +46,7 @@ namespace gpu {
 CommandProcessor::CommandProcessor()
     : mMemory(NULL)
     , mListener(NULL)
+    , mRegs(NULL)
     , mBpMask(0xFFFFFF)
     , mDisplayListDepth(0)
     , mRuns(false)
@@ -67,6 +74,12 @@ CommandProcessor::CommandProcessor()
 	for (int i = 0; i < 32; i++) {
 		sPow2Inv[i] = 1.0f / (float)(1u << i);
 	}
+	// draw done (and its interrupt enable), tokens, EFB copy, TMEM preload and TLUT load, texture cache
+	// invalidation, performance counters, the mask
+	static const u8 kActs[] = { 0x45, 0x46, 0x47, 0x48, 0x52, 0x63, 0x64, 0x65, 0x66, 0x67, 0xFE, 0xFF };
+	for (u32 i = 0; i < sizeof(kActs); i++) {
+		sBpActs[kActs[i]] = 1;
+	}
 }
 
 CommandProcessor::~CommandProcessor()
@@ -76,25 +89,6 @@ CommandProcessor::~CommandProcessor()
 }
 
 // ---------------------------------------------------------------- FIFO input
-
-static inline bool knownOpcode(u8 op)
-{
-	switch (op) {
-	case OP_NOP:
-	case OP_INVAL_VCACHE:
-	case OP_LOAD_CP:
-	case OP_LOAD_XF:
-	case OP_LOAD_INDX_A:
-	case OP_LOAD_INDX_B:
-	case OP_LOAD_INDX_C:
-	case OP_LOAD_INDX_D:
-	case OP_LOAD_BP:
-	case OP_CALL_DL:
-		return true;
-	default:
-		return op >= OP_DRAW_FIRST && op < 0xC0;
-	}
-}
 
 u32 CommandProcessor::commandLength(const u8* p, u32 avail)
 {
@@ -167,8 +161,7 @@ void CommandProcessor::write(const u8* data, u32 size)
 				mPending  = 0;
 				mCmdEnd   = base + pos;
 				mCmdStart = mCmdEnd - n;
-				execute(mPendingBuf, n, false);
-				mStats.commands++;
+				run(mPendingBuf, n, false, mCmdStart);
 				break;
 			}
 		}
@@ -202,106 +195,168 @@ void CommandProcessor::write32(u32 value)
 
 u32 CommandProcessor::run(const u8* data, u32 size, bool inDisplayList, u64 base)
 {
-	u32 pos = 0;
+	// One switch per command: its length, its checks and its work. (Test builds up to 40 looked at each
+	// command's opcode three times: is it known, how long is it, what does it do. The PPU predicts none of
+	// those jumps.) Counters are kept in locals and added at the end: a counter in memory, stored and loaded
+	// straight back by the next command, stalls the PPU's pipeline every time (a load-hit-store).
+	u32 pos      = 0;
+	u32 commands = 0, bpLoads = 0, xfLoads = 0, cpLoads = 0, indexedLoads = 0;
 	while (pos < size) {
-		const u8* p = data + pos;
-		u32 avail   = size - pos;
-		if (inDisplayList && avail > 512) {
-			__builtin_prefetch(p + 512);
+		const u8* p     = data + pos;
+		const u32 avail = size - pos;
+		const u32 op    = p[0];
+		u32 len;
+		if (inDisplayList && avail > READ_AHEAD) {
+			__builtin_prefetch(p + READ_AHEAD);
 		}
-		if (p[0] == OP_NOP) { // (GXFlush pads with 32 of them)
-			mStats.commands++;
-			pos++;
+		switch (op) {
+		case OP_NOP: // (GXFlush pads with 32 of them, display lists end with them: skipped together)
+		case OP_INVAL_VCACHE:
+		{
+			u32 n = 1;
+			while (n < avail && p[n] == OP_NOP) {
+				n++;
+			}
+			commands += n;
+			pos += n;
 			continue;
 		}
-		if (!knownOpcode(p[0])) {
+		case OP_LOAD_BP:
+			if (avail < 5) {
+				goto incomplete;
+			}
+			len = 5;
+			if (!inDisplayList) {
+				mCmdStart = base + pos;
+				mCmdEnd   = base + pos + len;
+			}
+			bpLoads++;
+			loadBp(be32(p + 1));
+			break;
+		case OP_LOAD_XF:
+			if (avail < 5) {
+				goto incomplete;
+			}
+			len = 5 + (((be32(p + 1) >> 16) & 0xF) + 1) * 4;
+			if (len > avail) {
+				goto incomplete;
+			}
+			if (!inDisplayList) {
+				mCmdStart = base + pos;
+				mCmdEnd   = base + pos + len;
+			}
+			xfLoads++;
+			loadXf(be16(p + 3), ((p[2] & 0xF) + 1), p + 5);
+			break;
+		case OP_LOAD_CP:
+			if (avail < 6) {
+				goto incomplete;
+			}
+			len = 6;
+			if (!inDisplayList) {
+				mCmdStart = base + pos;
+				mCmdEnd   = base + pos + len;
+			}
+			cpLoads++;
+			loadCp(p[1], be32(p + 2));
+			break;
+		case OP_LOAD_INDX_A:
+		case OP_LOAD_INDX_B:
+		case OP_LOAD_INDX_C:
+		case OP_LOAD_INDX_D:
+			if (avail < 5) {
+				goto incomplete;
+			}
+			len = 5;
+			if (!inDisplayList) {
+				mCmdStart = base + pos;
+				mCmdEnd   = base + pos + len;
+			}
+			indexedLoads++;
+			loadIndexed(op, be32(p + 1));
+			break;
+		case OP_CALL_DL:
+			if (avail < 9) {
+				goto incomplete;
+			}
+			len = 9;
+			if (inDisplayList) {
+				mStats.nestedDisplayLists++; // not supported by the hardware either
+			} else {
+				mCmdStart = base + pos;
+				mCmdEnd   = base + pos + len;
+				callDisplayList(be32(p + 1), be32(p + 5));
+			}
+			break;
+		default:
+			if (op >= OP_DRAW_FIRST && op < 0xC0) {
+				if (avail < 3) {
+					goto incomplete;
+				}
+				len = 3 + be16(p + 1) * layout(op & 7).size;
+				if (len > avail) {
+					goto incomplete;
+				}
+				if (!inDisplayList) {
+					mCmdStart = base + pos;
+					mCmdEnd   = base + pos + len;
+				} else if (mRuns && op < PRIM_LINES) {
+					// (a triangle draw: with the ones right after it, if any, one call)
+					const u32 n = drawRun(p, avail);
+					if (n) {
+						pos += n;
+						continue;
+					}
+				}
+				drawCommand(p, inDisplayList);
+				break;
+			}
 			mStats.badCommands++;
 			if (mListener) {
-				mListener->badCommand(p[0], p, avail, inDisplayList);
+				mListener->badCommand((u8)op, p, avail, inDisplayList);
 			}
-			mStats.commands++;
-			pos++; // skip the byte (the hardware would hang)
-			continue;
+			len = 1; // (skipped a byte at a time: the hardware would hang)
+			break;
 		}
-		u32 len = commandLength(p, avail);
-		if (len == 0 || len > avail) {
-			// Incomplete command.
-			if (inDisplayList) {
-				mStats.badCommands++;
-				if (mListener) {
-					mListener->badCommand(p[0], p, avail, true);
-				}
-				return size;
-			}
-			return pos;
-		}
-		if (!inDisplayList) {
-			mCmdStart = base + pos;
-			mCmdEnd   = base + pos + len;
-		} else if (mRuns && p[0] >= PRIM_QUADS && p[0] < PRIM_LINES) {
-			// (a triangle draw: with the ones right after it, if any, one call)
-			const u32 n = drawRun(p, avail);
-			if (n) {
-				pos += n;
-				continue;
-			}
-		}
-		execute(p, len, inDisplayList);
-		mStats.commands++;
+		commands++;
 		pos += len;
+	}
+	mStats.commands += commands;
+	mStats.bpLoads += bpLoads;
+	mStats.xfLoads += xfLoads;
+	mStats.cpLoads += cpLoads;
+	mStats.indexedLoads += indexedLoads;
+	return pos;
+
+incomplete:
+	mStats.commands += commands;
+	mStats.bpLoads += bpLoads;
+	mStats.xfLoads += xfLoads;
+	mStats.cpLoads += cpLoads;
+	mStats.indexedLoads += indexedLoads;
+	if (inDisplayList) {
+		mStats.badCommands++;
+		if (mListener) {
+			mListener->badCommand(data[pos], data + pos, size - pos, true);
+		}
+		return size;
 	}
 	return pos;
 }
 
-void CommandProcessor::execute(const u8* p, u32 length, bool inDisplayList)
-{
-	const u8 op = p[0];
-	switch (op) {
-	case OP_NOP:
-	case OP_INVAL_VCACHE:
-		break;
-	case OP_LOAD_CP:
-		loadCp(p[1], be32(p + 2));
-		break;
-	case OP_LOAD_XF:
-	{
-		u32 header = be32(p + 1);
-		loadXf(header & 0xFFFF, ((header >> 16) & 0xF) + 1, p + 5);
-		break;
-	}
-	case OP_LOAD_INDX_A:
-	case OP_LOAD_INDX_B:
-	case OP_LOAD_INDX_C:
-	case OP_LOAD_INDX_D:
-		loadIndexed(op, be32(p + 1));
-		break;
-	case OP_CALL_DL:
-		if (inDisplayList) {
-			mStats.nestedDisplayLists++; // not supported by the hardware either
-		} else {
-			callDisplayList(be32(p + 1), be32(p + 5));
-		}
-		break;
-	case OP_LOAD_BP:
-		loadBp(be32(p + 1));
-		break;
-	default:
-		if (op >= OP_DRAW_FIRST && op < 0xC0) {
-			drawCommand(p, inDisplayList);
-		} else {
-			mStats.badCommands++;
-			if (mListener) {
-				mListener->badCommand(op, p, length, inDisplayList);
-			}
-		}
-		break;
-	}
-}
+// Register loads that change nothing (the game sets most of its state again for every material, the GX
+// library writes some registers several times over, and test build 40's busiest frames had 9,000 of
+// 19,000 BP loads and 5,000 of 10,000 XF loads like that) are not passed on: the renderer would redo its
+// state work for each. BP registers whose writes act (draw done, tokens, copies, TLUT loads, texture cache
+// invalidation, the mask) are passed on every time.
 
 void CommandProcessor::loadCp(u32 reg, u32 value)
 {
-	mStats.cpLoads++;
 	reg &= 0xFF;
+	if (mState.cp[reg] == value) {
+		mStats.cpUnchanged++;
+		return;
+	}
 	mState.cp[reg] = value;
 	if (reg == 0x50 || reg == 0x60) {
 		mLayoutValid = 0; // vertex descriptor: all formats
@@ -312,33 +367,35 @@ void CommandProcessor::loadCp(u32 reg, u32 value)
 
 void CommandProcessor::loadXf(u32 address, u32 count, const u8* values)
 {
-	mStats.xfLoads++;
-	if (address + count > 0x600) {
-		mStats.xfSetupLoads++; // (lights or registers: not just matrices)
-	}
+	u32 changed = 0;
 	for (u32 i = 0; i < count; i++) {
-		u32 a = address + i;
+		const u32 a = address + i;
 		if (a < sizeof(mState.xf) / sizeof(mState.xf[0])) {
-			mState.xf[a] = be32(values + i * 4);
+			const u32 v = be32(values + i * 4);
+			changed |= mState.xf[a] ^ v;
+			mState.xf[a] = v;
 		} else {
 			mStats.xfOutOfRange++;
 		}
 	}
-	if (mListener) {
-		mListener->xfWritten(address, count);
+	if (!changed) {
+		mStats.xfUnchanged++;
+		return;
+	}
+	if (address + count > 0x600) {
+		mStats.xfSetupLoads++; // (lights or registers: not just matrices)
+	}
+	if (mRegs) {
+		mRegs->xfWritten(address, count);
 	}
 }
 
 void CommandProcessor::loadIndexed(u32 op, u32 word)
 {
-	mStats.indexedLoads++;
 	u32 array  = ARRAY_INDX_A + ((op - OP_LOAD_INDX_A) >> 3);
 	u32 index  = word >> 16;
 	u32 count  = ((word >> 12) & 0xF) + 1;
 	u32 xfAddr = word & 0xFFF;
-	if (xfAddr + count > 0x600) {
-		mStats.xfSetupLoads++;
-	}
 	u32 base   = mState.cp[0xA0 + array];
 	u32 stride = mState.cp[0xB0 + array];
 	const u8* src = mMemory ? mMemory->read(base + index * stride, count * 4, MEM_ARRAY) : NULL;
@@ -349,28 +406,44 @@ void CommandProcessor::loadIndexed(u32 op, u32 word)
 		}
 		return;
 	}
+	u32 changed = 0;
 	for (u32 i = 0; i < count; i++) {
 		u32 a = xfAddr + i;
 		if (a < sizeof(mState.xf) / sizeof(mState.xf[0])) {
-			mState.xf[a] = be32(src + i * 4);
+			const u32 v = be32(src + i * 4);
+			changed |= mState.xf[a] ^ v;
+			mState.xf[a] = v;
 		}
 	}
-	if (mListener) {
-		mListener->xfWritten(xfAddr, count);
+	if (!changed) {
+		mStats.xfUnchanged++;
+		return;
+	}
+	if (xfAddr + count > 0x600) {
+		mStats.xfSetupLoads++;
+	}
+	if (mRegs) {
+		mRegs->xfWritten(xfAddr, count);
 	}
 }
 
 void CommandProcessor::loadBp(u32 word)
 {
-	mStats.bpLoads++;
-	u32 reg   = word >> 24;
-	u32 value = word & 0xFFFFFF;
+	const u32 reg = word >> 24;
+	u32 value     = word & 0xFFFFFF;
 	if (reg == 0xFE) {
 		mBpMask = value; // applies to the next BP write only
 		return;
 	}
-	value          = (mState.bp[reg] & ~mBpMask) | (value & mBpMask);
-	mBpMask        = 0xFFFFFF;
+	const u32 old = mState.bp[reg];
+	if (mBpMask != 0xFFFFFF) {
+		value   = (old & ~mBpMask) | (value & mBpMask);
+		mBpMask = 0xFFFFFF; // (stored only when it was used: stored every time, the next load of it would stall)
+	}
+	if (value == old && !sBpActs[reg]) {
+		mStats.bpUnchanged++;
+		return;
+	}
 	mState.bp[reg] = value;
 
 	switch (reg) {
@@ -426,8 +499,8 @@ void CommandProcessor::loadBp(u32 word)
 	default:
 		break;
 	}
-	if (mListener) {
-		mListener->bpWritten(reg, value);
+	if (mRegs) {
+		mRegs->bpWritten(reg, value);
 	}
 }
 
@@ -443,8 +516,9 @@ void CommandProcessor::callDisplayList(u32 address, u32 size)
 		}
 		return;
 	}
-	// (display lists are read from memory, not the cache, each frame: read ahead, here and as they run)
-	for (u32 at = 0; at < size && at < 512; at += 128) {
+	// (display lists are read from memory, not the cache, each frame: read ahead, here and as they run. The
+	// PPU waits hundreds of cycles for each line that is not: ask for the first lines together.)
+	for (u32 at = 0; at < size && at < READ_AHEAD; at += 128) {
 		__builtin_prefetch(list + at);
 	}
 	mDisplayListDepth++;
@@ -1159,7 +1233,7 @@ u32 CommandProcessor::drawRun(const u8* p, u32 avail)
 		if (len > avail - at || total + n > 0xFFFF || at + len > RUN_BYTES) {
 			break;
 		}
-		__builtin_prefetch(q + 512);
+		__builtin_prefetch(q + READ_AHEAD);
 		total += n;
 		at += len;
 		parts++;

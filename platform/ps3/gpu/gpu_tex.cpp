@@ -183,31 +183,45 @@ void decodeTexture(const u8* src, u32 width, u32 height, u32 format, const u8* t
 	}
 }
 
+static inline u64 rotl64(u64 x, u32 r) { return (x << r) | (x >> (64 - r)); }
+
+// A hash of memory, for telling whether it changed. Four independent lanes of adds and rotations, each word
+// mixed in twice: the PPU's multiplier takes many cycles a word and does not overlap them, so test builds up
+// to 40 (a multiply per word, each waiting for the last) hashed at about two cycles a byte. The memory is read
+// ahead: it is mostly not in the cache.
 u64 hashMemory(const u8* p, u32 size)
 {
-	u64 h       = 0x9E3779B97F4A7C15ULL ^ size;
-	const u64 k = 0xFF51AFD7ED558CCDULL;
-	u32 i       = 0;
+	u64 a = 0x9E3779B97F4A7C15ULL ^ size, b = 0xC2B2AE3D27D4EB4FULL, c = 0x165667B19E3779F9ULL, d = 0x27D4EB2F165667C5ULL;
+	u32 i = 0;
 	// (bytes up to an 8-byte boundary, then words: vertex arrays start anywhere)
 	for (; i < size && ((size_t)(p + i) & 7) != 0; i++) {
-		h = (h ^ p[i]) * k;
-		h ^= h >> 29;
+		a = rotl64(a + p[i], 23) ^ p[i];
 	}
 	{
 		const u64* w = (const u64*)(p + i);
+		for (u32 k = 0; k < 4 && i + k * 128 < size; k++) {
+			__builtin_prefetch((const u8*)w + k * 128);
+		}
 		for (; i + 32 <= size; i += 32, w += 4) {
-			h = (h ^ w[0]) * k;
-			h = (h ^ w[1]) * k;
-			h = (h ^ w[2]) * k;
-			h = (h ^ w[3]) * k;
-			h ^= h >> 29;
+			if ((i & 127) < 32) {
+				__builtin_prefetch((const u8*)w + 512);
+			}
+			const u64 w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
+			a = rotl64(a + w0, 23) ^ w0;
+			b = rotl64(b + w1, 29) ^ w1;
+			c = rotl64(c + w2, 31) ^ w2;
+			d = rotl64(d + w3, 37) ^ w3;
 		}
 	}
 	for (; i < size; i++) {
-		h = (h ^ p[i]) * k;
-		h ^= h >> 29;
+		b = rotl64(b + p[i], 23) ^ p[i];
 	}
-	return h ^ (h >> 32);
+	// (the lanes combined: multiplies, once)
+	u64 h = a * 0xFF51AFD7ED558CCDULL;
+	h ^= rotl64(b, 17) * 0xC4CEB9FE1A85EC53ULL;
+	h ^= rotl64(c, 33) * 0x9E3779B97F4A7C15ULL;
+	h ^= rotl64(d, 47) * 0xD6E8FEB86659FD93ULL;
+	return h ^ (h >> 29) ^ (h >> 47);
 }
 
 } // namespace gpu

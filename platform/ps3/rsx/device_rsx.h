@@ -92,6 +92,11 @@ private:
 	RenderState mState;
 	bool mStateValid;
 	u32 mBoundTexCoords;
+	struct BoundAttr {
+		u32 offset;
+		u8 stride, components, type, location;
+	} mAttr[16]; // (vertex attributes as bound)
+	void bindAttr(u32 i, u32 offset, u32 stride, u32 components, u32 type, u32 location);
 	bool mInvalidateTextures;
 	bool mProgramCacheDrop; // (setProgramCacheDrop)
 	u32 mReadLabelValue;

@@ -176,6 +176,8 @@ bool RsxDevice::init()
 	for (int i = 0; i < 16; i++) {
 		rsxBindVertexArrayAttrib(ctx, (u8)i, 0, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
 		rsxTextureControl(ctx, (u8)i, GCM_FALSE, 0, 12 << 8, GCM_TEXTURE_MAX_ANISO_1);
+		mAttr[i].offset = 0, mAttr[i].stride = 0, mAttr[i].components = 0;
+		mAttr[i].type = GCM_VERTEX_DATA_TYPE_F32, mAttr[i].location = GCM_LOCATION_RSX;
 	}
 	mBoundTexCoords = 0;
 	setVertexProgram(NULL);
@@ -462,6 +464,22 @@ void RsxDevice::setTexture(u32 unit, const Texture* t, const Sampler& s)
 	                   GCM_TEXTURE_CLAMP_TO_EDGE, 0, GCM_TEXTURE_ZFUNC_LESS, 0);
 }
 
+// Binds vertex attribute i, unless it is bound that way already. (Test builds up to 40 bound all 16 for every
+// batch: about 16,000 commands a frame, most of them repeating what was set.)
+void RsxDevice::bindAttr(u32 i, u32 offset, u32 stride, u32 components, u32 type, u32 location)
+{
+	BoundAttr& a = mAttr[i];
+	if (a.offset == offset && a.stride == stride && a.components == components && a.type == type && a.location == location) {
+		return;
+	}
+	rsxBindVertexArrayAttrib(CTX, (u8)i, 0, offset, (u8)stride, (u8)components, (u8)type, (u8)location);
+	a.offset     = offset;
+	a.stride     = (u8)stride;
+	a.components = (u8)components;
+	a.type       = (u8)type;
+	a.location   = (u8)location;
+}
+
 void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 {
 	checkStop();
@@ -470,15 +488,15 @@ void RsxDevice::setVertices(const void* base, u32 stride, u32 texCoords)
 	// (the scratch ring reuses memory: what the chip's vertex cache holds from earlier batches is stale.
 	// PSL1GHT's draw calls do not invalidate it.)
 	rsxInvalidateVertexCache(ctx);
-	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0, o, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
-	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0, o + 16, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
-	rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR1, 0, o + 32, (u8)stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
+	bindAttr(GCM_VERTEX_ATTRIB_POS, o, stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
+	bindAttr(GCM_VERTEX_ATTRIB_COLOR0, o + 16, stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
+	bindAttr(GCM_VERTEX_ATTRIB_COLOR1, o + 32, stride, 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
 	for (u32 t = 0; t < texCoords; t++) {
-		rsxBindVertexArrayAttrib(ctx, (u8)(GCM_VERTEX_ATTRIB_TEX0 + t), 0, o + VERTEX_BASE_BYTES + VERTEX_TEX_BYTES * t, (u8)stride, 3,
-		                         GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_CELL);
+		bindAttr(GCM_VERTEX_ATTRIB_TEX0 + t, o + VERTEX_BASE_BYTES + VERTEX_TEX_BYTES * t, stride, 3, GCM_VERTEX_DATA_TYPE_F32,
+		         GCM_LOCATION_CELL);
 	}
 	for (u32 t = texCoords; t < mBoundTexCoords; t++) {
-		rsxBindVertexArrayAttrib(ctx, (u8)(GCM_VERTEX_ATTRIB_TEX0 + t), 0, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
+		bindAttr(GCM_VERTEX_ATTRIB_TEX0 + t, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
 	}
 	mBoundTexCoords = texCoords;
 }
@@ -529,9 +547,9 @@ void RsxDevice::setVertexFormat(const void* base, const VertexFormat& f)
 	for (u32 i = 0; i < 16; i++) {
 		const VertexAttrib& a = f.attr[i];
 		if (a.components) {
-			rsxBindVertexArrayAttrib(ctx, (u8)i, 0, o + a.offset, (u8)f.stride, a.components, a.type, GCM_LOCATION_CELL);
+			bindAttr(i, o + a.offset, f.stride, a.components, a.type, GCM_LOCATION_CELL);
 		} else {
-			rsxBindVertexArrayAttrib(ctx, (u8)i, 0, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
+			bindAttr(i, 0, 0, 0, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
 		}
 	}
 	mBoundTexCoords = 8; // (setVertices turns off what it does not use)

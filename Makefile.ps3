@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 40
+TEST_BUILD := 41
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -96,6 +96,19 @@ BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUI
 GPU_OBJS := $(call objs_of,$(wildcard platform/ps3/gpu/*.cpp) $(RSX_CPP))
 $(GPU_OBJS): PLATFORM_CXXFLAGS += -fno-math-errno
 $(GPU_OBJS): BACKEND_CXXFLAGS += -fno-math-errno
+
+# The graphics thread's code is instrumented for the sampling profiler (platform/ps3/include/ps3/gfx_hooks.h:
+# where the thread is, for the "[prof] gfx" lines; test build 41). Left out: functions in headers, the small
+# helpers called for every command or vertex, and the files whose code also runs on the game's thread (the
+# FIFO writes in gx_fifo.cpp) or seldom (traces, start-up, the fragment program assembler).
+GFX_PROFILED     := $(addprefix platform/ps3/gpu/,gpu_cp.cpp gpu_xf.cpp gpu_tex.cpp) \
+                    $(addprefix platform/ps3/rsx/,renderer.cpp device_rsx.cpp tev_program.cpp xf_program.cpp vp_builder.cpp)
+GFX_HOOK_EXCLUDE := be16,be32,bits,readComp,readColor,component,element,asFloat,selectF,clamp01,clampi,maxf,sqrtF,alignUp,cover
+GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),sameBytes,tableSlot,offsetOf,rgb565,rgb5a3,ia8,c3to8,c4to8,c5to8,c6to8,forEachPart,operator,checkStop,rotl
+GFX_PROFILE      := -finstrument-functions -finstrument-functions-exclude-file-list=.h \
+                    -finstrument-functions-exclude-function-list=$(GFX_HOOK_EXCLUDE) -include platform/ps3/include/ps3/gfx_hooks.h -g1
+$(call objs_of,$(GFX_PROFILED)): PLATFORM_CXXFLAGS += $(GFX_PROFILE)
+$(call objs_of,$(GFX_PROFILED)): BACKEND_CXXFLAGS += $(GFX_PROFILE)
 
 LIBS    := -laudio -lsysmodule -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
 LDFLAGS := $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map

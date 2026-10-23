@@ -172,8 +172,16 @@ void initBpDirty()
 	for (u32 r = 0xF6; r <= 0xFD; r++) sBpDirty[r] = D_TEV; // constant selections, swap tables
 	sBpDirty[0xF3] = D_TEV | D_PARAMS;                       // alpha test
 	for (u32 r = 0xE0; r <= 0xE7; r++) sBpDirty[r] = D_PARAMS; // TEV registers
-	for (u32 r = 0x80; r <= 0x9B; r++) sBpDirty[r] = D_TEX; // texture maps 0-3
-	for (u32 r = 0xA0; r <= 0xBB; r++) sBpDirty[r] = D_TEX; // texture maps 4-7
+	// texture maps 0-3 and 4-7: mode 0 (wrap, filters), image 0 (size, format), image 3 (address), TLUT. (Not
+	// mode 1 (LOD limits) or images 1-2 (where the texture goes in texture memory, which changes with every
+	// load): lookupTexture does not use them.)
+	for (u32 m = 0; m < 4; m++) {
+		static const u8 kUsed[4] = { 0x00, 0x08, 0x14, 0x18 };
+		for (u32 k = 0; k < 4; k++) {
+			sBpDirty[0x80 + kUsed[k] + m] = D_TEX;
+			sBpDirty[0xA0 + kUsed[k] + m] = D_TEX;
+		}
+	}
 	sBpDirty[0x64] = sBpDirty[0x65] = D_TEX;                 // palettes
 	sBpDirtyReady = true;
 }
@@ -1406,6 +1414,11 @@ inline bool sameBytes(const u8* a, const u8* b, u32 n)
 	}
 	u64 d = (wa[0] ^ wb[0]) & first;
 	for (u32 i = 1; i + 1 < words; i++) {
+		if ((i & 15) == 0) {
+			// (both read ahead: long runs are not in the cache)
+			__builtin_prefetch(wa + i + 64);
+			__builtin_prefetch(wb + i + 64);
+		}
 		d |= wa[i] ^ wb[i];
 	}
 	d |= (wa[words - 1] ^ wb[words - 1]) & last;

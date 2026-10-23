@@ -8,6 +8,8 @@ PS3 port: turn the sampling profiler's "[prof]" blocks in a pikmin_log.txt into 
 "self": samples whose last game code ran in the function (including SDK and GX library code it called).
 "incl": samples with the function anywhere on the game thread's call stack.
 Percentages are of the samples where a game thread was running (not waiting).
+"gfx self" / "gfx incl" (test build 41 on): the graphics thread, in the samples where it was interpreting
+commands; percentages are of those samples.
 """
 import bisect
 import os
@@ -43,17 +45,22 @@ def main():
         m = re.match(r'\[prof\] begin "(.*)" \((.*)\): (\d+) samples over (\d+) s; running:(.*?) waiting (\d+)%, no thread (\d+)%', line)
         if m:
             cur = dict(section=m.group(1), why=m.group(2), samples=int(m.group(3)), secs=int(m.group(4)),
-                       threads=m.group(5).strip().rstrip(","), waiting=int(m.group(6)), nothread=int(m.group(7)), self={}, incl={})
+                       threads=m.group(5).strip().rstrip(","), waiting=int(m.group(6)), nothread=int(m.group(7)), self={}, incl={},
+                       gfxbusy=0, gfx_self={}, gfx_incl={})
             continue
-        m = re.match(r"\[prof\] (self|incl) (\d+) (?:0x)?([0-9a-fA-F]+)", line)
+        m = re.match(r"\[prof\] gfx busy (\d+) of (\d+) samples", line)
         if m and cur is not None:
+            cur["gfxbusy"] = int(m.group(1))
+            continue
+        m = re.match(r"\[prof\] (gfx self|gfx incl|self|incl) (\d+) (?:0x)?([0-9a-fA-F]+)", line)
+        if m and cur is not None:
+            kind = m.group(1).replace(" ", "_")
             count, addr = int(m.group(2)), int(m.group(3), 16)
-            if m.group(1) == "self":
+            if kind.endswith("self"):
                 name = fn_of_pc(addr)
-                cur["self"][name] = cur["self"].get(name, 0) + count
             else:
                 name = descr.get(addr) or fn_of_pc(addr)
-                cur["incl"][name] = cur["incl"].get(name, 0) + count
+            cur[kind][name] = cur[kind].get(name, 0) + count
             continue
         if line.startswith("[prof] end") and cur is not None:
             blocks.append(cur)
@@ -61,8 +68,8 @@ def main():
 
     allnames = set()
     for b in blocks:
-        allnames.update(b["self"].keys())
-        allnames.update(b["incl"].keys())
+        for kind in ("self", "incl", "gfx_self", "gfx_incl"):
+            allnames.update(b[kind].keys())
     pretty = demangle(list(allnames))
 
     for b in blocks:
@@ -74,6 +81,13 @@ def main():
             items = sorted(b[kind].items(), key=lambda kv: -kv[1])[:top]
             for name, count in items:
                 print(f"    {100.0 * count / running:5.1f}%  {pretty.get(name, name)}")
+        if b["gfxbusy"]:
+            print(f'  graphics thread: interpreting commands in {b["gfxbusy"]} samples ({100 * b["gfxbusy"] // max(b["samples"], 1)}%)')
+            for kind in ("gfx_self", "gfx_incl"):
+                print(f"  {kind.replace('_', ' ')}:")
+                items = sorted(b[kind].items(), key=lambda kv: -kv[1])[:top]
+                for name, count in items:
+                    print(f"    {100.0 * count / b['gfxbusy']:5.1f}%  {pretty.get(name, name)}")
         print()
 
 

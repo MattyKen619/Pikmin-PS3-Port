@@ -319,8 +319,10 @@ public:
 	virtual void copy(const CopyInfo& info) { (void)info; }
 	virtual void drawDone() { }                         // BP 0x45: raise the PE finish interrupt
 	virtual void token(u16 value, bool interrupt) { (void)value; (void)interrupt; } // BP 0x47/0x48
+	// A BP register was loaded with a new value (or one whose write acts: draw done, a copy, ...).
 	virtual void bpWritten(u32 reg, u32 value) { (void)reg; (void)value; }
-	// XF memory or registers [address, address + count) were loaded (after the values are in State::xf)
+	// XF memory or registers [address, address + count) were loaded, changing at least one (after the values
+	// are in State::xf)
 	virtual void xfWritten(u32 address, u32 count) { (void)address; (void)count; }
 	virtual void badCommand(u8 opcode, const u8* where, u32 available, bool inDisplayList)
 	{
@@ -343,7 +345,8 @@ struct State {
 struct Stats {
 	u64 commands, draws, vertices, displayLists, displayListBytes;
 	u64 cpLoads, xfLoads, bpLoads, indexedLoads;
-	u64 xfSetupLoads; // XF loads that reached lights or registers (0x600 and up), not only matrices
+	u64 cpUnchanged, xfUnchanged, bpUnchanged; // loads that changed nothing (not passed on: loadBp)
+	u64 xfSetupLoads; // XF loads that changed lights or registers (0x600 and up), not only matrices
 	u64 badCommands, memoryFailures, nestedDisplayLists, xfOutOfRange, vertexBufferOverflows;
 	u64 copiesToXfb, copiesToTexture, drawDones, tokens;
 	u32 primitives;  // bit (opcode >> 3) & 7 per primitive type seen
@@ -357,7 +360,13 @@ public:
 	~CommandProcessor();
 
 	void setMemory(Memory* memory) { mMemory = memory; }
-	void setListener(Listener* listener) { mListener = listener; }
+	void setListener(Listener* listener)
+	{
+		mListener = listener;
+		mRegs     = listener;
+	}
+	// Where register loads go (Listener::bpWritten, xfWritten), if not to the listener (after setListener).
+	void setRegisterListener(Listener* listener) { mRegs = listener; }
 
 	// The FIFO: bytes in the order the CPU wrote them (values are written big-endian).
 	void write8(u32 value);
@@ -427,7 +436,6 @@ private:
 	// Returns the bytes used; stops early (returning less) if the last command is incomplete and
 	// !inDisplayList.
 	u32 run(const u8* data, u32 size, bool inDisplayList, u64 base);
-	void execute(const u8* p, u32 length, bool inDisplayList);
 	void drawCommand(const u8* data, bool inDisplayList);
 	u32 drawRun(const u8* p, u32 avail);
 	void loadCp(u32 reg, u32 value);
@@ -440,6 +448,7 @@ private:
 
 	Memory* mMemory;
 	Listener* mListener;
+	Listener* mRegs; // (register loads)
 	State mState;
 	Stats mStats;
 	u32 mBpMask;

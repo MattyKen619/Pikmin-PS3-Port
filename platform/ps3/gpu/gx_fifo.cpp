@@ -217,11 +217,18 @@ public:
 
 static gpu::CommandProcessor sCp;
 static GameMemory sMemory;
+static bool sStarted;
 static gpu::Listener* sRenderer;
 static bool sRendererIsRsx;
 
 gpu::CommandProcessor& ps3gx::commandProcessor() { return sCp; }
-void ps3gx::setRenderer(gpu::Listener* renderer) { sRenderer = renderer; }
+void ps3gx::setRenderer(gpu::Listener* renderer)
+{
+	sRenderer = renderer;
+	if (sStarted) {
+		sCp.setRegisterListener(renderer);
+	}
+}
 
 namespace {
 
@@ -377,19 +384,7 @@ public:
 		}
 	}
 
-	void xfWritten(gpu::u32 address, gpu::u32 count) override
-	{
-		if (sRenderer) {
-			sRenderer->xfWritten(address, count);
-		}
-	}
-
-	void bpWritten(gpu::u32 reg, gpu::u32 value) override
-	{
-		if (sRenderer) {
-			sRenderer->bpWritten(reg, value);
-		}
-	}
+	// (Register loads go to the renderer directly: CommandProcessor::setRegisterListener in start.)
 
 	void copy(const gpu::CopyInfo& info) override
 	{
@@ -702,7 +697,6 @@ void ps3gx::forceSynchronous() { sForceSync = true; }
 // ================================================================== the CPU FIFO
 
 static __GXFifoObj* sCpuFifo;
-static bool sStarted;
 
 static void start()
 {
@@ -716,6 +710,7 @@ static void start()
 		sRenderer      = ps3rsx::start(sCp, sMemory);
 		sRendererIsRsx = sRenderer != NULL;
 	}
+	sCp.setRegisterListener(sRenderer);
 	ps3GxRing = (gpu::u8*)ps3b_memalign(128, RING_SIZE);
 	if (!ps3GxRing) {
 		ps3Log("[gpu] FAILED: no memory for the graphics command buffer\n");
@@ -874,12 +869,15 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size)
 	         "graphics: %u frames (last: %u draws, %u vertices, %u display lists; %u.%u ms per frame interpreting commands, "
 	         "%s %u%% busy); %u TEV setups, %u vertex formats, textures %s (largest %u KB); %llu bad commands, %llu memory "
 	         "failures (%u textures; checked 1 frame in %d), %u unnoted and %u ambiguous texture addresses; %llu draws, "
-	         "%llu draw-done signals; %s, game waited for room %u times; %s",
+	         "%llu draw-done signals; %s, game waited for room %u times; register loads that changed nothing (not passed on): "
+	         "%llu of %llu BP, %llu of %llu XF, %llu of %llu CP; %s",
 	         (unsigned)sFrames, sLastDraws, sLastVerts, sLastDls, (unsigned)(perFrameUs / 1000), (unsigned)(perFrameUs % 1000 / 100),
 	         sThreaded ? "graphics thread" : "game thread", busy, sTevSetups.count, sVertexFormats.count,
 	         formats[0] ? formats : "none", sMaxTextureSize >> 10, (unsigned long long)st.badCommands,
 	         (unsigned long long)st.memoryFailures, sTextureFailures, (int)CHECK_EVERY, sUnnoted, sAmbiguous,
-	         (unsigned long long)st.draws, (unsigned long long)st.drawDones, pending, sProducerWaits, trace);
+	         (unsigned long long)st.draws, (unsigned long long)st.drawDones, pending, sProducerWaits,
+	         (unsigned long long)st.bpUnchanged, (unsigned long long)st.bpLoads, (unsigned long long)st.xfUnchanged,
+	         (unsigned long long)st.xfLoads, (unsigned long long)st.cpUnchanged, (unsigned long long)st.cpLoads, trace);
 }
 
 extern "C" void ps3RsxStatus(char* buf, unsigned int size) { ps3rsx::status(buf, size); }
