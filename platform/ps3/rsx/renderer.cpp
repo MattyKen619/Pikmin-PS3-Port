@@ -487,8 +487,15 @@ void Renderer::release()
 	}
 	for (size_t i = 0; i < mRetired.size();) {
 		if ((int)(reached - mRetired[i].fence) >= 0) {
-			mTextureBytes -= mRetired[i].tex->bytes;
-			mDev.destroyTexture(mRetired[i].tex);
+			// (kept for a new texture of the same size, a few of them: frame buffer copies come in the same sizes
+			// every frame, and allocating RSX memory each time cost about 3% of the graphics thread in test
+			// build 43's Forest Navel)
+			if (mSpareTextures.size() < (size_t)SPARE_TEXTURES) {
+				mSpareTextures.push_back(mRetired[i].tex);
+			} else {
+				mTextureBytes -= mRetired[i].tex->bytes;
+				mDev.destroyTexture(mRetired[i].tex);
+			}
 			mRetired[i] = mRetired.back();
 			mRetired.pop_back();
 		} else {
@@ -771,11 +778,11 @@ const Texture* Renderer::lookupTexture(u32 map, Sampler& sampler)
 		return e.tex;
 	}
 	gpu::PhaseScope decode(gpu::GFX_TEXTURES);
-	Texture* t = mDev.createTexture(k.width, k.height);
+	Texture* t = newTexture(k.width, k.height);
 	if (!t) {
 		evictTextures();
 		release();
-		t = mDev.createTexture(k.width, k.height);
+		t = newTexture(k.width, k.height);
 		if (!t) {
 			log("[rsx] out of texture memory (%u KB in use)\n", mTextureBytes >> 10);
 			return missingTexture();
@@ -2176,11 +2183,11 @@ void Renderer::copyToTexture(const gpu::CopyInfo& info)
 		}
 		mCopyProgramReady[mode][in] = true;
 	}
-	Texture* t = mDev.createTexture(w, h);
+	Texture* t = newTexture(w, h);
 	if (!t) {
 		evictTextures();
 		release();
-		t = mDev.createTexture(w, h);
+		t = newTexture(w, h);
 		if (!t) {
 			log("[rsx] out of memory for a frame buffer copy (%ux%u)\n", w, h);
 			return;
@@ -2340,11 +2347,41 @@ void Renderer::endFrame()
 }
 
 // Textures not used in the last two frames go when the decoded textures take more than the budget.
+// A texture: a spare of that size (released by the RSX), or a new one. NULL: no memory.
+Texture* Renderer::newTexture(u32 width, u32 height)
+{
+	for (size_t i = 0; i < mSpareTextures.size(); i++) {
+		Texture* t = mSpareTextures[i];
+		if (t->width == width && t->height == height) {
+			mSpareTextures[i] = mSpareTextures.back();
+			mSpareTextures.pop_back();
+			mTextureBytes -= t->bytes; // (counted again by the caller)
+			return t;
+		}
+	}
+	Texture* t = mDev.createTexture(width, height);
+	if (!t && !mSpareTextures.empty()) {
+		freeSpareTextures();
+		t = mDev.createTexture(width, height);
+	}
+	return t;
+}
+
+void Renderer::freeSpareTextures()
+{
+	for (size_t i = 0; i < mSpareTextures.size(); i++) {
+		mTextureBytes -= mSpareTextures[i]->bytes;
+		mDev.destroyTexture(mSpareTextures[i]);
+	}
+	mSpareTextures.clear();
+}
+
 void Renderer::evictTextures()
 {
 	if (mTextureBytes <= TEXTURE_BUDGET) {
 		return;
 	}
+	freeSpareTextures();
 	for (Map<TexKey, TexEntry>::iterator it = mTextures.begin(); it != mTextures.end() && mTextureBytes > TEXTURE_BUDGET * 3 / 4;) {
 		if (it->second.usedFrame + 2 <= mFrame) {
 			retire(it->second.tex);

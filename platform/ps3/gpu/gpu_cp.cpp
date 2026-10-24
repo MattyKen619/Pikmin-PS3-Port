@@ -52,6 +52,8 @@ CommandProcessor::CommandProcessor()
     , mBpMask(0xFFFFFF)
     , mDisplayListDepth(0)
     , mRuns(false)
+    , mRunsOk(false)
+    , mDetail(VERTICES_DECODED)
     , mPendingBuf(NULL)
     , mPending(0)
     , mPendingCap(0)
@@ -143,6 +145,10 @@ void CommandProcessor::write(const u8* data, u32 size)
 {
 	const u64 base = mReceived;
 	mReceived += size;
+	// (what the listener wants is asked once a write, not at every draw and display list call: several virtual
+	// calls each, about 1% of the graphics thread in test build 43)
+	mDetail  = mListener ? mListener->vertexDetail() : VERTICES_NONE;
+	mRunsOk  = mListener && mDetail == VERTICES_NONE && mListener->drawRuns();
 	u32 pos = 0;
 	if (mPending) {
 		// Complete the command held from the last write with exactly the bytes it still needs.
@@ -536,7 +542,7 @@ void CommandProcessor::callDisplayList(u32 address, u32 size)
 		__builtin_prefetch(list + at);
 	}
 	mDisplayListDepth++;
-	mRuns = mListener && mListener->drawRuns() && mListener->vertexDetail() == VERTICES_NONE;
+	mRuns = mRunsOk;
 	run(list, size, true, 0);
 	mRuns = false;
 	mDisplayListDepth--;
@@ -1204,7 +1210,7 @@ void CommandProcessor::drawCommand(const u8* data, bool inDisplayList)
 	mStats.draws++;
 	mStats.vertices += count;
 	mStats.primitives |= 1u << ((op >> 3) & 7);
-	const VertexDetail detail = mListener ? mListener->vertexDetail() : VERTICES_NONE;
+	const VertexDetail detail = (VertexDetail)mDetail;
 	if (detail != VERTICES_NONE) {
 		decodeVertices(L, data + 3, count, detail == VERTICES_DECODED);
 	}

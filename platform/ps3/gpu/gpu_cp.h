@@ -474,6 +474,8 @@ private:
 	u32 mBpMask;
 	int mDisplayListDepth;
 	bool mRuns; // (the listener takes draw runs, in the display list running)
+	bool mRunsOk; // (the listener takes draw runs: asked at each write)
+	u32 mDetail;  // (VertexDetail the listener wants: asked at each write)
 
 	// partial command from the FIFO
 	u8* mPendingBuf;

@@ -267,6 +267,7 @@ extern "C" u8* ps3AramRange(u32 address, u32 size)
 	}
 	return sAram + address;
 }
+extern "C" u32 ps3AramSize(void) { return ARAM_SIZE; }
 void ARQInit(void) { }
 
 extern "C" void ps3DspNoteAramWrite(u32 dest, u32 length, int stop); // (dsp_hle.cpp)
@@ -328,7 +329,9 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
 			if (owner == JAUDIO_LOADER) {
 				waitForVoices(dest, length);
 			}
-			ps3DspNoteAramWrite(dest, length, owner == JAUDIO_LOADER);
+			// (any write: test build 43's log showed JAudio's ARAM heap compaction, which moves sound banks down
+			// when one is freed, also writing over voices still playing)
+			ps3DspNoteAramWrite(dest, length, 1);
 			memcpy(sAram + dest, (void*)(uptr)source, length);
 		}
 	} else {

@@ -274,6 +274,8 @@ private:
 	void clearEfb(const gpu::CopyInfo& info);
 	void endFrame();
 	void evictTextures();
+	Texture* newTexture(u32 width, u32 height);
+	void freeSpareTextures();
 
 	gpu::CommandProcessor& mCp;
 	gpu::Memory& mMem;
@@ -298,6 +300,8 @@ private:
 	u32 mFrameFence; // the fence after the last frame
 	Vec<Marker> mMarkers;
 	Vec<Retired> mRetired;
+	enum { SPARE_TEXTURES = 8 };
+	Vec<Texture*> mSpareTextures; // (released by the RSX, kept for reuse: newTexture)
 
 	// batch
 	struct Batch {

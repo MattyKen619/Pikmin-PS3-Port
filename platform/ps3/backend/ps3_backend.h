@@ -91,6 +91,13 @@ typedef unsigned int (*ps3b_audio_pull_fn)(float* dst, unsigned int frames);
 void ps3b_audio_start(ps3b_audio_pull_fn pull); // loads the audio module and starts playing (once)
 void ps3b_audio_shutdown(void);                 // stops the port before the process exits
 
+// ---- the SPU sound mixer (ps3_spu.cpp; platform/ps3/spu/dsp_spu.cpp)
+// Starts it with the shared block at `shared`; `on_done` runs on a PPU thread of its own after each sub-frame
+// it finishes. Returns 0, or an lv2 error code with *failed_step naming the call that failed.
+int ps3b_dsp_spu_start(unsigned int shared, void (*on_done)(void), const char** failed_step);
+void ps3b_dsp_spu_wake(void); // after more sub-frames were asked for
+int ps3b_dsp_spu_stop(void);  // stops it for good
+
 // ---- controllers
 enum {
 	PS3B_BTN_LEFT = 1 << 0,

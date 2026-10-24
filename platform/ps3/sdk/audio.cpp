@@ -544,51 +544,90 @@ static int commandLength(u32 id)
 // some waited 130-420 ms: the graphics thread's own long jobs (the minute's check frame, a recorded frame's
 // picture written to the USB drive) held them up, and the sound stuttered. A rescue thread now looks every
 // millisecond and mixes a sub-frame that has waited more than 2 ms itself.
+//
+// Test build 44: the mixing moved to an SPU (platform/ps3/spu/dsp_spu.cpp). Test build 43's log showed it at
+// 250-300 us per sub-frame, 10-12% of the time, taken from the graphics thread, which limits the frame rate in
+// the busiest places. Mail 0 now only counts the sub-frame in the block shared with the SPU and wakes it; when
+// the SPU has mixed it, a PPU thread (ps3_spu.cpp) raises the DSP's interrupt. The rescue thread watches the
+// SPU: if a sub-frame is not done after 100 ms, the SPU is stopped and the PPU mixes from then on, as before.
+// PIKMIN/dsp_ppu.txt: mix on the PPU (the graphics thread) as in test build 43.
 extern "C" int ps3GxThreaded(void); // gx_fifo.cpp: whether there is a graphics thread
 extern "C" void ps3GxWake(void);     // gx_fifo.cpp: wakes it if it waits for work
+// dsp_hle.cpp: the block shared with the SPU mixer
+extern "C" u32 ps3DspSharedAddress(void);
+extern "C" void ps3DspOnSpu(int on);
+extern "C" void ps3DspSpuAsk(u32 asked);
+extern "C" u32 ps3DspSpuDone(void);
+extern "C" void ps3DspSpuLog(void);
+extern "C" void ps3DspTakeOverFromSpu(u32 ofFrame);
 
-static unsigned int sMixMutex;            // (held while a sub-frame is mixed, or a command changes the set-up)
+enum { MIX_SOUND_THREAD, MIX_GRAPHICS, MIX_SPU };
+
+static unsigned int sMixMutex;            // (held while the PPU mixes a sub-frame, or a command changes the set-up)
 static bool sMixMutexOk;
-static volatile u32 sMixAsked, sMixDone;  // sub-frames asked for, and mixed
-static int sMixAllowed = -1;              // (-1: not decided yet)
+static volatile u32 sMixAsked, sMixDone;  // sub-frames asked for, and mixed (their interrupts raised)
+static volatile int sMixMode = -1;        // (-1: not decided yet)
 static unsigned long long sMixAskedTb;    // when the last one was asked for
-static unsigned long long sMixWaitTicks, sMixWaitMax; // from asked to started (diagnostics, ps3AudioStatus)
+static unsigned long long sMixWaitTicks, sMixWaitMax; // from asked to started (PPU) or done (SPU): diagnostics, ps3AudioStatus
 static u32 sMixWaits, sMixRescued;
+static u32 sFrameAsked;                   // sMixAsked when the frame going on started (command 0x82)
+static u32 sSpuCommandWaits;              // commands that waited for the SPU to finish a sub-frame
+static u32 sSpuLateEvents;                // sub-frames the SPU finished whose interrupt the rescue thread raised
 
 static void mixRescueThread(void*);
+static void spuSubframeDone(void);
 
-static bool mixAllowed()
+static bool dataFile(const char* name)
 {
-	if (sMixAllowed < 0) {
-		sMixAllowed = 0;
-		bool sync   = false;
-		if (ps3b_data_root()) {
-			char path[256];
-			snprintf(path, sizeof(path), "%s/dsp_sync.txt", ps3b_data_root());
-			sync = ps3b_file_exists(path) != 0;
-		}
+	if (!ps3b_data_root()) {
+		return false;
+	}
+	char path[256];
+	snprintf(path, sizeof(path), "%s/%s", ps3b_data_root(), name);
+	return ps3b_file_exists(path) != 0;
+}
+
+// Where the sub-frames are mixed (decided at the first DSP command).
+static int mixMode()
+{
+	if (sMixMode < 0) {
+		int mode        = MIX_SOUND_THREAD;
+		const bool sync = dataFile("dsp_sync.txt");
+		const bool ppu  = dataFile("dsp_ppu.txt");
 		if (ps3b_mutex_create(&sMixMutex) == 0) {
 			sMixMutexOk = true;
-			sMixAllowed = sync ? 0 : 1;
-			if (sMixAllowed && ps3b_thread_create(mixRescueThread, NULL, 1000, 0x10000, "pikmin_dsp_rescue") != 0) {
-				sMixAllowed = 0; // (without it, a sub-frame could wait too long)
+			// (without the rescue thread, a sub-frame could wait too long, or a stopped SPU go unnoticed)
+			if (!sync && ps3b_thread_create(mixRescueThread, NULL, 1000, 0x10000, "pikmin_dsp_rescue") == 0) {
+				mode = MIX_GRAPHICS;
+				if (!ppu) {
+					const char* step = "";
+					const int err    = ps3b_dsp_spu_start(ps3DspSharedAddress(), spuSubframeDone, &step);
+					if (err == 0) {
+						mode = MIX_SPU;
+						ps3DspOnSpu(1);
+					} else {
+						ps3Log("[ps3] audio: the SPU mixer did not start (%s: error 0x%08x)\n", step, (unsigned)err);
+					}
+				}
 			}
 		}
-		ps3Log("[ps3] audio: DSP sub-frames are mixed %s\n", sMixAllowed > 0 ? "by the graphics thread" : "on the sound thread");
+		sMixMode = mode;
+		ps3Log("[ps3] audio: DSP sub-frames are mixed %s\n",
+		       mode == MIX_SPU ? "on an SPU" : mode == MIX_GRAPHICS ? "by the graphics thread" : "on the sound thread");
 	}
-	return sMixAllowed > 0;
+	return sMixMode;
 }
 
 // (graphics thread)
-extern "C" int ps3DspMixPending(void) { return sMixDone != sMixAsked; }
+extern "C" int ps3DspMixPending(void) { return sMixMode == MIX_GRAPHICS && sMixDone != sMixAsked; }
 
-// Mixes the sub-frames asked for (graphics thread, rescue thread). Returns how many.
+// The PPU mixes the sub-frames asked for (graphics thread, rescue thread). Returns how many.
 static u32 mixAsked()
 {
 	u32 mixed = 0;
 	for (;;) {
 		ps3b_mutex_lock(sMixMutex);
-		if (sMixDone == sMixAsked) {
+		if (sMixMode == MIX_SPU || sMixDone == sMixAsked) {
 			ps3b_mutex_unlock(sMixMutex); // (the other mixing thread got to it first)
 			return mixed;
 		}
@@ -606,27 +645,109 @@ static u32 mixAsked()
 
 extern "C" void ps3DspMixRun(void)
 {
-	if (sMixDone != sMixAsked) {
+	if (sMixMode == MIX_GRAPHICS && sMixDone != sMixAsked) {
 		mixAsked();
+	}
+}
+
+// The SPU finished one or more sub-frames (its event thread; the rescue thread if that is late).
+static void spuSubframeDone(void)
+{
+	u32 raise = 0;
+	ps3b_mutex_lock(sMixMutex);
+	if (sMixMode == MIX_SPU) {
+		const u32 done = ps3DspSpuDone();
+		if (done != sMixDone && done - sMixDone <= sMixAsked - sMixDone) {
+			raise    = done - sMixDone;
+			sMixDone = done;
+			if (done == sMixAsked) {
+				const unsigned long long wait = ps3b_timebase() - sMixAskedTb;
+				sMixWaitTicks += wait;
+				sMixWaitMax = wait > sMixWaitMax ? wait : sMixWaitMax;
+				sMixWaits++;
+			}
+		}
+		ps3DspSpuLog();
+	}
+	ps3b_mutex_unlock(sMixMutex);
+	while (raise--) {
+		ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+	}
+}
+
+// The SPU has not finished a sub-frame for 100 ms: stop it, and mix on the PPU from here on.
+static void spuGiveUp(void)
+{
+	u32 raise = 0;
+	ps3b_mutex_lock(sMixMutex);
+	if (sMixMode != MIX_SPU) {
+		ps3b_mutex_unlock(sMixMutex);
+		return;
+	}
+	const int err  = ps3b_dsp_spu_stop();
+	const u32 done = ps3DspSpuDone();
+	if (done - sMixDone <= sMixAsked - sMixDone) {
+		raise    = done - sMixDone;
+		sMixDone = done;
+	}
+	ps3DspSpuLog();
+	ps3DspTakeOverFromSpu(sMixDone - sFrameAsked);
+	sMixMode = ps3GxThreaded() ? MIX_GRAPHICS : MIX_SOUND_THREAD;
+	ps3Log("[ps3] FAILED: the SPU mixer stopped answering (%u of %u sub-frames done; stopped: 0x%x); the %s mixes from now on\n",
+	       (unsigned)done, (unsigned)sMixAsked, (unsigned)err, sMixMode == MIX_GRAPHICS ? "graphics thread" : "sound thread");
+	ps3b_mutex_unlock(sMixMutex);
+	while (raise--) {
+		ps3RaiseInterrupt(__OS_INTERRUPT_DSP_DSP);
+	}
+	if (sMixMode == MIX_GRAPHICS) {
+		ps3GxWake();
 	}
 }
 
 static void mixRescueThread(void*)
 {
-	const unsigned long long late = ps3b_timebase_freq() * 2 / 1000;
+	const unsigned long long freq = ps3b_timebase_freq();
+	const unsigned long long late = freq * 2 / 1000, spuLate = freq / 10;
 	for (;;) {
 		ps3b_sleep_us(1000);
-		if (sMixDone != sMixAsked && ps3b_timebase() - sMixAskedTb > late) {
+		if (sMixDone == sMixAsked) {
+			continue;
+		}
+		const unsigned long long age = ps3b_timebase() - sMixAskedTb;
+		if (sMixMode == MIX_SPU) {
+			if (ps3DspSpuDone() == sMixAsked) {
+				if (age > late) {
+					sSpuLateEvents++;
+					spuSubframeDone(); // (done, but its event thread has not run)
+				}
+			} else if (age > spuLate) {
+				spuGiveUp();
+			}
+		} else if (age > late) {
 			sMixRescued += mixAsked();
 		}
+	}
+}
+
+// Commands change what the SPU reads as it mixes: they wait until it has finished the sub-frames asked for.
+static void waitForSpu()
+{
+	if (ps3DspSpuDone() == sMixAsked) {
+		return;
+	}
+	sSpuCommandWaits++;
+	for (int i = 0; i < 2000 && sMixMode == MIX_SPU && ps3DspSpuDone() != sMixAsked; i++) {
+		ps3b_sleep_us(50); // (up to 100 ms; then the rescue thread takes over)
 	}
 }
 
 static void runCommand()
 {
 	u32 id = sCmd[0] >> 24;
-	// (not while a sub-frame is being mixed)
-	mixAllowed();
+	if (mixMode() == MIX_SPU) {
+		waitForSpu();
+	}
+	// (not while the PPU mixes a sub-frame)
 	const bool locked = sMixMutexOk;
 	if (locked) {
 		ps3b_mutex_lock(sMixMutex);
@@ -637,6 +758,7 @@ static void runCommand()
 	if (id == 0x82) {
 		sSubframesLeft = (sCmd[0] >> 16) & 0xFF;
 		sDspFrames++;
+		sFrameAsked = sMixAsked;
 		ps3DspStartFrame(sSubframesLeft, sCmd[0] & 0xFFFF, sCmd[1], sCmd[2]);
 	}
 	if (locked) {
@@ -698,7 +820,19 @@ void DSPSendMailToDSP(u32 mail)
 			if (sSubframesLeft > 0) {
 				sSubframesLeft--;
 				sDspSyncs++;
-				if (mixAllowed() && ps3GxThreaded()) {
+				if (mixMode() == MIX_SPU) {
+					ps3b_mutex_lock(sMixMutex);
+					if (sMixMode == MIX_SPU) {
+						sMixAskedTb = ps3b_timebase();
+						sMixAsked   = sMixAsked + 1;
+						ps3DspSpuAsk(sMixAsked);
+						ps3b_mutex_unlock(sMixMutex);
+						ps3b_dsp_spu_wake();
+						return;
+					}
+					ps3b_mutex_unlock(sMixMutex); // (it stopped answering meanwhile)
+				}
+				if (sMixMode == MIX_GRAPHICS && ps3GxThreaded()) {
 					ps3b_mutex_lock(sMixMutex);
 					sMixAskedTb = ps3b_timebase();
 					sMixAsked   = sMixAsked + 1;
@@ -731,16 +865,23 @@ void DSPAssertInt(void) { }
 
 extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 {
-	char voices[256];
+	char voices[384];
 	ps3DspStatus(voices, sizeof(voices));
-	char mixWait[128] = "";
+	char mixWait[192] = "";
 	if (sMixWaits) {
 		// how long sub-frames waited for the graphics thread to start on them (since the last report)
 		const unsigned long long freq = ps3b_timebase_freq();
 		const u32 n = sMixWaits;
-		snprintf(mixWait, sizeof(mixWait), ", mixed by the graphics thread after %u us on average (longest %u us; %u by the rescue thread)",
-		         n && freq ? (unsigned)(sMixWaitTicks * 1000000ULL / freq / n) : 0u, freq ? (unsigned)(sMixWaitMax * 1000000ULL / freq) : 0u,
-		         (unsigned)sMixRescued);
+		const unsigned avg = n && freq ? (unsigned)(sMixWaitTicks * 1000000ULL / freq / n) : 0u;
+		const unsigned max = freq ? (unsigned)(sMixWaitMax * 1000000ULL / freq) : 0u;
+		if (sMixMode == MIX_SPU) {
+			// (from mail 0 to the interrupt)
+			snprintf(mixWait, sizeof(mixWait), ", each done by the SPU %u us after it was asked for on average (longest %u us; %u commands waited, %u late)",
+			         avg, max, (unsigned)sSpuCommandWaits, (unsigned)sSpuLateEvents);
+		} else {
+			snprintf(mixWait, sizeof(mixWait), ", mixed by the graphics thread after %u us on average (longest %u us; %u by the rescue thread)", avg, max,
+			         (unsigned)sMixRescued);
+		}
 		sMixWaitTicks = 0;
 		sMixWaitMax   = 0;
 		sMixWaits     = 0;

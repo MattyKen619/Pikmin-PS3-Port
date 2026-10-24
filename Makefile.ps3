@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 43
+TEST_BUILD := 44
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -106,7 +106,7 @@ GFX_PROFILED     := $(addprefix platform/ps3/gpu/,gpu_cp.cpp gpu_xf.cpp gpu_tex.
 GFX_HOOK_EXCLUDE := be16,be32,bits,readComp,readColor,component,element,asFloat,selectF,clamp01,clampi,maxf,sqrtF,alignUp,cover
 GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),sameBytes,tableSlot,offsetOf,rgb565,rgb5a3,ia8,c3to8,c4to8,c5to8,c6to8,forEachPart,operator,checkStop,rotl
 GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),bindAttr,xfWritten,cacheFollow,cacheVariant,setDeviceCull,reserve,checked,missingTexture
-GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),loadBp,loadCp,loadXf,loadIndexed,bpWritten,bpUse,ioOffset,xfSetupGroups,setupLights,setupPosts
+GFX_HOOK_EXCLUDE := $(GFX_HOOK_EXCLUDE),loadBp,loadCp,loadXf,loadIndexed,bpWritten,bpUse,ioOffset,xfSetupGroups,setupLights,setupPosts,tevRegFromBp,newTexture
 GFX_PROFILE      := -finstrument-functions -finstrument-functions-exclude-file-list=.h \
                     -finstrument-functions-exclude-function-list=$(GFX_HOOK_EXCLUDE) -include platform/ps3/include/ps3/gfx_hooks.h -g1
 $(call objs_of,$(GFX_PROFILED)): PLATFORM_CXXFLAGS += $(GFX_PROFILE)
@@ -178,6 +178,27 @@ $(GENDIR)/passthrough_vpo.h: platform/ps3/rsx/passthrough.vp tools/ps3/bin2h.py
 	@echo $<
 	@$(PS3DEV)/bin/cgcomp -v -a $< $(GENDIR)/passthrough.vpo
 	@python3 tools/ps3/bin2h.py $(GENDIR)/passthrough.vpo kPassthroughVpo $@
+
+# The SPU sound mixer (platform/ps3/spu/dsp_spu.cpp, test build 44): an SPU program, built into the ELF as an
+# array (build/ps3/gen/dsp_spu_elf.h) that platform/ps3/backend/ps3_spu.cpp starts.
+SPU_CXX      := $(PS3DEV)/spu/bin/spu-g++
+SPU_STRIP    := $(PS3DEV)/spu/bin/spu-strip
+SPU_DIR      := $(BUILD)/spu
+SPU_CXXFLAGS := -O2 -std=gnu++14 -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections -Wall -Wno-unused-function \
+                -Iplatform/ps3/include -Iplatform/ps3/sdk -I$(PSL1GHT)/spu/include
+$(SPU_DIR)/dsp_spu.elf: platform/ps3/spu/dsp_spu.cpp Makefile.ps3
+	@mkdir -p $(SPU_DIR)
+	@echo $<
+	@$(SPU_CXX) $(SPU_CXXFLAGS) -MMD -MP -MF $(SPU_DIR)/dsp_spu.d -MT $@ $< -L$(PSL1GHT)/spu/lib -lsputhread -Wl,--gc-sections -o $@
+
+$(GENDIR)/dsp_spu_elf.h: $(SPU_DIR)/dsp_spu.elf tools/ps3/bin2h.py
+	@mkdir -p $(GENDIR)
+	@$(SPU_STRIP) -o $(SPU_DIR)/dsp_spu_stripped.elf $<
+	@python3 tools/ps3/bin2h.py $(SPU_DIR)/dsp_spu_stripped.elf ps3_dsp_spu_elf $@ 128
+
+$(OBJDIR)/platform/ps3/backend/ps3_spu.cpp.o: $(GENDIR)/dsp_spu_elf.h
+$(OBJDIR)/platform/ps3/backend/ps3_spu.cpp.o: BACKEND_CXXFLAGS += -I$(GENDIR)
+-include $(SPU_DIR)/dsp_spu.d
 
 clean:
 	@rm -rf $(BUILD)

@@ -115,7 +115,7 @@ static void unlockS() { ps3b_mutex_unlock(sLock); }
 
 extern "C" void ps3Log(const char* fmt, ...)
 {
-	char buf[1024];
+	char buf[1536];
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
@@ -1026,7 +1026,7 @@ extern "C" void ps3ReportStack(const char* what)
 
 static void reportThreads(const char* title)
 {
-	char audio[768];
+	char audio[1024];
 	ps3AudioStatus(audio, sizeof(audio));
 	char nans[40] = "";
 	if (PS3_TRACE_NAN) {
