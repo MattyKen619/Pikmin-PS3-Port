@@ -1,6 +1,8 @@
-// PS3 port: a sampling profiler for the game's threads. 1000 times a second it looks at the thread that
-// holds the baton (os_sched.cpp): the last game code it ran (self time) and its shadow call stack
-// (inclusive time). At every game section change, every 60 seconds and on exit, it logs the busiest code
+// PS3 port: a sampling profiler for the game's threads. 250 times a second it looks at the thread that
+// holds the baton (os_sched.cpp): the last game code it ran (self time) and the return addresses on its
+// stack (inclusive time; test build 45: walked from the stack pointer the hooks note, ps3WalkStack, instead
+// of a shadow call stack kept by the hooks). While no game thread runs, it notes the last game code of the
+// one waiting ("wait": e.g. GXDrawDone or the retrace). At every game section change, every 60 seconds and on exit, it logs the busiest code
 // addresses and functions as "[prof]" lines; tools/ps3/profile_log.py turns them into tables with
 // function names (it needs the ELF of the build that wrote the log).
 //
@@ -21,20 +23,22 @@
 extern "C" {
 struct Ps3GfxHookState ps3GfxHook;
 extern volatile unsigned int ps3GfxPhase; // (gpu_cp.h: 0 is idle)
+extern unsigned long long ps3GfxStackLo, ps3GfxStackHi; // (gx_fifo.cpp)
 }
 
 namespace {
 
 enum {
 	SELF_SLOTS   = 1 << 14,
-	INCL_SLOTS   = 1 << 13,
+	INCL_SLOTS   = 1 << 14,
 	MAX_THREADS  = 32,
 	TOP_SELF     = 50,
-	TOP_INCL     = 50,
+	TOP_INCL     = 160, // (return addresses: several per function)
+	TOP_WAIT     = 12,
 	GFX_SELF_SLOTS = 1 << 12,
-	GFX_INCL_SLOTS = 1 << 11,
+	GFX_INCL_SLOTS = 1 << 12,
 	TOP_GFX_SELF = 60,
-	TOP_GFX_INCL = 50,
+	TOP_GFX_INCL = 120,
 	REPORT_EVERY = 60 * 1000, // samples
 };
 
@@ -78,6 +82,11 @@ Table<SELF_SLOTS> sSelf;
 Table<SELF_SLOTS> sIncl;
 Table<GFX_SELF_SLOTS> sGfxSelf;
 Table<GFX_INCL_SLOTS> sGfxIncl;
+Table<GFX_SELF_SLOTS> sWait;
+volatile u32 sMoves;     // samples where the baton holder had moved on since the previous one (watchdog)
+void* sMovedPc;
+void* sMovedSp;
+int sMovedThread = -1;
 u32 sGfxBusySamples;
 u32 sRunningSamples[MAX_THREADS];
 u32 sWaitingSamples;
@@ -128,6 +137,7 @@ void report(const char* why)
 	       secs, threads, (unsigned)(sWaitingSamples * 100ULL / sSamples), (unsigned)(sNoThreadSamples * 100ULL / sSamples));
 	logTop(sSelf, "self", TOP_SELF);
 	logTop(sIncl, "incl", TOP_INCL);
+	logTop(sWait, "wait", TOP_WAIT);
 	ps3Log("[prof] gfx busy %u of %u samples\n", (unsigned)sGfxBusySamples, (unsigned)sSamples);
 	logTop(sGfxSelf, "gfx self", TOP_GFX_SELF);
 	logTop(sGfxIncl, "gfx incl", TOP_GFX_INCL);
@@ -136,10 +146,26 @@ void report(const char* why)
 	sIncl.clear();
 	sGfxSelf.clear();
 	sGfxIncl.clear();
+	sWait.clear();
 	sGfxBusySamples = 0;
 	memset(sRunningSamples, 0, sizeof(sRunningSamples));
 	sWaitingSamples = sNoThreadSamples = sSamples = 0;
 	sStartedAt                                    = now;
+}
+
+// Inclusive: each return address on the stack once (recursion counts once).
+template <typename T>
+void addStack(T& t, void* const* pcs, int depth)
+{
+	for (int i = 0; i < depth; i++) {
+		bool seen = false;
+		for (int j = 0; j < i && !seen; j++) {
+			seen = pcs[j] == pcs[i];
+		}
+		if (!seen) {
+			t.add(pcs[i]);
+		}
+	}
 }
 
 void samplerThread(void*)
@@ -158,45 +184,33 @@ void samplerThread(void*)
 		sSamples++;
 		if (!ps3SchedSample(&s)) {
 			sNoThreadSamples++;
-		} else if (s.waiting) {
-			sWaitingSamples++;
 		} else {
-			if (s.thread >= 0 && s.thread < MAX_THREADS) {
-				sRunningSamples[s.thread]++;
+			if (s.thread != sMovedThread || s.pc != sMovedPc || s.sp != sMovedSp) {
+				sMoves       = sMoves + 1;
+				sMovedThread = s.thread;
+				sMovedPc     = s.pc;
+				sMovedSp     = s.sp;
 			}
-			sSelf.add(s.pc);
-			// Inclusive: each function on the stack once (recursion counts once).
-			for (int i = 0; i < s.depth; i++) {
-				bool seen = false;
-				for (int j = 0; j < i && !seen; j++) {
-					seen = s.fns[j] == s.fns[i];
+			if (s.waiting) {
+				sWaitingSamples++;
+				sWait.add(s.pc);
+			} else {
+				if (s.thread >= 0 && s.thread < MAX_THREADS) {
+					sRunningSamples[s.thread]++;
 				}
-				if (!seen) {
-					sIncl.add(s.fns[i]);
-				}
+				sSelf.add(s.pc);
+				sIncl.add(s.pc); // (the function itself: the stack holds its callers)
+				addStack(sIncl, s.pcs, s.depth);
 			}
 		}
 		// The graphics thread, while it interprets commands.
 		if (ps3GfxPhase != 0) {
 			sGfxBusySamples++;
 			sGfxSelf.add(ps3GfxHook.lastPc);
-			int depth = ps3GfxHook.depth;
-			if (depth > PS3_GFX_SHADOW_DEPTH) {
-				depth = PS3_GFX_SHADOW_DEPTH;
-			}
-			void* fns[PS3_GFX_SHADOW_DEPTH];
-			for (int i = 0; i < depth; i++) {
-				fns[i] = ps3GfxHook.stackFn[i];
-			}
-			for (int i = 0; i < depth; i++) {
-				bool seen = false;
-				for (int j = 0; j < i && !seen; j++) {
-					seen = fns[j] == fns[i];
-				}
-				if (!seen) {
-					sGfxIncl.add(fns[i]);
-				}
-			}
+			sGfxIncl.add(ps3GfxHook.lastPc);
+			void* pcs[PS3_SAMPLE_DEPTH];
+			const int depth = ps3WalkStack(ps3GfxHook.lastSp, ps3GfxStackLo, ps3GfxStackHi, pcs, PS3_SAMPLE_DEPTH);
+			addStack(sGfxIncl, pcs, depth);
 		}
 		if (sSamples >= REPORT_EVERY) {
 			report("1 minute");
@@ -213,6 +227,8 @@ void onExit()
 
 } // namespace
 
+extern "C" unsigned int ps3ProfilerMoves(void) { return sMoves; }
+
 extern "C" void ps3ProfilerStart(void)
 {
 	if (sStarted) {
@@ -223,6 +239,8 @@ extern "C" void ps3ProfilerStart(void)
 	sIncl.slots = INCL_SLOTS;
 	sGfxSelf.slots = GFX_SELF_SLOTS;
 	sGfxIncl.slots = GFX_INCL_SLOTS;
+	sWait.slots    = GFX_SELF_SLOTS;
+	sWait.clear();
 	sSelf.clear();
 	sIncl.clear();
 	sGfxSelf.clear();

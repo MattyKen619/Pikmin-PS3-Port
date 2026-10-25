@@ -37,6 +37,8 @@ void ps3b_cond_broadcast(unsigned int c);
 // ---- threads
 int ps3b_thread_create(void (*entry)(void*), void* arg, int priority, unsigned int stack_size, const char* name);
 void ps3b_thread_exit(void) __attribute__((noreturn));
+// The calling thread's stack: [*lo, *hi). (The profiler walks game and graphics threads' stacks within it.)
+void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi);
 
 // ---- files (read-only game data + log)
 int ps3b_file_exists(const char* path);

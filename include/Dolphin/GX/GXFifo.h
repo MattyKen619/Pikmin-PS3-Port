@@ -167,6 +167,71 @@ PS3_GX_PIPE_WRITE static inline void ps3GxPutWords(const void* src, unsigned int
 	}
 }
 
+// A whole register write (test build 45: GX_WRITE_RAS_REG and its kin, Dolphin/GX/GXData.h): one check for
+// room and one update of the write position for the command byte and its value, the value passed in a
+// register. Written as separate byte and word writes, a value read from memory (the GX library's copy of the
+// register, just stored) was read again after the command byte: the compiler must assume a byte store
+// through the ring's pointer may change any memory. Read straight after it was stored, that stalls the PPU.
+PS3_GX_PIPE_WRITE static inline void ps3GxPutReg5(unsigned int op, unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 5, 1)) {
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = (unsigned char)op;
+		p[1]             = (unsigned char)(value >> 24);
+		p[2]             = (unsigned char)(value >> 16);
+		p[3]             = (unsigned char)(value >> 8);
+		p[4]             = (unsigned char)value;
+		ps3GxWritten     = w + 5;
+	} else {
+		ps3GxWrite8(op);
+		ps3GxWrite32(value);
+	}
+}
+
+// A CP register: command byte, register, value.
+PS3_GX_PIPE_WRITE static inline void ps3GxPutReg6(unsigned int op, unsigned int reg, unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 6, 1)) {
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = (unsigned char)op;
+		p[1]             = (unsigned char)reg;
+		p[2]             = (unsigned char)(value >> 24);
+		p[3]             = (unsigned char)(value >> 16);
+		p[4]             = (unsigned char)(value >> 8);
+		p[5]             = (unsigned char)value;
+		ps3GxWritten     = w + 6;
+	} else {
+		ps3GxWrite8(op);
+		ps3GxWrite8(reg);
+		ps3GxWrite32(value);
+	}
+}
+
+// One XF register: command byte, address word (one value), value.
+PS3_GX_PIPE_WRITE static inline void ps3GxPutXfReg(unsigned int address, unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 9, 1)) {
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = 0x10;
+		p[1]             = (unsigned char)(address >> 24);
+		p[2]             = (unsigned char)(address >> 16);
+		p[3]             = (unsigned char)(address >> 8);
+		p[4]             = (unsigned char)address;
+		p[5]             = (unsigned char)(value >> 24);
+		p[6]             = (unsigned char)(value >> 16);
+		p[7]             = (unsigned char)(value >> 8);
+		p[8]             = (unsigned char)value;
+		ps3GxWritten     = w + 9;
+	} else {
+		ps3GxWrite8(0x10);
+		ps3GxWrite32(address);
+		ps3GxWrite32(value);
+	}
+}
+
 struct Ps3GxPipe8 {
 	PS3_GX_PIPE_WRITE void operator=(unsigned int value) volatile { ps3GxPut8(value); }
 };

@@ -863,6 +863,58 @@ void DSPSendMailToDSP(u32 mail)
 
 void DSPAssertInt(void) { }
 
+// ---- JAudio's own timing probes (src/jaudio/dummyprobe.c, test build 45): how long its work takes. (Wall
+// time on the thread that runs it: includes waiting for the PPU while the graphics thread shares it.)
+enum { PROBES = 16 };
+static struct {
+	const char* label;
+	unsigned long long started, total, longest;
+	u32 count;
+} sProbe[PROBES];
+
+extern "C" void ps3AudioProbe(int id, const char* label, int start)
+{
+	if ((unsigned)id >= PROBES) {
+		return;
+	}
+	const unsigned long long now = ps3b_timebase();
+	if (start) {
+		sProbe[id].label   = label;
+		sProbe[id].started = now;
+		return;
+	}
+	if (!sProbe[id].started) {
+		return;
+	}
+	const unsigned long long t = now - sProbe[id].started;
+	sProbe[id].started         = 0;
+	sProbe[id].total += t;
+	sProbe[id].longest = t > sProbe[id].longest ? t : sProbe[id].longest;
+	sProbe[id].count++;
+}
+
+// Since the last report: per probe, how many, the average and the longest (heartbeat, os_sched.cpp).
+extern "C" void ps3AudioProbeStatus(char* buf, unsigned int size)
+{
+	const unsigned long long freq = ps3b_timebase_freq();
+	int n                         = snprintf(buf, size, "JAudio's time:");
+	bool any                      = false;
+	for (int i = 0; i < PROBES && n < (int)size - 80; i++) {
+		if (!sProbe[i].count || !sProbe[i].label) {
+			continue;
+		}
+		any = true;
+		n += snprintf(buf + n, size - n, " %s %u x %u us (longest %u us);", sProbe[i].label, (unsigned)sProbe[i].count,
+		              (unsigned)(sProbe[i].total * 1000000ULL / freq / sProbe[i].count), (unsigned)(sProbe[i].longest * 1000000ULL / freq));
+		sProbe[i].count   = 0;
+		sProbe[i].total   = 0;
+		sProbe[i].longest = 0;
+	}
+	if (!any) {
+		snprintf(buf + n, size - n, " (nothing timed)");
+	}
+}
+
 extern "C" void ps3AudioStatus(char* buf, unsigned int size)
 {
 	char voices[384];

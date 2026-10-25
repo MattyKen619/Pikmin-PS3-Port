@@ -244,6 +244,9 @@ void* ps3b_memalign(unsigned int align, unsigned int size)
 }
 void ps3b_sleep_us(unsigned int usec) { usleep(usec); }
 void ps3b_log_memory(const char* when) { (void)when; }
+// (the profiler that walks the stack is not part of the host build)
+void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi) { *lo = *hi = 0; }
+
 int ps3b_thread_create(void (*entry)(void*), void* arg, int priority, unsigned int stackSize, const char* name)
 {
 	(void)priority;

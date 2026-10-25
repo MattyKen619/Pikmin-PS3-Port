@@ -142,6 +142,11 @@ extern vu16* __peReg;
 
 #define VERIF_RAS_REG(value) (__gxVerif->rasRegs[((value) & 0xFF000000) >> 24] = value)
 
+#if defined(TARGET_PS3) && defined(__cplusplus)
+// PS3 port: each register write in one go (Dolphin/GX/GXFifo.h: ps3GxPutReg5).
+#define GX_WRITE_RAS_REG(value)      ps3GxPutReg5(0x61, (u32)(value))
+#define GX_WRITE_XF_REG(addr, value) ps3GxPutXfReg(0x1000 + (addr), (u32)(value))
+#else
 #define GX_WRITE_RAS_REG(value) \
 	do {                        \
 		GX_WRITE_U8(0x61);      \
@@ -154,6 +159,7 @@ extern vu16* __peReg;
 		GX_WRITE_U32(0x1000 + (addr)); \
 		GX_WRITE_U32(value);           \
 	} while (0)
+#endif
 
 #define GET_REG_FIELD(reg, size, shift) ((int)((reg) >> (shift)) & ((1 << (size)) - 1))
 
@@ -172,6 +178,33 @@ extern vu16* __peReg;
 	do {                               \
 		GX_WRITE_U32(value);           \
 	} while (0)
+#if defined(TARGET_PS3) && defined(__cplusplus)
+#define GX_WRITE_SOME_REG2(a, b, c, addr)  \
+	do {                                   \
+		long regAddr;                      \
+		ps3GxPutReg6(a, b, (u32)(c));      \
+		regAddr = addr;                    \
+		if (regAddr >= 0 && regAddr < 4) { \
+			gx->indexBase[regAddr] = c;    \
+		}                                  \
+	} while (0)
+#define GX_WRITE_SOME_REG3(a, b, c, addr)  \
+	do {                                   \
+		long regAddr;                      \
+		ps3GxPutReg6(a, b, (u32)(c));      \
+		regAddr = addr;                    \
+		if (regAddr >= 0 && regAddr < 4) { \
+			gx->indexStride[regAddr] = c;  \
+		}                                  \
+	} while (0)
+#define GX_WRITE_SOME_REG4(a, b, c, addr) \
+	do {                                  \
+		long regAddr;                     \
+		ps3GxPutReg6(a, b, (u32)(c));     \
+		regAddr = addr;                   \
+		(void)regAddr;                    \
+	} while (0)
+#else
 #define GX_WRITE_SOME_REG2(a, b, c, addr)  \
 	do {                                   \
 		long regAddr;                      \
@@ -202,6 +235,7 @@ extern vu16* __peReg;
 		GX_WRITE_U32(c);                  \
 		regAddr = addr;                   \
 	} while (0)
+#endif
 #define GX_WRITE_XF_REG_F(addr, value)          \
 	do {                                        \
 		f32 xfData = (value);                   \

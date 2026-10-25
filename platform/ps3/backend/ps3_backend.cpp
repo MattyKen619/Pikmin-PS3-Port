@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include <ppu-lv2.h>
@@ -161,6 +162,17 @@ extern "C" int ps3b_thread_create(void (*entry)(void*), void* arg, int priority,
 	strncpy(nameBuf, name ? name : "thread", sizeof(nameBuf) - 1);
 	nameBuf[sizeof(nameBuf) - 1] = 0;
 	return sysThreadCreate(&tid, entry, arg, priority, stack_size, 0, nameBuf);
+}
+
+extern "C" void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi)
+{
+	sys_ppu_thread_stack_t info;
+	if (sysThreadGetStackInformation(&info) == 0) {
+		*lo = (unsigned long long)(uintptr_t)info.addr;
+		*hi = *lo + info.size;
+	} else {
+		*lo = *hi = 0;
+	}
 }
 
 extern "C" void ps3b_thread_exit(void)

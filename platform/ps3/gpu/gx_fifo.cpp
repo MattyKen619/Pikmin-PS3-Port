@@ -549,8 +549,14 @@ static void drain(u32 end)
 	}
 }
 
+// The graphics thread's stack, for the profiler (profiler.cpp walks it from ps3GfxHook.lastSp).
+extern "C" {
+unsigned long long ps3GfxStackLo, ps3GfxStackHi;
+}
+
 static void graphicsThread(void*)
 {
+	ps3b_thread_stack(&ps3GfxStackLo, &ps3GfxStackHi);
 	for (;;) {
 		ps3b_mutex_lock(sMutex);
 		sConsumerWaiting = 1;

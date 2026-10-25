@@ -6,8 +6,11 @@ PS3 port: turn the sampling profiler's "[prof]" blocks in a pikmin_log.txt into 
   python3 tools/ps3/profile_log.py build/ps3/pikmin.elf pikmin_log.txt [--top N]
 
 "self": samples whose last game code ran in the function (including SDK and GX library code it called).
-"incl": samples with the function anywhere on the game thread's call stack.
+"incl": samples with the function anywhere on the game thread's call stack. (Test build 45 on: return
+addresses walked from the stack, so SDK and library functions that call others show up too.)
 Percentages are of the samples where a game thread was running (not waiting).
+"waiting in" (test build 45 on): while no game thread ran, the last game code of the one waiting (GXDrawDone
+from DGXGraphics::doneRender, the retrace, ...); percentages are of the waiting samples.
 "gfx self" / "gfx incl" (test build 41 on): the graphics thread, in the samples where it was interpreting
 commands; percentages are of those samples.
 """
@@ -46,20 +49,19 @@ def main():
         if m:
             cur = dict(section=m.group(1), why=m.group(2), samples=int(m.group(3)), secs=int(m.group(4)),
                        threads=m.group(5).strip().rstrip(","), waiting=int(m.group(6)), nothread=int(m.group(7)), self={}, incl={},
-                       gfxbusy=0, gfx_self={}, gfx_incl={})
+                       gfxbusy=0, gfx_self={}, gfx_incl={}, wait={})
             continue
         m = re.match(r"\[prof\] gfx busy (\d+) of (\d+) samples", line)
         if m and cur is not None:
             cur["gfxbusy"] = int(m.group(1))
             continue
-        m = re.match(r"\[prof\] (gfx self|gfx incl|self|incl) (\d+) (?:0x)?([0-9a-fA-F]+)", line)
+        m = re.match(r"\[prof\] (gfx self|gfx incl|self|incl|wait) (\d+) (?:0x)?([0-9a-fA-F]+)", line)
         if m and cur is not None:
             kind = m.group(1).replace(" ", "_")
             count, addr = int(m.group(2)), int(m.group(3), 16)
-            if kind.endswith("self"):
-                name = fn_of_pc(addr)
-            else:
-                name = descr.get(addr) or fn_of_pc(addr)
+            # (a function's descriptor where it had just been entered, else a code address: a call site
+            # returned to, or a return address on the stack; up to test build 44 the stacks held descriptors)
+            name = descr.get(addr) or fn_of_pc(addr)
             cur[kind][name] = cur[kind].get(name, 0) + count
             continue
         if line.startswith("[prof] end") and cur is not None:
@@ -68,7 +70,7 @@ def main():
 
     allnames = set()
     for b in blocks:
-        for kind in ("self", "incl", "gfx_self", "gfx_incl"):
+        for kind in ("self", "incl", "gfx_self", "gfx_incl", "wait"):
             allnames.update(b[kind].keys())
     pretty = demangle(list(allnames))
 
@@ -81,6 +83,11 @@ def main():
             items = sorted(b[kind].items(), key=lambda kv: -kv[1])[:top]
             for name, count in items:
                 print(f"    {100.0 * count / running:5.1f}%  {pretty.get(name, name)}")
+        if b["wait"]:
+            waiting = sum(b["wait"].values()) or 1
+            print("  waiting in:")
+            for name, count in sorted(b["wait"].items(), key=lambda kv: -kv[1])[:top]:
+                print(f"    {100.0 * count / waiting:5.1f}%  {pretty.get(name, name)}")
         if b["gfxbusy"]:
             print(f'  graphics thread: interpreting commands in {b["gfxbusy"]} samples ({100 * b["gfxbusy"] // max(b["samples"], 1)}%)')
             for kind in ("gfx_self", "gfx_incl"):

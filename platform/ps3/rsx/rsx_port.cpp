@@ -173,16 +173,24 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 
 extern "C" void ps3GxRecordRequested(void); // (gx_trace.cpp)
 
+// Select records the next frame's graphics commands (up to 4 times; the game does not use Select). Test build
+// 45: always (it needed PIKMIN/test_buttons.txt before, and test build 44 asked for it without saying so).
 // Test buttons, if PIKMIN/test_buttons.txt exists (the game does not use these buttons, but a stick is easily
 // pressed in by accident). R3: the next test mode (Renderer::MODE_*). L3: textures and vertex arrays checked
 // for changes every frame, or as usual. Each press is logged, and the squares beside the picture show what is
-// on (renderer.cpp, present). Select: records the next frame.
+// on (renderer.cpp, present).
 extern "C" void ps3RsxDebugButtons(unsigned int buttons)
 {
 	static unsigned int sLast;
 	const unsigned int pressed = buttons & ~sLast;
 	sLast = buttons;
-	if (!sRenderer || !pressed || !sTestButtons) {
+	if (!sRenderer || !pressed) {
+		return;
+	}
+	if ((pressed & PS3B_BTN_SELECT) && !(buttons & PS3B_BTN_START)) {
+		ps3GxRecordRequested();
+	}
+	if (!sTestButtons) {
 		return;
 	}
 	if (pressed & PS3B_BTN_R3) {
@@ -190,9 +198,6 @@ extern "C" void ps3RsxDebugButtons(unsigned int buttons)
 	}
 	if (pressed & PS3B_BTN_L3) {
 		sRenderer->requestSwitch(gfx::Renderer::SWITCH_CHECKS);
-	}
-	if ((pressed & PS3B_BTN_SELECT) && !(buttons & PS3B_BTN_START)) {
-		ps3GxRecordRequested();
 	}
 }
 

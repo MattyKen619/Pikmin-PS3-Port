@@ -51,7 +51,7 @@ OPT       := -O2 -fno-strict-aliasing
 DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 44
+TEST_BUILD := 45
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -75,7 +75,7 @@ INSTRUMENT       := -finstrument-functions -finstrument-functions-exclude-file-l
                     -finstrument-functions-exclude-function-list=$(HOOK_EXCLUDE) -include platform/ps3/include/ps3/hooks.h -g1
 BB_HOOKS         := -fsanitize-coverage=trace-pc
 BB_DIRS          := src/sysDolphin src/sysCore src/plugPikiColin src/plugPikiOgawa src/jaudio
-BB_SKIP          := src/sysDolphin/dgxGraphics.cpp src/sysDolphin/sysNew.cpp \
+BB_SKIP          := src/sysDolphin/dgxGraphics.cpp src/sysDolphin/sysNew.cpp src/sysDolphin/texture.cpp \
                     $(addprefix src/plugPikiColin/,mapMgr.cpp dynsimulator.cpp animMgr.cpp) \
                     $(addprefix src/jaudio/,jammain_2.c dspdriver.c dspbuf.c driverinterface.c dspinterface.c aictrl.c noteon.c \
                       bankdrv.c seqsetup.c ja_calc.c oneshot.c jamosc.c)
