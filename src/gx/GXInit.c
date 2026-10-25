@@ -192,6 +192,9 @@ GXFifoObj* GXInit(void* base, u32 size)
 			regAddr = i - 12;
 		}
 	}
+#if defined(TARGET_PS3)
+	ps3GxRegsUnknown(); // (CP registers written raw above: Dolphin/GX/GXFifo.h, ps3GxPutCp)
+#endif
 	{
 		u32 reg1 = 0;
 		u32 reg2 = 0;

@@ -1016,6 +1016,7 @@ extern "C" void ps3GxStatus(char* buf, unsigned int size);
 extern "C" void ps3RsxStatus(char* buf, unsigned int size);
 extern "C" void ps3GfxPhaseStatus(char* buf, unsigned int size);
 extern "C" void ps3AudioProbeStatus(char* buf, unsigned int size);
+extern "C" void ps3ProfilerFrameStatus(char* buf, unsigned int size, float msPerFrame);
 extern "C" unsigned int ps3FramesDrawn(void);
 
 static void logStack(int index, ThreadImpl* t)
@@ -1074,6 +1075,16 @@ static void reportThreads(const char* title)
 	ps3Log("[ps3]   %s\n", gfx);
 	ps3AudioProbeStatus(gfx, sizeof(gfx));
 	ps3Log("[ps3]   %s\n", gfx);
+	{
+		// (retraces at 59.94 Hz)
+		static u32 sLastRetraces, sLastFrames;
+		const u32 retraces = ps3FrameCounter(), frames = ps3FramesDrawn();
+		const u32 dr = retraces - sLastRetraces, df = frames - sLastFrames;
+		sLastRetraces = retraces;
+		sLastFrames   = frames;
+		ps3ProfilerFrameStatus(gfx, sizeof(gfx), df ? (float)dr * 16.6833f / (float)df : 0.0f);
+		ps3Log("[ps3]   %s\n", gfx);
+	}
 	ps3b_log_memory(title);
 	for (int i = 0; i < sImplCount; i++) {
 		ThreadImpl* t = &sImpls[i];

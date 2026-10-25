@@ -476,20 +476,28 @@ u32 ps3GxWriteLimit; // (game thread) ps3GxWritten can grow to this without the 
 }
 static_assert(PS3_GX_RING_MASK == RING_MASK, "Dolphin/GX/GXFifo.h has the ring's size");
 
-// BP writes that change nothing are left out (Dolphin/GX/GXFifo.h: ps3GxPutBp). ps3GxBpKeep is filled in
+// BP, XF and CP register writes that change nothing are left out (Dolphin/GX/GXFifo.h: ps3GxPutBp). ps3GxBpKeep is filled in
 // when the ring is set up; until then every write takes the slow path, which leaves nothing out.
 extern "C" {
 unsigned long long ps3GxBpSent[256];
 unsigned int ps3GxBpGen = 1;
 unsigned int ps3GxBpMaskPending;
 unsigned char ps3GxBpKeep[256];
+unsigned long long ps3GxXfSent[256];
+unsigned int ps3GxXfGen = 1;
+unsigned long long ps3GxCpSent[256];
+unsigned int ps3GxCpGen = 1;
 
-void ps3GxBpUnknown(void)
+void ps3GxRegsUnknown(void)
 {
 	ps3GxBpGen         = ps3GxBpGen + 1;
 	ps3GxBpMaskPending = 1; // (the first BP write after a display list is not remembered: the list might end
 	                        // with a mask)
+	ps3GxXfGen = ps3GxXfGen + 1;
+	ps3GxCpGen = ps3GxCpGen + 1;
 }
+
+void ps3GxXfUnknown(void) { ps3GxXfGen = ps3GxXfGen + 1; }
 }
 
 static void initBpFilter()
@@ -498,7 +506,7 @@ static void initBpFilter()
 	for (u32 i = 0; i < sizeof(gpu::kBpActingRegs); i++) {
 		ps3GxBpKeep[gpu::kBpActingRegs[i]] = 0;
 	}
-	ps3GxBpUnknown();
+	ps3GxRegsUnknown();
 }
 static bool sLinked; // (the CPU FIFO goes to the graphics processor, not into a display list)
 static volatile u32 sPublished;    // written by the game thread

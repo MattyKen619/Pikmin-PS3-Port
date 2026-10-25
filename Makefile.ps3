@@ -49,9 +49,14 @@ OPT       := -O2 -fno-strict-aliasing
 # changing a header rebuilds every file that uses it. (Test 17 ran game code built against an older
 # Dolphin/GX/GXFifo.h: its vertex writes never reached the graphics FIFO.)
 DEPFLAGS  := -MMD -MP
-COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w
+# -msave-toc-indirect: a function that calls through pointers (virtual functions, mostly) saves its TOC pointer
+# once, in its prologue, instead of right before each call, where the reload just after a short callee hit
+# that store and stalled (test build 47). -mno-pointers-to-nested-functions: calls through pointers skip
+# loading a static chain (GCC's nested functions; nothing here uses them).
+COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w \
+             -msave-toc-indirect -mno-pointers-to-nested-functions
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 46
+TEST_BUILD := 47
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 

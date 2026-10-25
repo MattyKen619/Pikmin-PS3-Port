@@ -214,15 +214,24 @@ PS3_GX_PIPE_WRITE static inline void ps3GxPutReg6(unsigned int op, unsigned int 
 // (gpu::kBpActingRegs); 40-45% of the BP writes the GX library sends are like that (the game sets every
 // material's state again), 13,000 a frame in the Forest Navel's busiest moments. ps3GxBpSent holds the value
 // each register was last sent to the graphics processor with, and the generation it belongs to:
-// ps3GxBpUnknown starts a new one whenever the registers may have changed another way (a display list
+// ps3GxRegsUnknown starts a new one whenever the registers may have changed another way (a display list
 // called, raw writes), and the slow path does when a write may go into a display list being made. A write
 // right after the mask register is merged with the mask: it is sent, and not remembered.
+//
+// Test build 47: the same for single XF register writes (GX_WRITE_XF_REG: ps3GxPutXfReg) and CP register
+// writes (ps3GxPutCp), with generations of their own (ps3GxXfUnknown: raw writes to the XF registers, the
+// projection and the viewport).
 extern "C" {
 extern unsigned long long ps3GxBpSent[256];
 extern unsigned int ps3GxBpGen;
 extern unsigned int ps3GxBpMaskPending;
 extern unsigned char ps3GxBpKeep[256]; // 1: a write that changes nothing may be left out
-void ps3GxBpUnknown(void);
+extern unsigned long long ps3GxXfSent[256]; // XF registers 0x1000-0x10FF
+extern unsigned int ps3GxXfGen;
+extern unsigned long long ps3GxCpSent[256];
+extern unsigned int ps3GxCpGen;
+void ps3GxRegsUnknown(void); // BP, XF and CP registers (display list calls, raw writes)
+void ps3GxXfUnknown(void);   // XF registers only
 }
 
 PS3_GX_PIPE_WRITE static inline void ps3GxPutBp(unsigned int word)
@@ -255,11 +264,18 @@ PS3_GX_PIPE_WRITE static inline void ps3GxPutBp(unsigned int word)
 	}
 }
 
-// One XF register: command byte, address word (one value), value.
+// One XF register (0x1000-0x10FF): command byte, address word (one value), value. Left out if it would change
+// nothing (see ps3GxPutBp).
 PS3_GX_PIPE_WRITE static inline void ps3GxPutXfReg(unsigned int address, unsigned int value)
 {
 	const unsigned int w = ps3GxWritten;
 	if (__builtin_expect(ps3GxWriteLimit - w >= 9, 1)) {
+		const unsigned long long key = ((unsigned long long)value << 32) | ps3GxXfGen;
+		unsigned long long* sent     = &ps3GxXfSent[address & 0xFF];
+		if (*sent == key) {
+			return;
+		}
+		*sent            = key;
 		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
 		p[0]             = 0x10;
 		p[1]             = (unsigned char)(address >> 24);
@@ -272,8 +288,36 @@ PS3_GX_PIPE_WRITE static inline void ps3GxPutXfReg(unsigned int address, unsigne
 		p[8]             = (unsigned char)value;
 		ps3GxWritten     = w + 9;
 	} else {
+		ps3GxXfGen = ps3GxXfGen + 1;
 		ps3GxWrite8(0x10);
 		ps3GxWrite32(address);
+		ps3GxWrite32(value);
+	}
+}
+
+// A CP register: command byte 8, register, value. Left out if it would change nothing (see ps3GxPutBp).
+PS3_GX_PIPE_WRITE static inline void ps3GxPutCp(unsigned int reg, unsigned int value)
+{
+	const unsigned int w = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 6, 1)) {
+		const unsigned long long key = ((unsigned long long)value << 32) | ps3GxCpGen;
+		unsigned long long* sent     = &ps3GxCpSent[reg & 0xFF];
+		if (*sent == key) {
+			return;
+		}
+		*sent            = key;
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = 0x08;
+		p[1]             = (unsigned char)reg;
+		p[2]             = (unsigned char)(value >> 24);
+		p[3]             = (unsigned char)(value >> 16);
+		p[4]             = (unsigned char)(value >> 8);
+		p[5]             = (unsigned char)value;
+		ps3GxWritten     = w + 6;
+	} else {
+		ps3GxCpGen = ps3GxCpGen + 1;
+		ps3GxWrite8(0x08);
+		ps3GxWrite8(reg);
 		ps3GxWrite32(value);
 	}
 }

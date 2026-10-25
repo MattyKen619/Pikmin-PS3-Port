@@ -143,8 +143,8 @@ extern vu16* __peReg;
 #define VERIF_RAS_REG(value) (__gxVerif->rasRegs[((value) & 0xFF000000) >> 24] = value)
 
 #if defined(TARGET_PS3) && defined(__cplusplus)
-// PS3 port: each register write in one go, and BP writes that change nothing left out (Dolphin/GX/GXFifo.h:
-// ps3GxPutBp, ps3GxPutXfReg).
+// PS3 port: each register write in one go, and writes that change nothing left out (Dolphin/GX/GXFifo.h:
+// ps3GxPutBp, ps3GxPutXfReg, ps3GxPutCp; the CP ones are always command 8).
 #define GX_WRITE_RAS_REG(value)      ps3GxPutBp((u32)(value))
 #define GX_WRITE_XF_REG(addr, value) ps3GxPutXfReg(0x1000 + (addr), (u32)(value))
 #else
@@ -183,7 +183,7 @@ extern vu16* __peReg;
 #define GX_WRITE_SOME_REG2(a, b, c, addr)  \
 	do {                                   \
 		long regAddr;                      \
-		ps3GxPutReg6(a, b, (u32)(c));      \
+		ps3GxPutCp(b, (u32)(c));           \
 		regAddr = addr;                    \
 		if (regAddr >= 0 && regAddr < 4) { \
 			gx->indexBase[regAddr] = c;    \
@@ -192,7 +192,7 @@ extern vu16* __peReg;
 #define GX_WRITE_SOME_REG3(a, b, c, addr)  \
 	do {                                   \
 		long regAddr;                      \
-		ps3GxPutReg6(a, b, (u32)(c));      \
+		ps3GxPutCp(b, (u32)(c));           \
 		regAddr = addr;                    \
 		if (regAddr >= 0 && regAddr < 4) { \
 			gx->indexStride[regAddr] = c;  \
@@ -201,7 +201,7 @@ extern vu16* __peReg;
 #define GX_WRITE_SOME_REG4(a, b, c, addr) \
 	do {                                  \
 		long regAddr;                     \
-		ps3GxPutReg6(a, b, (u32)(c));     \
+		ps3GxPutCp(b, (u32)(c));          \
 		regAddr = addr;                   \
 		(void)regAddr;                    \
 	} while (0)

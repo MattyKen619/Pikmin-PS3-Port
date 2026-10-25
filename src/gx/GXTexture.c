@@ -1432,7 +1432,7 @@ void __GXGetSUTexSize(GXTexCoordID coord, u16* width, u16* height)
 void __GXSetTmemConfig(u32 arg0)
 {
 #if defined(TARGET_PS3)
-	ps3GxBpUnknown(); // (BP registers written raw below: Dolphin/GX/GXFifo.h, ps3GxPutBp)
+	ps3GxRegsUnknown(); // (BP registers written raw below: Dolphin/GX/GXFifo.h, ps3GxPutBp)
 #endif
 	switch (arg0) {
 	case 1:

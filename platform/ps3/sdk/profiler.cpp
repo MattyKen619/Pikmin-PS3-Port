@@ -39,7 +39,7 @@ enum {
 	GFX_INCL_SLOTS = 1 << 12,
 	TOP_GFX_SELF = 60,
 	TOP_GFX_INCL = 120,
-	REPORT_EVERY = 60 * 1000, // samples
+	REPORT_EVERY = 250 * 60, // samples: a minute
 };
 
 template <u32 SLOTS>
@@ -84,6 +84,8 @@ Table<GFX_SELF_SLOTS> sGfxSelf;
 Table<GFX_INCL_SLOTS> sGfxIncl;
 Table<GFX_SELF_SLOTS> sWait;
 volatile u32 sMoves;     // samples where the baton holder had moved on since the previous one (watchdog)
+// Since the last heartbeat (ps3ProfilerFrameStatus): samples, and those with each game thread running.
+u32 sHbSamples, sHbRunning[MAX_THREADS];
 void* sMovedPc;
 void* sMovedSp;
 int sMovedThread = -1;
@@ -182,6 +184,7 @@ void samplerThread(void*)
 			sSectionChanged = 0;
 		}
 		sSamples++;
+		sHbSamples++;
 		if (!ps3SchedSample(&s)) {
 			sNoThreadSamples++;
 		} else {
@@ -197,6 +200,7 @@ void samplerThread(void*)
 			} else {
 				if (s.thread >= 0 && s.thread < MAX_THREADS) {
 					sRunningSamples[s.thread]++;
+					sHbRunning[s.thread]++;
 				}
 				sSelf.add(s.pc);
 				sIncl.add(s.pc); // (the function itself: the stack holds its callers)
@@ -228,6 +232,27 @@ void onExit()
 } // namespace
 
 extern "C" unsigned int ps3ProfilerMoves(void) { return sMoves; }
+
+// For the heartbeat (os_sched.cpp): how much of each frame (msPerFrame long on average since the last one)
+// the game threads ran, from the samples since then. The rest of the time none of them ran: waiting for the
+// retrace, for the graphics thread (GXDrawDone), for the sound...
+extern "C" void ps3ProfilerFrameStatus(char* buf, unsigned int size, float msPerFrame)
+{
+	const u32 samples = sHbSamples;
+	int n             = snprintf(buf, size, "game threads, ms per frame (%.1f ms):", (double)msPerFrame);
+	u32 running       = 0;
+	for (int i = 0; i < MAX_THREADS && n < (int)size - 40; i++) {
+		const u32 r = sHbRunning[i];
+		sHbRunning[i] = 0;
+		if (!r || !samples) {
+			continue;
+		}
+		running += r;
+		n += snprintf(buf + n, size - n, " thread %d %.1f,", i, (double)(msPerFrame * r / samples));
+	}
+	snprintf(buf + n, size - n, " none running %.1f", samples ? (double)(msPerFrame * (samples - running) / samples) : 0.0);
+	sHbSamples = 0;
+}
 
 extern "C" void ps3ProfilerStart(void)
 {

@@ -55,6 +55,9 @@ void GXSetProjection(const Mtx44 mtx, GXProjectionType type)
 		gx->projMtx[3] = mtx[1][2];
 	}
 
+#if defined(TARGET_PS3)
+	ps3GxXfUnknown(); // (XF registers written raw: Dolphin/GX/GXFifo.h, ps3GxPutXfReg)
+#endif
 	reg = 0x00061020;
 	GX_WRITE_U8(0x10);
 	GX_WRITE_U32(reg);
@@ -90,6 +93,9 @@ void GXSetProjectionv(const f32* ptr)
 	gx->projMtx[4] = ptr[5];
 	gx->projMtx[5] = ptr[6];
 
+#if defined(TARGET_PS3)
+	ps3GxXfUnknown(); // (XF registers written raw: Dolphin/GX/GXFifo.h, ps3GxPutXfReg)
+#endif
 	reg = 0x00061020;
 	GX_WRITE_U8(0x10);
 	GX_WRITE_U32(reg);
@@ -507,6 +513,9 @@ void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz,
 	if (gx->fgRange != 0) {
 		__GXSetRange(nearz, gx->fgSideX);
 	}
+#if defined(TARGET_PS3)
+	ps3GxXfUnknown(); // (XF registers written raw: Dolphin/GX/GXFifo.h, ps3GxPutXfReg)
+#endif
 	reg = 0x5101A;
 	GX_WRITE_U8(0x10);
 	GX_WRITE_U32(0x5101A);

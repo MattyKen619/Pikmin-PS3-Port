@@ -67,6 +67,19 @@ MSL_MATH_INLINE f128 fabsl(f128 x)
 	return __fabs((f64)x);
 }
 
+#if defined(TARGET_PS3) && defined(__powerpc64__) // (not the port's host tools)
+// PS3 port: one instruction (the PPU has fsqrts, correctly rounded). The original's three refinement steps
+// are a dozen dependent multiplies, and its volatile result is stored and loaded back at once (a stall).
+MSL_MATH_INLINE f32 sqrtf(f32 x)
+{
+	if (x > 0.0f) {
+		f32 y;
+		__asm__("fsqrts %0,%1" : "=f"(y) : "f"(x));
+		return y;
+	}
+	return x;
+}
+#else
 MSL_MATH_INLINE f32 sqrtf(f32 x)
 {
 	// these REALLY don't have to be static.
@@ -85,12 +98,26 @@ MSL_MATH_INLINE f32 sqrtf(f32 x)
 	}
 	return x;
 }
+#endif
 
 END_SCOPE_EXTERN_C
 
 #ifdef __cplusplus
 namespace std {
 
+#if defined(TARGET_PS3) && defined(__powerpc64__) // (not the port's host tools)
+// PS3 port: one instruction (the PPU has fsqrts, correctly rounded). The original's three refinement steps
+// are a dozen dependent multiplies, and its volatile result is stored and loaded back at once (a stall).
+MSL_MATH_INLINE f32 sqrtf(f32 x)
+{
+	if (x > 0.0f) {
+		f32 y;
+		__asm__("fsqrts %0,%1" : "=f"(y) : "f"(x));
+		return y;
+	}
+	return x;
+}
+#else
 MSL_MATH_INLINE f32 sqrtf(f32 x)
 {
 	// these REALLY don't have to be static.
@@ -109,6 +136,7 @@ MSL_MATH_INLINE f32 sqrtf(f32 x)
 	}
 	return x;
 }
+#endif
 
 MSL_MATH_INLINE f32 fmodf(f32 x, f32 m)
 {
