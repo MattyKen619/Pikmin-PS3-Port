@@ -91,6 +91,9 @@ void GXCallDisplayList(void* list, u32 nbytes)
 	if (!GX_CHECK_FLUSH(gx)) {
 		__GXSendFlushPrim();
 	}
+#if defined(TARGET_PS3)
+	ps3GxBpUnknown(); // (the list may set any BP register: Dolphin/GX/GXFifo.h, ps3GxPutBp)
+#endif
 	GX_WRITE_U8(0x40);
 	GX_WRITE_U32(list);
 	GX_WRITE_U32(nbytes);

@@ -143,8 +143,9 @@ extern vu16* __peReg;
 #define VERIF_RAS_REG(value) (__gxVerif->rasRegs[((value) & 0xFF000000) >> 24] = value)
 
 #if defined(TARGET_PS3) && defined(__cplusplus)
-// PS3 port: each register write in one go (Dolphin/GX/GXFifo.h: ps3GxPutReg5).
-#define GX_WRITE_RAS_REG(value)      ps3GxPutReg5(0x61, (u32)(value))
+// PS3 port: each register write in one go, and BP writes that change nothing left out (Dolphin/GX/GXFifo.h:
+// ps3GxPutBp, ps3GxPutXfReg).
+#define GX_WRITE_RAS_REG(value)      ps3GxPutBp((u32)(value))
 #define GX_WRITE_XF_REG(addr, value) ps3GxPutXfReg(0x1000 + (addr), (u32)(value))
 #else
 #define GX_WRITE_RAS_REG(value) \

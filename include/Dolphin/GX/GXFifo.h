@@ -209,6 +209,52 @@ PS3_GX_PIPE_WRITE static inline void ps3GxPutReg6(unsigned int op, unsigned int 
 	}
 }
 
+// A BP register write (GX_WRITE_RAS_REG), test build 45: not sent if it would change nothing. The command
+// processor ignores such a write (gpu_cp.cpp, loadBp) except to the registers whose writes act
+// (gpu::kBpActingRegs); 40-45% of the BP writes the GX library sends are like that (the game sets every
+// material's state again), 13,000 a frame in the Forest Navel's busiest moments. ps3GxBpSent holds the value
+// each register was last sent to the graphics processor with, and the generation it belongs to:
+// ps3GxBpUnknown starts a new one whenever the registers may have changed another way (a display list
+// called, raw writes), and the slow path does when a write may go into a display list being made. A write
+// right after the mask register is merged with the mask: it is sent, and not remembered.
+extern "C" {
+extern unsigned long long ps3GxBpSent[256];
+extern unsigned int ps3GxBpGen;
+extern unsigned int ps3GxBpMaskPending;
+extern unsigned char ps3GxBpKeep[256]; // 1: a write that changes nothing may be left out
+void ps3GxBpUnknown(void);
+}
+
+PS3_GX_PIPE_WRITE static inline void ps3GxPutBp(unsigned int word)
+{
+	const unsigned int reg = word >> 24;
+	const unsigned int w   = ps3GxWritten;
+	if (__builtin_expect(ps3GxWriteLimit - w >= 5, 1)) {
+		if (__builtin_expect(ps3GxBpMaskPending == 0, 1) && ps3GxBpKeep[reg]) {
+			const unsigned long long key = ((unsigned long long)word << 32) | ps3GxBpGen;
+			if (ps3GxBpSent[reg] == key) {
+				return;
+			}
+			ps3GxBpSent[reg] = key;
+		} else {
+			ps3GxBpMaskPending = reg == 0xFE;
+			ps3GxBpSent[reg]   = 0;
+		}
+		unsigned char* p = ps3GxRing + (w & PS3_GX_RING_MASK);
+		p[0]             = 0x61;
+		p[1]             = (unsigned char)(word >> 24);
+		p[2]             = (unsigned char)(word >> 16);
+		p[3]             = (unsigned char)(word >> 8);
+		p[4]             = (unsigned char)word;
+		ps3GxWritten     = w + 5;
+	} else {
+		ps3GxBpGen         = ps3GxBpGen + 1;
+		ps3GxBpMaskPending = reg == 0xFE;
+		ps3GxWrite8(0x61);
+		ps3GxWrite32(word);
+	}
+}
+
 // One XF register: command byte, address word (one value), value.
 PS3_GX_PIPE_WRITE static inline void ps3GxPutXfReg(unsigned int address, unsigned int value)
 {

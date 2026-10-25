@@ -20,6 +20,12 @@
 
 namespace gpu {
 
+// BP registers whose writes act even when they change nothing: draw done (and its interrupt enable),
+// tokens, EFB copy, TMEM preload and TLUT load, texture cache invalidation, performance counters, the mask.
+// The command processor passes these on every time and ignores other writes that change nothing; the GX
+// library on the PS3 does not send those in the first place (Dolphin/GX/GXFifo.h: ps3GxPutBp).
+static const unsigned char kBpActingRegs[] = { 0x45, 0x46, 0x47, 0x48, 0x52, 0x63, 0x64, 0x65, 0x66, 0x67, 0xFE, 0xFF };
+
 // (The PS3 build compiles with the game's own C library headers, which have no stdint.h.)
 typedef unsigned char u8;
 typedef unsigned short u16;

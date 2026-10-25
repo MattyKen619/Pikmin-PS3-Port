@@ -105,6 +105,15 @@ static void noteStack(ThreadImpl* t)
 	ps3b_thread_stack(&t->stackLo, &t->stackHi);
 }
 
+// The thread's lv2 thread is about to end, and its stack with it: nothing may walk it any more. (Test build
+// 45's watchdog walked the stack of a thread that had ended, and lv2 stopped the watchdog: no heartbeats.)
+static void forgetStack(ThreadImpl* t)
+{
+	t->stackHi = 0;
+	__sync_synchronize();
+	t->stackLo = 0;
+}
+
 static u32 sSeq;
 static volatile int sIntrEnabled = 1;
 static volatile int sInInterrupt = 0;
@@ -219,7 +228,9 @@ static void waitBaton(ThreadImpl* self)
 		ps3b_cond_wait(self->cv, 100000);
 	}
 	if (self->cancelled && !self->hasBaton) {
+		forgetStack(self);
 		unlockS();
+		ps3b_sleep_us(200); // (a stack walk that started before forgetStack ends before the stack goes)
 		ps3b_thread_exit();
 	}
 }
@@ -746,8 +757,10 @@ void OSExitThread(void* val)
 		ps3Log("[ps3] main thread exited\n");
 		ps3b_exit(0);
 	}
+	forgetStack(self);
 	schedule(self); // hands the baton on and returns because we are exiting
 	unlockS();
+	ps3b_sleep_us(200); // (a stack walk that started before forgetStack ends before the stack goes)
 	ps3b_thread_exit();
 }
 
@@ -1009,11 +1022,13 @@ static void logStack(int index, ThreadImpl* t)
 {
 	// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
 	const Ps3HookState& h = hookOf(t);
-	if (!h.lastPc) {
-		return;
+	if (!h.lastPc || !t->started || t->exiting || t->cancelled || !t->os || t->os->state == OS_THREAD_STATE_MORIBUND
+	    || t->os->state == 0) {
+		return; // (no lv2 thread, or one that is ending: its stack may be gone)
 	}
+	const unsigned long long lo = t->stackLo, hi = t->stackHi;
 	void* pcs[24];
-	const int depth = ps3WalkStack(h.lastSp, t->stackLo, t->stackHi, pcs, 24);
+	const int depth = ps3WalkStack(h.lastSp, lo, hi, pcs, 24);
 	char line[512];
 	int n = snprintf(line, sizeof(line), "[stack]   thread %d pc %p sp %p depth %d:", index, h.lastPc, h.lastSp, depth);
 	for (int f = 0; f < depth && n < (int)sizeof(line) - 24; f++) {

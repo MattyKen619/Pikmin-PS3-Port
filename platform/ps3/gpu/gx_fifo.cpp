@@ -475,6 +475,31 @@ u32 ps3GxWritten;    // game thread only
 u32 ps3GxWriteLimit; // (game thread) ps3GxWritten can grow to this without the slow path (refreshWriteLimit)
 }
 static_assert(PS3_GX_RING_MASK == RING_MASK, "Dolphin/GX/GXFifo.h has the ring's size");
+
+// BP writes that change nothing are left out (Dolphin/GX/GXFifo.h: ps3GxPutBp). ps3GxBpKeep is filled in
+// when the ring is set up; until then every write takes the slow path, which leaves nothing out.
+extern "C" {
+unsigned long long ps3GxBpSent[256];
+unsigned int ps3GxBpGen = 1;
+unsigned int ps3GxBpMaskPending;
+unsigned char ps3GxBpKeep[256];
+
+void ps3GxBpUnknown(void)
+{
+	ps3GxBpGen         = ps3GxBpGen + 1;
+	ps3GxBpMaskPending = 1; // (the first BP write after a display list is not remembered: the list might end
+	                        // with a mask)
+}
+}
+
+static void initBpFilter()
+{
+	memset(ps3GxBpKeep, 1, sizeof(ps3GxBpKeep));
+	for (u32 i = 0; i < sizeof(gpu::kBpActingRegs); i++) {
+		ps3GxBpKeep[gpu::kBpActingRegs[i]] = 0;
+	}
+	ps3GxBpUnknown();
+}
 static bool sLinked; // (the CPU FIFO goes to the graphics processor, not into a display list)
 static volatile u32 sPublished;    // written by the game thread
 static volatile u32 sConsumed;     // written by the graphics thread
@@ -722,6 +747,7 @@ static void start()
 		ps3Log("[gpu] FAILED: no memory for the graphics command buffer\n");
 		return;
 	}
+	initBpFilter();
 	bool sync = sForceSync;
 	if (!sync && ps3b_data_root()) {
 		char path[256];

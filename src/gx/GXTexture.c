@@ -1431,6 +1431,9 @@ void __GXGetSUTexSize(GXTexCoordID coord, u16* width, u16* height)
 #if OS_BUILD_VERSION >= 20011002L
 void __GXSetTmemConfig(u32 arg0)
 {
+#if defined(TARGET_PS3)
+	ps3GxBpUnknown(); // (BP registers written raw below: Dolphin/GX/GXFifo.h, ps3GxPutBp)
+#endif
 	switch (arg0) {
 	case 1:
 	{

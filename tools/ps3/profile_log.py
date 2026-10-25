@@ -7,7 +7,8 @@ PS3 port: turn the sampling profiler's "[prof]" blocks in a pikmin_log.txt into 
 
 "self": samples whose last game code ran in the function (including SDK and GX library code it called).
 "incl": samples with the function anywhere on the game thread's call stack. (Test build 45 on: return
-addresses walked from the stack, so SDK and library functions that call others show up too.)
+addresses walked from the stack, so SDK and library functions that call others show up too; a function
+that calls itself, or is called from two places on the same stack, can count more than once: over 100%.)
 Percentages are of the samples where a game thread was running (not waiting).
 "waiting in" (test build 45 on): while no game thread ran, the last game code of the one waiting (GXDrawDone
 from DGXGraphics::doneRender, the retrace, ...); percentages are of the waiting samples.
@@ -20,7 +21,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from symbolize_log import read_elf, demangle  # noqa: E402
+from symbolize_log import read_elf, demangle, SIZES  # noqa: E402
 
 
 def main():
@@ -40,7 +41,12 @@ def main():
 
     def fn_of_pc(pc):
         i = bisect.bisect_right(starts, pc) - 1
-        return code[i][1] if i >= 0 else "?"
+        if i < 0:
+            return "?"
+        size = SIZES.get(code[i][0], 0)
+        if size and pc >= code[i][0] + size:
+            return "(code without a symbol: start-up, system library)"
+        return code[i][1]
 
     blocks = []
     cur = None

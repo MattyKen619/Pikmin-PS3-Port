@@ -20,6 +20,9 @@ import subprocess
 import sys
 
 
+SIZES = {}  # code address -> the function's size in bytes (0: not known), filled in by read_elf
+
+
 def read_elf(path):
     data = open(path, "rb").read()
     if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 2:
@@ -45,6 +48,7 @@ def read_elf(path):
     opd = byname.get(".opd")
     descr = {}   # descriptor address -> name
     code = []    # (code address, name)
+    SIZES.clear()
     for i in range(symtab["size"] // 24):
         st_name, st_info, st_other, st_shndx, st_value, st_size = struct.unpack_from(">IBBHQQ", data, symtab["off"] + i * 24)
         if st_info & 0xF != 2 or not st_value:  # STT_FUNC
@@ -54,8 +58,10 @@ def read_elf(path):
         if opd and opd["addr"] <= st_value < opd["addr"] + opd["size"]:
             entry, = struct.unpack_from(">Q", data, opd["off"] + st_value - opd["addr"])
             code.append((entry, name))
+            SIZES[entry] = st_size
         else:
             code.append((st_value, name))
+            SIZES[st_value] = st_size
     code.sort()
     return descr, code
 

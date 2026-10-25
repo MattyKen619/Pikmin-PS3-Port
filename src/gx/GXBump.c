@@ -1,7 +1,7 @@
 #include "Dolphin/gx.h"
 
 #if defined(TARGET_PS3) && defined(__cplusplus)
-#define GX_WRITE_SOME_REG5(a, b) ps3GxPutReg5(a, (u32)(b)) // (Dolphin/GX/GXFifo.h)
+#define GX_WRITE_SOME_REG5(a, b) ps3GxPutBp((u32)(b)) // (always a BP write: Dolphin/GX/GXFifo.h)
 #elif DEBUG
 #define GX_WRITE_SOME_REG5(a, b)                  \
 	do {                                          \

@@ -78,11 +78,8 @@ CommandProcessor::CommandProcessor()
 	for (int i = 0; i < 32; i++) {
 		sPow2Inv[i] = 1.0f / (float)(1u << i);
 	}
-	// draw done (and its interrupt enable), tokens, EFB copy, TMEM preload and TLUT load, texture cache
-	// invalidation, performance counters, the mask
-	static const u8 kActs[] = { 0x45, 0x46, 0x47, 0x48, 0x52, 0x63, 0x64, 0x65, 0x66, 0x67, 0xFE, 0xFF };
-	for (u32 i = 0; i < sizeof(kActs); i++) {
-		sBpActs[kActs[i]] = 1;
+	for (u32 i = 0; i < sizeof(kBpActingRegs); i++) {
+		sBpActs[kBpActingRegs[i]] = 1;
 	}
 }
 
