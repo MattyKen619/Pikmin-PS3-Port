@@ -4,10 +4,18 @@
 // switches threads when the running one blocks, yields, or an interrupt wakes a higher-priority thread.
 // Pikmin relies on this (shared data without locks, OSDisableInterrupts as a critical section).
 //
-// Each OSThread gets a real PS3 thread, but only the holder of a "baton" executes game code. Blocking
+// Each OSThread runs on a real PS3 thread, but only the holder of a "baton" executes game code. Blocking
 // calls hand the baton to the best ready thread. GameCube interrupts (60 Hz retrace, I/O completion)
 // are queued by background threads and run by the baton holder at the next scheduling point, or by
 // the idle loop when every game thread is waiting.
+//
+// Test build 48: the PS3 threads are kept and reused (workers). When a game thread ends, its PS3 thread
+// waits for the next game thread to start instead of ending, so its stack stays where it is. On the
+// GameCube a thread runs on a stack the game gives it (System::startLoading's ThreadStack), which outlives
+// the thread: game code may still read something a thread left on its stack after it ended (a pointer to
+// a local matrix, say). On the PS3 an ended thread's stack is gone, and lv2 stops a thread that reads it.
+// Test 47's long session ended with the profiler stopping during a level load, then the watchdog stopping
+// while it reported, and the game freezing: what reading a stack that is gone would do.
 
 #include "sdk_internal.h"
 
@@ -41,7 +49,20 @@ struct ThreadImpl {
 	// Where the thread is, kept by the -finstrument-functions hooks (ps3/hooks.h): in ps3Hook while the
 	// thread holds the baton, here while it does not (switchHooks).
 	Ps3HookState hook;
-	unsigned long long stackLo, stackHi; // its lv2 stack (ps3WalkStack)
+	// Its PS3 thread's stack (ps3WalkStack), written under sLock: stackSeq is odd while it changes, so a
+	// reader without the lock (the profiler, the watchdog) can tell a consistent pair from a torn one.
+	volatile unsigned int stackSeq;
+	volatile unsigned long long stackLo, stackHi;
+	struct Worker* worker; // the PS3 thread it runs on (NULL: the main thread, or not started)
+};
+
+// A PS3 thread for game threads (test build 48): runs one game thread after another, never ends.
+struct Worker {
+	unsigned int cv;            // signalled when it is given a game thread (job)
+	ThreadImpl* volatile job;   // the game thread it runs; NULL while it waits for one
+	unsigned long long stackLo, stackHi;
+	void* exitJump[5];          // __builtin_setjmp: where an ending game thread goes back to (runJob)
+	int index;
 };
 
 struct Interrupt {
@@ -54,6 +75,10 @@ static unsigned int sIdleCv;
 static ThreadImpl sImpls[MAX_THREADS];
 static int sImplCount;
 static ThreadImpl* sRunning;
+static Worker sWorkers[MAX_THREADS];
+static int sWorkerCount;
+static Worker* sIdleWorkers[MAX_THREADS];
+static int sIdleWorkerCount;
 
 // The hooks' state for the baton holder (ps3/hooks.h), and the queued-interrupt hint they check.
 extern "C" {
@@ -82,6 +107,9 @@ extern "C" int ps3WalkStack(const void* sp, unsigned long long lo, unsigned long
 {
 	unsigned long long at = (unsigned long long)(uptr)sp;
 	int n                 = 0;
+	if (!lo || hi <= lo || hi - lo > (16u << 20)) {
+		return 0; // (no stack, or not one: lv2 stacks are at most a few MB)
+	}
 	while (n < max) {
 		if ((at & 15) || at < lo || at + 8 > hi) {
 			break;
@@ -100,18 +128,29 @@ extern "C" int ps3WalkStack(const void* sp, unsigned long long lo, unsigned long
 	return n;
 }
 
-static void noteStack(ThreadImpl* t)
+// (sLock held)
+static void setStack(ThreadImpl* t, unsigned long long lo, unsigned long long hi)
 {
-	ps3b_thread_stack(&t->stackLo, &t->stackHi);
+	t->stackSeq = t->stackSeq + 1; // odd: changing
+	__asm__ volatile("lwsync" ::: "memory");
+	t->stackLo = lo;
+	t->stackHi = hi;
+	__asm__ volatile("lwsync" ::: "memory");
+	t->stackSeq = t->stackSeq + 1;
 }
 
-// The thread's lv2 thread is about to end, and its stack with it: nothing may walk it any more. (Test build
-// 45's watchdog walked the stack of a thread that had ended, and lv2 stopped the watchdog: no heartbeats.)
-static void forgetStack(ThreadImpl* t)
+// The game thread no longer runs there: nothing walks that stack for it any more.
+static void forgetStack(ThreadImpl* t) { setStack(t, 0, 0); }
+
+// Without the lock: false if the bounds were changing (or the thread has none).
+static bool readStack(const ThreadImpl* t, unsigned long long* lo, unsigned long long* hi)
 {
-	t->stackHi = 0;
-	__sync_synchronize();
-	t->stackLo = 0;
+	const unsigned int s1 = t->stackSeq;
+	__asm__ volatile("lwsync" ::: "memory");
+	*lo = t->stackLo;
+	*hi = t->stackHi;
+	__asm__ volatile("lwsync" ::: "memory");
+	return !(s1 & 1) && t->stackSeq == s1 && *lo != 0;
 }
 
 static u32 sSeq;
@@ -222,29 +261,60 @@ static void wakeAllLocked(void* key)
 	}
 }
 
+// A game thread ends (sLock held): its PS3 thread goes back to its worker loop (runJob), from however deep
+// in the game's calls it is, and waits there for the next game thread.
+static void leaveThread(ThreadImpl* self) __attribute__((noreturn, noinline));
+static void leaveThread(ThreadImpl* self)
+{
+	Worker* w = self->worker;
+	if (!w) {
+		unlockS(); // (not a worker's: cannot happen, the main thread does not end this way)
+		ps3b_thread_exit();
+	}
+	__builtin_longjmp(w->exitJump, 1);
+}
+
 static void waitBaton(ThreadImpl* self)
 {
 	while (!self->hasBaton && !self->cancelled) {
 		ps3b_cond_wait(self->cv, 100000);
 	}
 	if (self->cancelled && !self->hasBaton) {
-		forgetStack(self);
-		unlockS();
-		ps3b_sleep_us(200); // (a stack walk that started before forgetStack ends before the stack goes)
-		ps3b_thread_exit();
+		leaveThread(self);
 	}
 }
 
-static void threadEntry(void* p);
+static void workerEntry(void* p);
 
+// The baton holder starts `t` (sLock held): a waiting worker takes it, or a new one is made.
 static void startPs3Thread(ThreadImpl* t)
 {
-	char name[24];
-	snprintf(name, sizeof(name), "pikmin_os%d", t->index);
 	t->started = 1;
-	if (ps3b_thread_create(threadEntry, t, GAME_LV2_PRIO, GAME_STACK_SIZE, name) != 0) {
-		ps3Log("[ps3] FAILED to create PS3 thread for OS thread %d\n", t->index);
+	if (sIdleWorkerCount > 0) {
+		Worker* w = sIdleWorkers[--sIdleWorkerCount];
+		w->job    = t;
+		t->worker = w;
+		ps3b_cond_signal(w->cv);
+		return;
 	}
+	if (sWorkerCount >= MAX_THREADS) {
+		ps3Log("[ps3] FAILED: no PS3 thread for OS thread %d (all %d in use)\n", t->index, sWorkerCount);
+		return;
+	}
+	Worker* w = &sWorkers[sWorkerCount];
+	w->index  = sWorkerCount;
+	w->job    = t;
+	t->worker = w;
+	ps3b_cond_create(&w->cv, sLock);
+	char name[24];
+	snprintf(name, sizeof(name), "pikmin_os%d", w->index);
+	if (ps3b_thread_create(workerEntry, w, GAME_LV2_PRIO, GAME_STACK_SIZE, name) != 0) {
+		ps3Log("[ps3] FAILED to create PS3 thread for OS thread %d\n", t->index);
+		t->worker = NULL;
+		return;
+	}
+	sWorkerCount++;
+	ps3Log("[ps3] PS3 thread %d made (for OS thread %d)\n", w->index, t->index);
 }
 
 // Runs queued interrupts on behalf of `self` (the baton holder or the idle loop). Returns how many ran.
@@ -344,16 +414,40 @@ static void preemptCheck(ThreadImpl* self)
 	}
 }
 
-static void threadEntry(void* p)
+// Runs game thread `t` on worker `w` (sLock held on entry and on return). The game thread ends by
+// returning from its function or by OSExitThread, or is cancelled while it waits: leaveThread jumps back
+// here in each case, with sLock held.
+static __attribute__((noinline)) void runJob(Worker* w, ThreadImpl* t)
 {
-	ThreadImpl* self = (ThreadImpl*)p;
-	noteStack(self);
+	ThreadImpl* volatile vt = t; // (read again after the jump back: registers are not kept)
+	setStack(t, w->stackLo, w->stackHi);
+	if (__builtin_setjmp(w->exitJump) == 0) {
+		waitBaton(t);
+		unlockS();
+		ps3NoteActivity("thread start");
+		void* result = t->func(t->arg);
+		OSExitThread(result); // (does not return: leaveThread)
+	}
+	ThreadImpl* done = vt;
+	forgetStack(done);
+	done->worker = NULL;
+}
+
+static void workerEntry(void* p)
+{
+	Worker* w = (Worker*)p;
+	ps3b_thread_stack(&w->stackLo, &w->stackHi);
 	lockS();
-	waitBaton(self);
-	unlockS();
-	ps3NoteActivity("thread start");
-	void* result = self->func(self->arg);
-	OSExitThread(result);
+	for (;;) {
+		ThreadImpl* t = w->job;
+		if (!t) {
+			ps3b_cond_wait(w->cv, 1000 * 1000);
+			continue;
+		}
+		runJob(w, t);
+		w->job                           = NULL;
+		sIdleWorkers[sIdleWorkerCount++] = w; // (waits for the next game thread)
+	}
 }
 
 // ------------------------------------------------------------------ interrupts
@@ -491,7 +585,8 @@ extern "C" int ps3SchedSample(Ps3SchedSample* out)
 	out->waiting = t->os->state != OS_THREAD_STATE_RUNNING;
 	out->pc      = h.lastPc;
 	out->sp      = h.lastSp;
-	out->depth   = ps3WalkStack(h.lastSp, t->stackLo, t->stackHi, out->pcs, PS3_SAMPLE_DEPTH);
+	unsigned long long lo, hi;
+	out->depth = readStack(t, &lo, &hi) ? ps3WalkStack(out->sp, lo, hi, out->pcs, PS3_SAMPLE_DEPTH) : 0;
 	return 1;
 }
 
@@ -667,7 +762,9 @@ extern "C" void ps3SchedInit(void)
 	sDefaultThread.base     = 16;
 	lockS();
 	ThreadImpl* main = allocImpl(&sDefaultThread);
-	noteStack(main);
+	unsigned long long lo, hi;
+	ps3b_thread_stack(&lo, &hi);
+	setStack(main, lo, hi);
 	main->started     = 1;
 	main->hasBaton    = 1;
 	main->intrEnabled = 1; // restored into sIntrEnabled whenever main gets the baton back
@@ -700,6 +797,18 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 		unlockS();
 		ps3Log("[ps3] FAILED: too many threads\n");
 		return FALSE;
+	}
+	// The game reuses OSThread objects: a thread that was cancelled may still be on its PS3 thread, which
+	// has yet to see that (it needs sLock). Its worker lets go of it first, or two PS3 threads would run the
+	// new one.
+	for (int waited = 0; impl->worker && impl != sRunning && (impl->cancelled || impl->exiting); waited++) {
+		if (waited == 10000) {
+			ps3Log("[ps3] warning: OSCreateThread: thread %d has not left its PS3 thread after 1 s\n", impl->index);
+			break;
+		}
+		unlockS();
+		ps3b_sleep_us(100);
+		lockS();
 	}
 	if (impl->started && impl != sRunning && !impl->exiting && !impl->cancelled && thread->state != 0
 	    && thread->state != OS_THREAD_STATE_MORIBUND) {
@@ -757,11 +866,8 @@ void OSExitThread(void* val)
 		ps3Log("[ps3] main thread exited\n");
 		ps3b_exit(0);
 	}
-	forgetStack(self);
 	schedule(self); // hands the baton on and returns because we are exiting
-	unlockS();
-	ps3b_sleep_us(200); // (a stack walk that started before forgetStack ends before the stack goes)
-	ps3b_thread_exit();
+	leaveThread(self);
 }
 
 void OSCancelThread(OSThread* thread)
@@ -1019,19 +1125,29 @@ extern "C" void ps3AudioProbeStatus(char* buf, unsigned int size);
 extern "C" void ps3ProfilerFrameStatus(char* buf, unsigned int size, float msPerFrame);
 extern "C" unsigned int ps3FramesDrawn(void);
 
-static void logStack(int index, ThreadImpl* t)
+// `detailed` (stall and exit reports): where the thread is and its stack's bounds are logged before the stack
+// is walked, so a report that stops there still says where the thread was.
+static void logStack(int index, ThreadImpl* t, bool detailed)
 {
 	// Innermost frames first. Addresses resolve with tools/ps3/symbolize_log.py and the build's ELF.
 	const Ps3HookState& h = hookOf(t);
-	if (!h.lastPc || !t->started || t->exiting || t->cancelled || !t->os || t->os->state == OS_THREAD_STATE_MORIBUND
+	void* const pc = h.lastPc;
+	void* const sp = h.lastSp;
+	if (!pc || !t->started || t->exiting || t->cancelled || !t->os || t->os->state == OS_THREAD_STATE_MORIBUND
 	    || t->os->state == 0) {
-		return; // (no lv2 thread, or one that is ending: its stack may be gone)
+		return; // (not running game code, or ending)
 	}
-	const unsigned long long lo = t->stackLo, hi = t->stackHi;
+	unsigned long long lo = 0, hi = 0;
+	const bool have = readStack(t, &lo, &hi);
+	if (detailed) {
+		const Worker* w = t->worker;
+		ps3Log("[stack]   thread %d pc %p sp %p; stack 0x%llx-0x%llx%s, PS3 thread %d\n", index, pc, sp, lo, hi,
+		       have ? "" : " (changing)", w ? w->index : -1);
+	}
 	void* pcs[24];
-	const int depth = ps3WalkStack(h.lastSp, lo, hi, pcs, 24);
+	const int depth = have ? ps3WalkStack(sp, lo, hi, pcs, 24) : 0;
 	char line[512];
-	int n = snprintf(line, sizeof(line), "[stack]   thread %d pc %p sp %p depth %d:", index, h.lastPc, h.lastSp, depth);
+	int n = snprintf(line, sizeof(line), "[stack]   thread %d pc %p sp %p depth %d:", index, pc, sp, depth);
 	for (int f = 0; f < depth && n < (int)sizeof(line) - 24; f++) {
 		n += snprintf(line + n, sizeof(line) - n, " %p", pcs[f]);
 	}
@@ -1043,11 +1159,11 @@ extern "C" void ps3ReportStack(const char* what)
 	ThreadImpl* t = sRunning;
 	ps3Log("[ps3] %s\n", what);
 	if (t) {
-		logStack((int)(t - sImpls), t);
+		logStack((int)(t - sImpls), t, true);
 	}
 }
 
-static void reportThreads(const char* title)
+static void reportThreads(const char* title, bool detailed)
 {
 	char audio[1024];
 	ps3AudioStatus(audio, sizeof(audio));
@@ -1093,17 +1209,32 @@ static void reportThreads(const char* title)
 		}
 		ps3Log("[ps3]   thread %d prio %d %s%s%s%s\n", i, (int)t->os->priority, stateName(t->os->state), t->waitReason ? " in " : "",
 		       t->waitReason ? t->waitReason : "", t == sRunning ? "  <- has the baton" : "");
-		logStack(i, t);
+		logStack(i, t, detailed);
 	}
+	if (detailed) {
+		ps3Log("[ps3]   PS3 threads for game threads: %d made, %d waiting for one; the profiler has sampled %u times\n", sWorkerCount,
+		       sIdleWorkerCount, ps3ProfilerTicks());
+	}
+}
+
+// When the game quits (test build 48): the state of every thread, as in a stall report. Test 47's game froze
+// while loading a level; the watchdog had stopped before it could report, and the exit was all that ran.
+extern "C" void ps3SchedExitReport(void)
+{
+	reportThreads("exit", true);
 }
 
 static void watchdogThread(void*)
 {
 	u32 lastActivity = sActivity;
 	u32 lastMoves    = 0;
+	u32 lastTicks    = 0;
+	void* lastPc     = NULL;
+	void* lastSp     = NULL;
 	ThreadImpl* lastRunner = NULL;
 	int idleSdk      = 0;
 	int idleBlocks   = 0;
+	int profilerIdle = 0;
 	int seconds      = 0;
 	for (;;) {
 		ps3b_sleep_us(1000 * 1000);
@@ -1114,26 +1245,38 @@ static void watchdogThread(void*)
 
 		// The baton holder is executing game code but no game function has started or returned (the
 		// profiler, which looks 250 times a second, saw it at the same place every time): a loop without
-		// calls, or the thread has stopped (lv2 halts a thread that faults).
+		// calls, or the thread has stopped (lv2 halts a thread that faults). Test build 48: if the profiler
+		// itself has stopped sampling, the watchdog's own look once a second decides instead, and the
+		// profiler's stop is reported.
 		ThreadImpl* runner = sRunning;
 		const u32 moves    = ps3ProfilerMoves();
+		const u32 ticks    = ps3ProfilerTicks();
+		profilerIdle       = (ticks != 0 && ticks == lastTicks) ? profilerIdle + 1 : 0; // (0: not started yet)
+		lastTicks          = ticks;
+		void* const pc     = ps3Hook.lastPc;
+		void* const sp     = ps3Hook.lastSp;
 		int running        = runner && runner->os && runner->os->state == OS_THREAD_STATE_RUNNING;
 		int same           = running && runner == lastRunner;
-		idleBlocks         = (same && moves == lastMoves) ? idleBlocks + 1 : 0;
+		int still          = profilerIdle ? (pc == lastPc && sp == lastSp) : (moves == lastMoves);
+		idleBlocks         = (same && still) ? idleBlocks + 1 : 0;
 		lastRunner         = runner;
 		lastMoves          = moves;
+		lastPc             = pc;
+		lastSp             = sp;
 
-		if (idleBlocks == 5 || (idleBlocks > 0 && idleBlocks % 30 == 0)) {
+		if (profilerIdle == 3) {
+			reportThreads("STALL: the profiler has stopped sampling (for 3 s)", true);
+		} else if (idleBlocks == 5 || (idleBlocks > 0 && idleBlocks % 30 == 0)) {
 			char title[128];
 			snprintf(title, sizeof(title), "STALL: thread %d stuck in one place for %d s (crashed, blocked outside game code, or looping without calls)",
 			         runner->index, idleBlocks);
-			reportThreads(title);
+			reportThreads(title, true);
 		} else if (idleSdk == 5 || (idleSdk > 0 && idleSdk % 30 == 0)) {
 			char title[64];
 			snprintf(title, sizeof(title), "STALL: no SDK activity for %d s", idleSdk);
-			reportThreads(title);
+			reportThreads(title, true);
 		} else if (seconds % 15 == 0) {
-			reportThreads("heartbeat");
+			reportThreads("heartbeat", false);
 		}
 	}
 }

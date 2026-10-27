@@ -35,6 +35,8 @@ void ps3NoteActivity(const char* what); // remembers the last SDK call, for stal
 void ps3ProfileSection(const char* name); // a game section starts: report the profile of the last one
 void ps3ProfilerStart(void);
 unsigned int ps3ProfilerMoves(void); // samples where the game thread had moved on (watchdog)
+unsigned int ps3ProfilerTicks(void); // times the profiler has woken up to sample (0: not started)
+void ps3SchedExitReport(void);       // every thread's state, when the game quits (profiler.cpp: its exit hook)
 
 // What the running game thread is doing (os_sched.cpp, for the profiler).
 #define PS3_SAMPLE_DEPTH 48

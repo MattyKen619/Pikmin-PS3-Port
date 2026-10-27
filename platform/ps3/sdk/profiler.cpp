@@ -84,6 +84,7 @@ Table<GFX_SELF_SLOTS> sGfxSelf;
 Table<GFX_INCL_SLOTS> sGfxIncl;
 Table<GFX_SELF_SLOTS> sWait;
 volatile u32 sMoves;     // samples where the baton holder had moved on since the previous one (watchdog)
+volatile u32 sTicks;     // times the sampler has woken up (the watchdog checks that it still runs)
 // Since the last heartbeat (ps3ProfilerFrameStatus): samples, and those with each game thread running.
 u32 sHbSamples, sHbRunning[MAX_THREADS];
 void* sMovedPc;
@@ -175,6 +176,7 @@ void samplerThread(void*)
 	Ps3SchedSample s;
 	for (;;) {
 		ps3b_sleep_us(4000); // (250 samples a second: each one interrupts a running thread)
+		sTicks = sTicks + 1;
 		if (sStopped) {
 			continue;
 		}
@@ -224,6 +226,7 @@ void samplerThread(void*)
 
 void onExit()
 {
+	ps3SchedExitReport();
 	sStopped = 1;
 	ps3b_sleep_us(3000); // (let a sample in progress finish)
 	report("exit");
@@ -232,6 +235,7 @@ void onExit()
 } // namespace
 
 extern "C" unsigned int ps3ProfilerMoves(void) { return sMoves; }
+extern "C" unsigned int ps3ProfilerTicks(void) { return sTicks; }
 
 // For the heartbeat (os_sched.cpp): how much of each frame (msPerFrame long on average since the last one)
 // the game threads ran, from the samples since then. The rest of the time none of them ran: waiting for the
