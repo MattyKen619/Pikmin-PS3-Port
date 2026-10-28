@@ -251,8 +251,18 @@ void BPikiInf::doRestore(Creature* piki)
 	if (piki->mObjType != OBJTYPE_Pikihead) {
 		ERROR("mail to teppe2\n");
 	}
+#if defined(TARGET_PS3)
+	// PS3 port: the original writes these through Piki's layout. On the GameCube, Piki's
+	// mPikiAnimMgr.mLowerAnimator.mStartKeyIndex and mEndKeyIndex (0x3CC, 0x3D0) are where PikiHeadItem keeps
+	// mSeedColor and mFlowerStage, the fields doStore saved. In the 64-bit layout they are not: the writes landed
+	// on the sprout's mItemShapeObject, and drawing the sprout then read through that pointer and crashed
+	// (test 47 and 48: the Forest Navel froze while loading, on a day it had sprouts left in the ground).
+	static_cast<PikiHeadItem*>(piki)->mSeedColor   = mPikiColour;
+	static_cast<PikiHeadItem*>(piki)->mFlowerStage = mNextKeyIndex;
+#else
 	static_cast<Piki*>(piki)->mPikiAnimMgr.mLowerAnimator.mStartKeyIndex = mPikiColour;
 	static_cast<Piki*>(piki)->mPikiAnimMgr.mLowerAnimator.mEndKeyIndex   = mNextKeyIndex;
+#endif
 }
 
 /**

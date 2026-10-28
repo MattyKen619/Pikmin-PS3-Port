@@ -175,6 +175,14 @@ extern "C" void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi
 	}
 }
 
+extern "C" int ps3b_address_readable(unsigned long long addr)
+{
+	// sys_memory_get_page_attribute (351): fails for an address that is not mapped
+	u64 attr[4] __attribute__((aligned(16))); // (sys_page_attr_t: attribute, access_right, page_size + pad)
+	lv2syscall2(351, addr, (u64)(uintptr_t)attr);
+	return (s32)p1 == 0;
+}
+
 extern "C" void ps3b_thread_exit(void)
 {
 	sysThreadExit(0);

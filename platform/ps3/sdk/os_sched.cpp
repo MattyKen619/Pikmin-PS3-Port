@@ -103,19 +103,41 @@ static void switchHooks(ThreadImpl* from, ThreadImpl* to)
 // within [lo, hi) so that a frame being changed while it is read cannot send the walk outside the stack.
 // The first frame may be one that was just left (lastSp of a function that has returned): its link to the
 // caller's frame is usually still there.
+//
+// Test build 49: every page it reads is checked first (ps3b_address_readable). lv2 ends a game thread that
+// faults and frees its stack; in tests 47 and 48 the profiler, then the watchdog, then the exit report each
+// walked the crashed main thread's stack and were ended in turn, so nothing reported the crash itself.
+static int sCheckPages = 1;     // 0 if the check does not work here (ps3SchedInit tries it)
+static volatile int sStackGone; // a walk found a game thread's stack gone (reported by the watchdog)
+
+static bool pageReadable(unsigned long long addr, unsigned long long* checked)
+{
+	const unsigned long long page = addr & ~0xFFFull;
+	if (!sCheckPages || page == *checked) {
+		return true;
+	}
+	if (!ps3b_address_readable(page)) {
+		sStackGone = 1;
+		return false;
+	}
+	*checked = page;
+	return true;
+}
+
 extern "C" int ps3WalkStack(const void* sp, unsigned long long lo, unsigned long long hi, void** pcs, int max)
 {
-	unsigned long long at = (unsigned long long)(uptr)sp;
-	int n                 = 0;
+	unsigned long long at      = (unsigned long long)(uptr)sp;
+	unsigned long long checked = 0;
+	int n                      = 0;
 	if (!lo || hi <= lo || hi - lo > (16u << 20)) {
 		return 0; // (no stack, or not one: lv2 stacks are at most a few MB)
 	}
 	while (n < max) {
-		if ((at & 15) || at < lo || at + 8 > hi) {
+		if ((at & 15) || at < lo || at + 8 > hi || !pageReadable(at, &checked)) {
 			break;
 		}
 		const unsigned long long next = *(volatile const unsigned long long*)(uptr)at;
-		if (next <= at || (next & 15) || next + 24 > hi) {
+		if (next <= at || (next & 15) || next + 24 > hi || !pageReadable(next + 16, &checked)) {
 			break;
 		}
 		void* ret = *(void* volatile const*)(uptr)(next + 16);
@@ -765,6 +787,14 @@ extern "C" void ps3SchedInit(void)
 	unsigned long long lo, hi;
 	ps3b_thread_stack(&lo, &hi);
 	setStack(main, lo, hi);
+	// (the page check must say yes for this thread's own stack, or it is not used)
+	volatile int probe = 0;
+	if (!ps3b_address_readable((unsigned long long)(uptr)&probe)) {
+		sCheckPages = 0;
+	}
+	unlockS();
+	ps3Log("[ps3] stack page checks %s\n", sCheckPages ? "on" : "OFF (sys_memory_get_page_attribute did not work)");
+	lockS();
 	main->started     = 1;
 	main->hasBaton    = 1;
 	main->intrEnabled = 1; // restored into sIntrEnabled whenever main gets the baton back
@@ -1141,8 +1171,12 @@ static void logStack(int index, ThreadImpl* t, bool detailed)
 	const bool have = readStack(t, &lo, &hi);
 	if (detailed) {
 		const Worker* w = t->worker;
-		ps3Log("[stack]   thread %d pc %p sp %p; stack 0x%llx-0x%llx%s, PS3 thread %d\n", index, pc, sp, lo, hi,
-		       have ? "" : " (changing)", w ? w->index : -1);
+		const bool gone = have && sCheckPages && !ps3b_address_readable((unsigned long long)(uptr)sp);
+		ps3Log("[stack]   thread %d pc %p sp %p; stack 0x%llx-0x%llx%s, PS3 thread %d%s\n", index, pc, sp, lo, hi,
+		       have ? "" : " (changing)", w ? w->index : -1,
+		       gone ? "; ITS STACK IS GONE: the thread has crashed (lv2 ends a thread that faults; pc is the last game code"
+		              " noted before the crash)"
+		            : "");
 	}
 	void* pcs[24];
 	const int depth = have ? ps3WalkStack(sp, lo, hi, pcs, 24) : 0;
@@ -1212,8 +1246,10 @@ static void reportThreads(const char* title, bool detailed)
 		logStack(i, t, detailed);
 	}
 	if (detailed) {
-		ps3Log("[ps3]   PS3 threads for game threads: %d made, %d waiting for one; the profiler has sampled %u times\n", sWorkerCount,
-		       sIdleWorkerCount, ps3ProfilerTicks());
+		ps3Log("[ps3]   PS3 threads for game threads: %d made, %d waiting for one; the profiler has sampled %u times; stack page "
+		       "checks %s%s\n",
+		       sWorkerCount, sIdleWorkerCount, ps3ProfilerTicks(), sCheckPages ? "on" : "OFF (not available)",
+		       sStackGone ? "; a stack walk found a thread's stack gone" : "");
 	}
 }
 
@@ -1236,6 +1272,7 @@ static void watchdogThread(void*)
 	int idleBlocks   = 0;
 	int profilerIdle = 0;
 	int seconds      = 0;
+	bool goneReported = false;
 	for (;;) {
 		ps3b_sleep_us(1000 * 1000);
 		seconds++;
@@ -1264,7 +1301,10 @@ static void watchdogThread(void*)
 		lastPc             = pc;
 		lastSp             = sp;
 
-		if (profilerIdle == 3) {
+		if (sStackGone && !goneReported) {
+			goneReported = true;
+			reportThreads("CRASH: a game thread's stack is gone (lv2 ends a thread that faults)", true);
+		} else if (profilerIdle == 3) {
 			reportThreads("STALL: the profiler has stopped sampling (for 3 s)", true);
 		} else if (idleBlocks == 5 || (idleBlocks > 0 && idleBlocks % 30 == 0)) {
 			char title[128];

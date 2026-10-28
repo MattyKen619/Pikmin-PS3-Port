@@ -39,6 +39,9 @@ int ps3b_thread_create(void (*entry)(void*), void* arg, int priority, unsigned i
 void ps3b_thread_exit(void) __attribute__((noreturn));
 // The calling thread's stack: [*lo, *hi). (The profiler walks game and graphics threads' stacks within it.)
 void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi);
+// 1 if the page holding addr is mapped (lv2 sys_memory_get_page_attribute). lv2 ends a thread that faults and
+// frees its stack; reading that stack afterwards ends the reader too (test builds 47 and 48).
+int ps3b_address_readable(unsigned long long addr);
 
 // ---- files (read-only game data + log)
 int ps3b_file_exists(const char* path);

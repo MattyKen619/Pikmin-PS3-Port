@@ -21,6 +21,7 @@ void ps3b_cond_broadcast(unsigned int c) { (void)c; }
 int ps3b_thread_create(void (*entry)(void*), void* arg, int prio, unsigned int stack, const char* name) { (void)entry; (void)arg; (void)prio; (void)stack; (void)name; return 0; }
 void ps3b_thread_exit(void) { for (;;) { } }
 void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi) { *lo = *hi = 0; }
+int ps3b_address_readable(unsigned long long addr) { (void)addr; return 1; }
 int ps3b_file_exists(const char* path) { (void)path; return 0; }
 int ps3b_file_open(const char* path) { (void)path; return -1; }
 long long ps3b_file_size(int fd) { (void)fd; return -1; }
