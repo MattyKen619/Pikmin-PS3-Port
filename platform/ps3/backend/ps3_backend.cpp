@@ -698,56 +698,104 @@ static int readBanner(unsigned char* out)
 	return 1;
 }
 
+static void logIconFile(const char* what, const char* path)
+{
+	sysFSStat st;
+	if (sysLv2FsStat(path, &st) != 0) {
+		bootLog("[boot] XMB icon: %s: %s is missing\n", what, path);
+		return;
+	}
+	bootLog("[boot] XMB icon: %s: %llu bytes, mode %o, owner %d, group %d\n", what, (unsigned long long)st.st_size,
+	        (unsigned)st.st_mode, (int)st.st_uid, (int)st.st_gid);
+}
+
 extern "C" void ps3b_update_icon(void)
 {
 	const char* icon = GAME_DIR "/ICON0.PNG";
 	char* current     = NULL;
 	unsigned int size = 0;
-	if (!ps3b_usrdir() || !ps3b_file_read_all(icon, &current, &size)) {
+	if (!ps3b_usrdir()) {
 		return; // (not installed as a package)
+	}
+	if (!ps3b_file_read_all(icon, &current, &size)) {
+		logIconFile("cannot be read", icon);
+		return;
 	}
 	const bool standIn = bannericon::hasStandInMark((const unsigned char*)current, size);
 	free(current);
 	if (!standIn) {
-		return; // this package's own icon, or one made already
+		bootLog("[boot] XMB icon: kept (this package's own, or made already)\n");
+		return;
 	}
+	logIconFile("the package's stand-in", icon);
 	unsigned char* banner = (unsigned char*)malloc(bannericon::BANNER_BYTES + bannericon::BANNER_W * bannericon::BANNER_H * 4);
 	unsigned char* rgba   = (unsigned char*)malloc(bannericon::ICON_W * bannericon::ICON_H * 4);
 	unsigned char* png    = (unsigned char*)malloc(bannericon::PNG_BYTES);
 	void* work            = malloc(bannericon::workBytes());
+	unsigned bytes        = 0;
+	bool compressed       = false;
 	if (!banner || !rgba || !png || !work) {
 		bootLog("[boot] XMB icon: not made (out of memory)\n");
 	} else if (!readBanner(banner)) {
 		bootLog("[boot] XMB icon: not made (the disc's banner, opening.bnr, could not be read)\n");
 	} else {
+		const unsigned long long start = ps3b_timebase();
 		unsigned char* bannerRgba = banner + bannericon::BANNER_BYTES;
 		bannericon::decodeBanner(banner, bannerRgba);
 		bannericon::makeIcon(bannerRgba, rgba, work);
-		const unsigned bytes = bannericon::encodePng(rgba, png);
-		const char* partial  = GAME_DIR "/ICON0.PNG.part";
-		s32 fd               = -1;
-		u64 written          = 0;
-		int ok = sysLv2FsOpen(partial, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, 0666, NULL, 0) == 0;
-		if (ok) {
-			ok = sysLv2FsWrite(fd, png, bytes, &written) == 0 && written == bytes;
-			sysLv2FsClose(fd);
-		}
-		if (ok) {
-			sysLv2FsUnlink(icon);
-			ok = sysLv2FsRename(partial, icon) == 0;
-		}
-		if (ok) {
-			sysLv2FsChmod(icon, 0666);
-			bootLog("[boot] XMB icon: made from the disc's banner (%u bytes; the XMB shows it once the game has quit)\n", bytes);
-		} else {
-			sysLv2FsUnlink(partial);
-			bootLog("[boot] XMB icon: FAILED to write %s\n", icon);
-		}
+		bytes = bannericon::encodePng(rgba, png, &compressed);
+		bootLog("[boot] XMB icon: made from the disc's banner in %d ms: %u bytes, %s, crc %08x\n",
+		        (int)((ps3b_timebase() - start) * 1000 / ps3b_timebase_freq()), bytes, compressed ? "compressed" : "NOT compressed",
+		        bannericon::crc32(png, bytes, 0));
 	}
 	free(banner);
 	free(rgba);
-	free(png);
 	free(work);
+	if (bytes) {
+		// Written under a temporary name, then renamed over the stand-in (or, if that is refused, in its place).
+		const char* partial = GAME_DIR "/ICON0.PNG.part";
+		s32 fd              = -1;
+		u64 written         = 0;
+		s32 err             = sysLv2FsOpen(partial, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, 0666, NULL, 0);
+		if (err == 0) {
+			err = sysLv2FsWrite(fd, png, bytes, &written);
+			sysLv2FsFsync(fd);
+			sysLv2FsClose(fd);
+			if (err == 0 && written != bytes) {
+				err = -1;
+			}
+		}
+		if (err != 0) {
+			bootLog("[boot] XMB icon: FAILED to write %s (error 0x%08x)\n", partial, (unsigned)err);
+		} else {
+			sysLv2FsChmod(partial, 0666);
+			err = sysLv2FsRename(partial, icon);
+			if (err != 0) {
+				bootLog("[boot] XMB icon: renaming over the stand-in refused (error 0x%08x); removing it first\n", (unsigned)err);
+				sysLv2FsUnlink(icon);
+				err = sysLv2FsRename(partial, icon);
+			}
+			if (err != 0) {
+				bootLog("[boot] XMB icon: FAILED to rename %s (error 0x%08x)\n", partial, (unsigned)err);
+			}
+		}
+		sysLv2FsUnlink(partial);
+		char* back           = NULL;
+		unsigned int backLen = 0;
+		const bool same      = ps3b_file_read_all(icon, &back, &backLen) && backLen == bytes && memcmp(back, png, bytes) == 0;
+		free(back);
+		logIconFile(same ? "now (reads back the same)" : "now (DIFFERENT from what was written)", icon);
+		if (const char* usb = ps3b_usb_folder()) { // a copy to look at (it is made from the disc: keep it private)
+			char copy[300];
+			snprintf(copy, sizeof(copy), "%s/xmb_icon_made.png", usb);
+			s32 cfd = -1;
+			if (sysLv2FsOpen(copy, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &cfd, 0666, NULL, 0) == 0) {
+				sysLv2FsWrite(cfd, png, bytes, &written);
+				sysLv2FsClose(cfd);
+			}
+		}
+	}
+	free(png);
 }
 
 // ---------------------------------------------------------------- log file

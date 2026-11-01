@@ -1,7 +1,9 @@
 disc_test
 dvd_test
 icon_test
+png_selftest
 *.ii
 *.o
 *.txt
 *.png
+*.rgba

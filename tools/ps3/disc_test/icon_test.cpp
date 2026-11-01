@@ -74,13 +74,14 @@ int main(int argc, char** argv)
 	void* work = malloc(bannericon::workBytes());
 	bannericon::decodeBanner(bnr + bannericon::BANNER_OFFSET, banner);
 	bannericon::makeIcon(banner, icon, work);
-	const unsigned bytes = bannericon::encodePng(icon, png);
+	bool compressed      = false;
+	const unsigned bytes = bannericon::encodePng(icon, png, &compressed);
 	FILE* out = fopen(argv[2], "wb");
 	if (!out || fwrite(png, 1, bytes, out) != bytes) {
 		perror(argv[2]);
 		return 1;
 	}
 	fclose(out);
-	printf("%s: %u bytes (room for %u)\n", argv[2], bytes, (unsigned)bannericon::PNG_BYTES);
-	return bytes == (unsigned)bannericon::PNG_BYTES ? 0 : 1;
+	printf("%s: %u bytes, %s, crc %08x\n", argv[2], bytes, compressed ? "compressed" : "NOT compressed", bannericon::crc32(png, bytes, 0));
+	return compressed ? 0 : 1;
 }
