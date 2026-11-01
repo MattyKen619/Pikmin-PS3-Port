@@ -834,6 +834,16 @@ WayPoint* RouteMgr::findNearestOffWayPoint(u32 handle, immut Vector3f& pos, bool
 			}
 		}
 
+#if defined(TARGET_PS3)
+		// PS3 port: with no closed waypoint (every gate on the route broken down), the original returns the
+		// element before the array. createOffPlane then follows one of that garbage's "link" indices into the
+		// waypoint array: on the GameCube a read somewhere in its memory map, here an address that may not be
+		// mapped (test 49: the game crashed there in the Distant Spring). The only caller already falls back to
+		// the ordinary nearest-edge search for "none".
+		if (nearestIdx == -1) {
+			return nullptr;
+		}
+#endif
 		return &mGroupList[idx].mWayPoints[nearestIdx];
 	}
 
