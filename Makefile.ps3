@@ -17,9 +17,12 @@ include $(PSL1GHT)/ppu_rules
 TARGET    := pikmin
 BUILD     := build/ps3
 BUILDDIR  := $(CURDIR)/$(BUILD)/pkgwork
-TITLE     := Pikmin (PS3 port)
+TITLE     := Pikmin
 APPID     := PIKM00001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
+# The XMB icon: platform/ps3/pkg/ICON0.local.png if you made one (tools/ps3/make_icon.py; not in the
+# repository, as a game's logo is its publisher's artwork), else PSL1GHT's.
+ICON0     := $(firstword $(wildcard $(CURDIR)/platform/ps3/pkg/ICON0.local.png) $(PS3DEV)/bin/ICON0.PNG)
 
 #---------------------------------------------------------------------------------
 # Sources
@@ -56,7 +59,7 @@ DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w \
              -msave-toc-indirect -mno-pointers-to-nested-functions
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 52
+TEST_BUILD := 53
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
