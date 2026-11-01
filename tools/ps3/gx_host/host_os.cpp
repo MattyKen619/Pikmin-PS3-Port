@@ -237,6 +237,7 @@ void ps3b_cond_broadcast(unsigned int c) { pthread_cond_broadcast(&sConds[c]); }
 int ps3b_file_exists(const char* path) { return access(path, F_OK) == 0; }
 
 const char* ps3b_data_root(void) { return getenv("GX_TRACE_DIR"); }
+const char* ps3b_work_dir(void) { return getenv("GX_TRACE_DIR"); }
 void* ps3b_memalign(unsigned int align, unsigned int size)
 {
 	void* p = NULL;

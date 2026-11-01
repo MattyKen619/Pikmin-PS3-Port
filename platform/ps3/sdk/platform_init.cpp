@@ -42,12 +42,13 @@ extern "C" void ps3HeapExhausted(const char* heapName, int requested, int freeBy
 	OSPanic(__FILE__, __LINE__, "out of memory in a game heap");
 }
 
-// PIKMIN/diagnostics.txt next to the game data turns on the testing extras (see sdk_internal.h).
+// diagnostics.txt in the PIKMIN folder on the USB drive (or the game's folder) turns on the testing extras (see
+// sdk_internal.h).
 extern "C" int ps3DiagnosticsOn(void)
 {
 	static int sOn = -1;
 	if (sOn < 0) {
-		const char* root = ps3b_data_root();
+		const char* root = ps3b_work_dir();
 		char path[320];
 		sOn = 0;
 		if (root) {
@@ -70,7 +71,10 @@ extern "C" void ps3PlatformInit(void)
 	// The first log line also chooses and creates the log file (before anything that could crash).
 	ps3Log("[boot] Pikmin PS3 port, build %d (built %s %s)\n", PS3_TEST_BUILD, __DATE__, __TIME__);
 	const char* logPath = ps3b_log_path();
-	ps3Log("[boot] log file: %s\n", logPath ? logPath : "none (no USB drive found)");
+	ps3Log("[boot] log file: %s\n", logPath ? logPath : "none (nowhere to write it)");
+	if (const char* copy = ps3b_log_copy_path()) {
+		ps3Log("[boot] log file copy: %s\n", copy);
+	}
 	ps3b_log_memory("start");
 
 	ps3b_console_init();
@@ -86,16 +90,17 @@ extern "C" void ps3PlatformInit(void)
 	ps3ProfilerStart(ps3DiagnosticsOn());
 
 	ps3BootStage("looking for the game data");
-	const char* root = ps3b_data_root();
-	if (!root) {
-		ps3Log("[ps3] FAILED: game data not found.\n");
-		ps3Log("[ps3] Copy the PIKMIN folder (containing fst.txt and files/) to the top level of a USB drive,\n");
-		ps3Log("[ps3] plug it in, and start the game again. Hold Start+Select to quit.\n");
+	if (!ps3b_prepare_game_data()) {
+		const char* usrdir = ps3b_usrdir();
+		ps3Log("[ps3] FAILED: the game data was not found.\n");
+		ps3Log("[ps3] This port needs your own Pikmin disc image (North America, GPIE01), as a .iso, .gcm or .ciso file.\n");
+		ps3Log("[ps3] Either put it in %s with a file manager or FTP,\n", usrdir ? usrdir : "the game's folder on the hard drive");
+		ps3Log("[ps3] or copy it to a USB drive (at the top, or in a PIKMIN folder) for the game to copy on its next start.\n");
+		ps3Log("[ps3] Press the PS button and choose Quit Game.\n");
 		for (;;) {
 			ps3b_sleep_us(1000 * 1000);
 		}
 	}
-	ps3Log("[boot] game data: %s\n", root);
 
 	ps3BootStage("OS memory and clock");
 	ps3OsMiscInit();

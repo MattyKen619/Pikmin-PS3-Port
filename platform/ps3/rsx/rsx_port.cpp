@@ -29,9 +29,9 @@ static void outOfMemory(size_t bytes)
 gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 {
 	gfx::allocFailedHook() = outOfMemory;
-	if (ps3b_data_root()) {
+	if (ps3b_work_dir()) {
 		char path[256];
-		snprintf(path, sizeof(path), "%s/no_rsx.txt", ps3b_data_root());
+		snprintf(path, sizeof(path), "%s/no_rsx.txt", ps3b_work_dir());
 		if (ps3b_file_exists(path)) {
 			ps3b_log_write("[rsx] PIKMIN/no_rsx.txt exists: not drawing (the text console stays on screen)\n");
 			return NULL;
@@ -51,9 +51,9 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 	}
 	sRenderer = gfx::create<gfx::Renderer>(cp, memory, *sDev);
 	sRenderer->setLogger(logLine);
-	if (ps3b_data_root()) {
+	if (ps3b_work_dir()) {
 		char path[256];
-		snprintf(path, sizeof(path), "%s/cpu_xf.txt", ps3b_data_root());
+		snprintf(path, sizeof(path), "%s/cpu_xf.txt", ps3b_work_dir());
 		if (ps3b_file_exists(path)) {
 			sRenderer->setGpuTransform(false);
 			ps3b_log_write("[rsx] PIKMIN/cpu_xf.txt exists: vertices are transformed on the CPU\n");
@@ -61,9 +61,9 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 	}
 	ps3b_log_write(sRenderer->gpuTransform() ? "[rsx] vertices are transformed and lit by the RSX (vertex programs)\n"
 	                                         : "[rsx] vertices are transformed and lit on the CPU\n");
-	if (ps3b_data_root()) {
+	if (ps3b_work_dir()) {
 		char path[256];
-		snprintf(path, sizeof(path), "%s/no_vertex_cache.txt", ps3b_data_root());
+		snprintf(path, sizeof(path), "%s/no_vertex_cache.txt", ps3b_work_dir());
 		if (ps3b_file_exists(path)) {
 			sRenderer->setVertexCache(false);
 			ps3b_log_write("[rsx] PIKMIN/no_vertex_cache.txt exists: the vertex cache is off\n");
@@ -71,9 +71,9 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 	}
 	ps3b_log_write(sRenderer->vertexCache() ? "[rsx] display list draws are kept in the vertex cache\n"
 	                                        : "[rsx] the vertex cache is off\n");
-	if (ps3b_data_root()) {
+	if (ps3b_work_dir()) {
 		char path[256];
-		snprintf(path, sizeof(path), "%s/test_buttons.txt", ps3b_data_root());
+		snprintf(path, sizeof(path), "%s/test_buttons.txt", ps3b_work_dir());
 		sTestButtons = ps3b_file_exists(path) != 0;
 		if (sTestButtons) {
 			ps3b_log_write("[rsx] PIKMIN/test_buttons.txt exists: R3, L3 and Select are test buttons\n");
@@ -81,7 +81,7 @@ gpu::Listener* ps3rsx::start(gpu::CommandProcessor& cp, gpu::Memory& memory)
 		// Audit frames (the vertex cache and the change checks compared with a fresh look, once a minute)
 		// found nothing wrong since test build 30, and each one held the graphics thread up for about 100 ms:
 		// a hitch, and (test build 39) sound waiting to be mixed. Only with PIKMIN/audit.txt now.
-		snprintf(path, sizeof(path), "%s/audit.txt", ps3b_data_root());
+		snprintf(path, sizeof(path), "%s/audit.txt", ps3b_work_dir());
 		const bool audit = ps3b_file_exists(path) != 0;
 		sRenderer->setAuditFrames(audit ? 1800 : 0);
 		if (audit) {
@@ -128,7 +128,7 @@ void captureWriter(void* arg)
 
 void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 {
-	if (!sRenderer || !ps3b_data_root()) {
+	if (!sRenderer || !ps3b_work_dir()) {
 		return;
 	}
 	gfx::u32 w = info.width, h = info.height;
@@ -157,7 +157,7 @@ void ps3rsx::captureFrame(const gpu::CopyInfo& info, const char* name)
 		file[hl + i * 3 + 1] = (unsigned char)(v >> 8);
 		file[hl + i * 3 + 2] = (unsigned char)v;
 	}
-	snprintf(c->path, sizeof(c->path), "%s/%s.ppm", ps3b_data_root(), name);
+	snprintf(c->path, sizeof(c->path), "%s/%s.ppm", ps3b_work_dir(), name);
 	snprintf(c->name, sizeof(c->name), "%s", name);
 	c->data   = file;
 	c->size   = (unsigned int)(hl + w * h * 3);

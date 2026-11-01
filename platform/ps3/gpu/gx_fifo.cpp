@@ -757,9 +757,9 @@ static void start()
 	}
 	initBpFilter();
 	bool sync = sForceSync;
-	if (!sync && ps3b_data_root()) {
+	if (!sync && ps3b_work_dir()) {
 		char path[256];
-		snprintf(path, sizeof(path), "%s/gx_sync.txt", ps3b_data_root());
+		snprintf(path, sizeof(path), "%s/gx_sync.txt", ps3b_work_dir());
 		sync = ps3b_file_exists(path) != 0;
 	}
 	if (!sync && ps3b_mutex_create(&sMutex) == 0 && ps3b_cond_create(&sWorkCond, sMutex) == 0

@@ -29,6 +29,14 @@ int ps3b_file_pread(int fd, void* buf, unsigned long long off, unsigned int len)
 void ps3b_file_close(int fd) { (void)fd; }
 int ps3b_file_read_all(const char* path, char** data, unsigned int* size) { (void)path; (void)data; (void)size; return 0; }
 const char* ps3b_data_root(void) { return 0; }
+int ps3b_prepare_game_data(void) { return 0; }
+const char* ps3b_disc_image(void) { return 0; }
+const char* ps3b_usrdir(void) { return 0; }
+const char* ps3b_usb_folder(void) { return 0; }
+const char* ps3b_work_dir(void) { return 0; }
+const char* ps3b_save_dir(void) { return 0; }
+int ps3b_file_copy(const char* from, const char* to) { (void)from; (void)to; return 0; }
+const char* ps3b_log_copy_path(void) { return 0; }
 void ps3b_log_write(const char* text) { (void)text; }
 void ps3b_log_flush(void) { }
 void ps3b_free(void* p) { (void)p; }

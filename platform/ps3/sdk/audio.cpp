@@ -244,7 +244,7 @@ static void captureWriterThread(void*)
 	bool done[2]   = { false, false };
 	for (int k = 0; k < 2; k++) {
 		char path[512];
-		snprintf(path, sizeof(path), "%s/%s", ps3b_data_root(), caps[k]->name);
+		snprintf(path, sizeof(path), "%s/%s", ps3b_work_dir(), caps[k]->name);
 		fd[k] = ps3b_file_open_rw(path, 1);
 		if (fd[k] < 0) {
 			ps3Log("[ps3] sound capture: could not create %s\n", path);
@@ -291,7 +291,7 @@ static void captureWriterThread(void*)
 
 static void startCapture()
 {
-	if (!ps3b_data_root()) {
+	if (!ps3b_work_dir()) {
 		return;
 	}
 	Capture* caps[2] = { &sMixCapture, &sOutCapture };
@@ -579,11 +579,11 @@ static void spuSubframeDone(void);
 
 static bool dataFile(const char* name)
 {
-	if (!ps3b_data_root()) {
+	if (!ps3b_work_dir()) {
 		return false;
 	}
 	char path[256];
-	snprintf(path, sizeof(path), "%s/%s", ps3b_data_root(), name);
+	snprintf(path, sizeof(path), "%s/%s", ps3b_work_dir(), name);
 	return ps3b_file_exists(path) != 0;
 }
 

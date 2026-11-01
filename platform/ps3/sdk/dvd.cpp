@@ -1,14 +1,17 @@
-// PS3 port: DVD access over the game files extracted by tools/ps3/extract_disc.py.
-//
-// Layout of the data folder (found by ps3b_data_root(), e.g. /dev_usb000/PIKMIN):
-//   fst.txt   "<entrynum>\t<d|f>\t/<path>" for every disc file-table entry
-//   files/    the files themselves
+// PS3 port: DVD access, from either
+//   - the disc image itself (build 52): a GameCube ISO/GCM or CISO, found by ps3b_disc_image() (normally in the
+//     game's folder on the hard drive), read through ps3/disc_image.h; or
+//   - the files extracted by tools/ps3/extract_disc.py, in the data folder (ps3b_data_root(), e.g.
+//     /dev_usb000/PIKMIN):
+//       fst.txt   "<entrynum>\t<d|f>\t/<path>" for every disc file-table entry
+//       files/    the files themselves
 // Paths are matched case-insensitively, as the GameCube does.
 
 #include "sdk_internal.h"
 
 #include "../backend/ps3_backend.h"
 #include "Dolphin/dvd.h"
+#include "ps3/disc_image.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +28,7 @@ struct DvdEntry {
 	int busy;   // reads queued on the I/O thread: the file must stay open
 	int logged;  // its first open is in the log (the movie player opens its file once a second)
 	int opening; // the I/O thread is opening it for a game thread
+	unsigned long long discOffset; // where the file starts in the disc image (image mode)
 };
 
 static DvdEntry* sEntries;
@@ -34,6 +38,13 @@ static int sOpenCount;
 static u32 sUseClock;
 static int sLoaded;
 static DVDDiskID sDiskId;
+
+// Image mode: every file is read from the one disc image. (ps3b_file_pread seeks, then reads: sImageLock keeps
+// two threads' reads apart.)
+static bool sImageMode;
+static int sImageFd = -1;
+static unsigned int sImageLock;
+static discimg::Image sImage;
 
 static void* allocZeroed(unsigned int size)
 {
@@ -125,12 +136,84 @@ static void normalize(const char* in, char* out, int outSize)
 	}
 }
 
+static int readImage(void* ctx, void* dst, unsigned long long offset, unsigned int len)
+{
+	return ps3b_file_pread(*(int*)ctx, dst, offset, len);
+}
+
+static void* allocImage(unsigned int size) { return allocZeroed(size); }
+
+static void addEntry(int index, bool isDir, const char* path, unsigned long long discOffset, long long size)
+{
+	DvdEntry* e = &sEntries[index];
+	e->isDir    = isDir;
+	e->path     = (char*)allocZeroed(strlen(path) + 1);
+	strcpy(e->path, path);
+	char low[256];
+	normalize(e->path, low, sizeof(low));
+	e->lower = (char*)allocZeroed(strlen(low) + 1);
+	strcpy(e->lower, low);
+	e->fd         = -1;
+	e->size       = size;
+	e->discOffset = discOffset;
+	u32 h         = hashString(e->lower) & (HASH_SIZE - 1);
+	while (sHash[h]) {
+		h = (h + 1) & (HASH_SIZE - 1);
+	}
+	sHash[h] = index + 1;
+}
+
+static void visitImageEntry(void*, unsigned int index, bool isDir, const char* path, unsigned int offset, unsigned int length)
+{
+	addEntry((int)index, isDir, path, offset, isDir ? -1 : (long long)length);
+}
+
+// The file table straight from the disc image.
+static void initImage(const char* path)
+{
+	sImageFd = ps3b_file_open(path);
+	if (sImageFd < 0) {
+		ps3Log("[ps3] FAILED to open the disc image %s\n", path);
+		return;
+	}
+	const char* why = discimg::open(&sImage, readImage, &sImageFd, allocImage);
+	char id[7]      = "";
+	int revision    = 0;
+	if (why || !discimg::gameId(&sImage, id, &revision)) {
+		ps3Log("[ps3] FAILED: %s is %s\n", path, why ? why : "unreadable");
+		return;
+	}
+	unsigned char* fst = NULL;
+	const unsigned int fstSize = discimg::loadFst(&sImage, allocImage, &fst);
+	const unsigned int count   = fstSize ? discimg::be32(fst + 8) : 0;
+	if (!count || ps3b_mutex_create(&sImageLock) != 0) {
+		ps3Log("[ps3] FAILED to read the file table of %s\n", path);
+		return;
+	}
+	sEntries = (DvdEntry*)allocZeroed(count * sizeof(DvdEntry));
+	sHash    = (int*)allocZeroed(HASH_SIZE * sizeof(int));
+	addEntry(0, true, "/", 0, -1);
+	discimg::walkFst(fst, fstSize, visitImageEntry, NULL);
+	sEntryCount = (int)count;
+	sImageMode  = true;
+	memcpy(sDiskId.gameName, id, 4);
+	memcpy(sDiskId.company, id + 4, 2);
+	sDiskId.diskNumber  = 0;
+	sDiskId.gameVersion = (u8)revision;
+	ps3Log("[ps3] disc image: %s (%s rev %d, %s), %d file table entries\n", path, id, revision, sImage.ciso ? "CISO" : "plain image",
+	       sEntryCount);
+}
+
 extern "C" void ps3DvdInit(void)
 {
 	if (sLoaded) {
 		return;
 	}
-	sLoaded          = 1;
+	sLoaded = 1;
+	if (const char* image = ps3b_disc_image()) {
+		initImage(image);
+		return;
+	}
 	const char* root = ps3b_data_root();
 	if (!root) {
 		return;
@@ -241,6 +324,9 @@ static int entryFd(int idx)
 {
 	DvdEntry* e = &sEntries[idx];
 	e->lastUse  = ++sUseClock;
+	if (sImageMode) {
+		return sImageFd; // (sizes are known from the file table)
+	}
 	while (e->opening && ps3CanYield()) {
 		ps3WaitOn(e, "DVD open"); // another game thread is opening this file
 	}
@@ -394,6 +480,22 @@ static void asyncDone(void* arg)
 // The read itself. Runs on the I/O thread (or, as a fallback, on the caller); touches no shared state.
 static s32 readNow(int idx, int fd, void* addr, u32 length, unsigned long long offset)
 {
+	if (sImageMode) {
+		const DvdEntry* e = &sEntries[idx];
+		const unsigned long long size = e->size > 0 ? (unsigned long long)e->size : 0;
+		const u32 n = offset >= size ? 0 : (size - offset < length ? (u32)(size - offset) : length);
+		ps3b_mutex_lock(sImageLock);
+		const bool ok = discimg::readDisc(&sImage, addr, e->discOffset + offset, n);
+		ps3b_mutex_unlock(sImageLock);
+		if (!ok) {
+			ps3Log("[ps3] FAILED reading %s from the disc image (offset %d, %d bytes)\n", e->path, (int)offset, (int)length);
+			return DVD_RESULT_FATAL_ERROR;
+		}
+		if (n < length) {
+			memset((u8*)addr + n, 0, length - n); // (the GameCube reads in 32-byte units past the end of a file)
+		}
+		return (s32)length;
+	}
 	int got = ps3b_file_pread(fd, addr, offset, length);
 	if (got < 0) {
 		ps3Log("[ps3] FAILED reading %s (offset %d, %d bytes)\n", sEntries[idx].path, (int)offset, (int)length);

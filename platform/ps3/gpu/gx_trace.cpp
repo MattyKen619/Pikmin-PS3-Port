@@ -137,7 +137,7 @@ static void writerThread(void*)
 			ps3b_sleep_us(50 * 1000);
 		}
 		char path[256];
-		snprintf(path, sizeof(path), "%s/%s", ps3b_data_root(), sWriteName);
+		snprintf(path, sizeof(path), "%s/%s", ps3b_work_dir(), sWriteName);
 		int fd = ps3b_file_open_rw(path, 1);
 		if (fd < 0) {
 			ps3Log("[gpu] could not create %s\n", path);
@@ -352,7 +352,7 @@ static void dropPending()
 
 static void startRecording(const char* label, u32 frame, const gpu::CommandProcessor& cp)
 {
-	if (!ps3b_data_root()) {
+	if (!ps3b_work_dir()) {
 		dropPending(); // no USB drive to write to
 		return;
 	}

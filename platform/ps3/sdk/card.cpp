@@ -1,4 +1,5 @@
-// PS3 port: the GameCube memory card (CARD API), kept in a file next to the game data.
+// PS3 port: the GameCube memory card (CARD API), kept in a file: /dev_hdd0/data/pikmin/MemoryCardA.USA.raw
+// (ps3b_save_dir; up to build 51 it was next to the game data, and is copied from there the first time).
 //
 // The file is a raw image of a "Memory Card 251" (2 MB) in the GameCube's own format, the same format
 // as Dolphin's MemoryCardA.USA.raw: block 0 header, blocks 1-2 directory (two copies), blocks 3-4
@@ -193,17 +194,43 @@ static int countFreeEntries()
 	return n;
 }
 
+// Up to build 51 the card was in the PIKMIN folder with the game data (usually on the USB drive). The first time
+// there is no card in the save folder, a copy of that one is made (the old one is left where it is).
+static void copyOldCard()
+{
+	const char* places[3] = { ps3b_usb_folder(), ps3b_data_root(), "/dev_hdd0/PIKMIN" };
+	for (int i = 0; i < 3; i++) {
+		char old[256];
+		if (!places[i]) {
+			continue;
+		}
+		snprintf(old, sizeof(old), "%s/%s", places[i], VCARD_FILE);
+		if (strcmp(old, sCard.path) == 0 || !ps3b_file_exists(old)) {
+			continue;
+		}
+		if (ps3b_file_copy(old, sCard.path)) {
+			ps3Log("[card] copied the memory card from %s (left there as it was; no longer used)\n", old);
+		} else {
+			ps3Log("[card] FAILED to copy the memory card from %s\n", old);
+		}
+		return;
+	}
+}
+
 // Loads the image (once), creating a freshly formatted card if there is none.
 static s32 loadCard()
 {
 	if (sCard.loaded) {
 		return sCard.broken ? CARD_RESULT_BROKEN : CARD_RESULT_READY;
 	}
-	const char* root = ps3b_data_root();
-	if (!root) {
+	const char* dir = ps3b_save_dir();
+	if (!dir) {
 		return CARD_RESULT_NOCARD;
 	}
-	snprintf(sCard.path, sizeof(sCard.path), "%s/%s", root, VCARD_FILE);
+	snprintf(sCard.path, sizeof(sCard.path), "%s/%s", dir, VCARD_FILE);
+	if (!ps3b_file_exists(sCard.path)) {
+		copyOldCard();
+	}
 
 	char* data        = NULL;
 	unsigned int size = 0;
@@ -408,12 +435,12 @@ extern "C" void ps3CardPreload(void)
 BOOL CARDProbe(s32 chan)
 {
 	ps3DeliverInterrupts();
-	return chan == 0 && ps3b_data_root() != NULL;
+	return chan == 0 && ps3b_save_dir() != NULL;
 }
 
 s32 CARDProbeEx(s32 chan, s32* memSize, s32* sectorSize)
 {
-	if (chan != 0 || !ps3b_data_root()) {
+	if (chan != 0 || !ps3b_save_dir()) {
 		return CARD_RESULT_NOCARD;
 	}
 	if (memSize) {

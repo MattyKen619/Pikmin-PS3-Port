@@ -53,17 +53,25 @@ int ps3b_file_read_all(const char* path, char** out_data, unsigned int* out_size
 int ps3b_file_open_rw(const char* path, int create);     // read/write (memory card image); fd or -1
 int ps3b_file_pwrite(int fd, const void* buf, unsigned long long offset, unsigned int len); // bytes written or -1
 
-// ---- data location: the folder holding fst.txt and files/ (see tools/ps3/extract_disc.py)
-const char* ps3b_data_root(void); // NULL if not found
+// ---- where things are (build 52; see ps3_backend.cpp)
+int ps3b_prepare_game_data(void);  // finds the game data, copying a disc image from USB on the first start; 0 if none
+const char* ps3b_disc_image(void); // the disc image to play from, or NULL (then the extracted files: ps3b_data_root)
+const char* ps3b_data_root(void);  // the folder of extracted files (fst.txt, files/), NULL if not found
+const char* ps3b_usrdir(void);     // the game's folder on the hard drive, NULL if not installed as a package
+const char* ps3b_usb_folder(void); // the PIKMIN folder on a USB drive, NULL if none
+const char* ps3b_work_dir(void);   // test switches (diagnostics.txt ...) and recordings: the USB PIKMIN folder, else USRDIR
+const char* ps3b_save_dir(void);   // the memory card file's folder: /dev_hdd0/data/pikmin
+int ps3b_file_copy(const char* from, const char* to); // via a temporary file; 1 if done
 
 // ---- logging: TTY, log file next to the game data, and the on-screen console.
 // Lines are queued in memory and written out by a background thread about ten times a second, each
 // batch with the file closed again at once, so the log survives a crash or a forced power-off (minus
-// the last fraction of a second). The file is pikmin_log.txt in the data folder, or at the top of the
-// first USB drive if the data folder is missing.
+// the last fraction of a second). The file is pikmin_log.txt in the game's folder on the hard drive, with a
+// copy in the USB drive's PIKMIN folder if there is one; the one before is kept as pikmin_log_previous.txt.
 void ps3b_log_write(const char* text);   // queued; a background thread writes it out
 void ps3b_log_flush(void);                // writes out everything queued, now
 const char* ps3b_log_path(void);          // NULL if no writable location was found
+const char* ps3b_log_copy_path(void);     // the second copy (USB drive), or NULL
 void ps3b_log_memory(const char* when);   // logs lv2's user-memory totals
 
 // ---- on-screen text console (shown until the game's graphics take over the screen)

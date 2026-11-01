@@ -2,6 +2,7 @@
 // See ps3_backend.h for why this is separate from the SDK layer.
 
 #include "ps3_backend.h"
+#include "../include/ps3/disc_image.h"
 
 #include <malloc.h>
 #include <ppu-types.h>
@@ -280,12 +281,73 @@ extern "C" int ps3b_file_read_all(const char* path, char** out_data, unsigned in
 	return 1;
 }
 
-// ---------------------------------------------------------------- data root + log file
+// ---------------------------------------------------------------- where things are (build 52)
+//
+// As other PS3 homebrew ports do it (Doom 64's, for one): the package holds only the program; the player puts
+// the game's own data in the game's folder on the hard drive, /dev_hdd0/game/<title ID>/USRDIR, where it stays
+// when a newer package is installed over this one. Here that is the Pikmin (North America) disc image, under
+// any name ending in .iso, .gcm or .ciso; the game reads its files straight out of it (ps3/disc_image.h, dvd.cpp).
+// For a player without a file manager or FTP: an image on a USB drive (at the top, or in a PIKMIN folder) is
+// copied to the hard drive on the first start. The saves go to /dev_hdd0/data/pikmin, which survives deleting
+// the game. The log goes to the game's folder, with a copy in the USB drive's PIKMIN folder if there is one.
+// Older setups still work: the files extracted by tools/ps3/extract_disc.py, in a PIKMIN folder (fst.txt and
+// files/) on a USB drive, at /dev_hdd0/PIKMIN, or in the game's folder.
+
+#ifndef PS3_APPID
+#define PS3_APPID "PIKM00001"
+#endif
+#define GAME_USRDIR   "/dev_hdd0/game/" PS3_APPID "/USRDIR"
+#define SAVE_PARENT   "/dev_hdd0/data"
+#define SAVE_DIR      SAVE_PARENT "/pikmin"
+#define COPY_PARTIAL  GAME_USRDIR "/pikmin_copy.part" // an image being copied in (removed if the copy is cut short)
+
+static int isDirectory(const char* path)
+{
+	sysFSStat st;
+	return sysLv2FsStat(path, &st) == 0 && (st.st_mode & 0170000) == 0040000;
+}
+
+// (None of these log: the log file's location depends on them.)
+extern "C" const char* ps3b_usrdir(void)
+{
+	static int sState; // 0 = not looked yet, 1 = there, -1 = not (not installed as a package)
+	if (!sState) {
+		sState = isDirectory(GAME_USRDIR) ? 1 : -1;
+	}
+	return sState > 0 ? GAME_USRDIR : NULL;
+}
+
+extern "C" const char* ps3b_usb_folder(void)
+{
+	static int sSearched;
+	static char sPath[32];
+	if (!sSearched) {
+		sSearched = 1;
+		for (int i = 0; i < 8 && !sPath[0]; i++) {
+			char path[32];
+			snprintf(path, sizeof(path), "/dev_usb00%d/PIKMIN", i);
+			if (isDirectory(path)) {
+				snprintf(sPath, sizeof(sPath), "%s", path);
+			}
+		}
+	}
+	return sPath[0] ? sPath : NULL;
+}
+
+extern "C" const char* ps3b_work_dir(void)
+{
+	if (const char* usb = ps3b_usb_folder()) {
+		return usb;
+	}
+	if (const char* usrdir = ps3b_usrdir()) {
+		return usrdir;
+	}
+	return ps3b_data_root();
+}
 
 static const char* sDataRootCandidates[] = {
-	"/dev_usb000/PIKMIN", "/dev_usb001/PIKMIN", "/dev_usb002/PIKMIN", "/dev_usb003/PIKMIN",
-	"/dev_usb004/PIKMIN", "/dev_usb005/PIKMIN", "/dev_usb006/PIKMIN", "/dev_hdd0/PIKMIN",
-	"/dev_hdd0/game/PIKM00001/USRDIR/PIKMIN",
+	GAME_USRDIR "/PIKMIN", "/dev_usb000/PIKMIN", "/dev_usb001/PIKMIN", "/dev_usb002/PIKMIN", "/dev_usb003/PIKMIN",
+	"/dev_usb004/PIKMIN", "/dev_usb005/PIKMIN", "/dev_usb006/PIKMIN", "/dev_usb007/PIKMIN", "/dev_hdd0/PIKMIN",
 };
 static const char* sDataRoot = NULL;
 static int sDataRootSearched = 0;
@@ -306,6 +368,281 @@ extern "C" const char* ps3b_data_root(void)
 	return sDataRoot;
 }
 
+extern "C" const char* ps3b_save_dir(void)
+{
+	static int sState; // 0 = not set up yet, 1 = SAVE_DIR, 2 = the work folder, -1 = nowhere
+	if (!sState) {
+		sysLv2FsMkdir(SAVE_PARENT, 0777); // (fail harmlessly if they exist)
+		sysLv2FsMkdir(SAVE_DIR, 0777);
+		sState = isDirectory(SAVE_DIR) ? 1 : (ps3b_work_dir() ? 2 : -1);
+	}
+	return sState == 1 ? SAVE_DIR : sState == 2 ? ps3b_work_dir() : NULL;
+}
+
+static void bootLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void bootLog(const char* fmt, ...)
+{
+	char buf[512];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	ps3b_log_write(buf);
+}
+
+static int sizeInMb(unsigned long long bytes) { return (int)((bytes + (1 << 19)) >> 20); }
+
+// Copies a file, to `partial` first (so that a copy cut short never looks finished). With `progress`, logs how
+// far it has got (the log is on screen during start-up) about every 5%.
+static int copyFile(const char* from, const char* to, const char* partial, const char* progress)
+{
+	s32 in = -1, out = -1;
+	if (sysLv2FsOpen(from, SYS_O_RDONLY, &in, 0, NULL, 0) != 0) {
+		bootLog("[ps3] could not open %s\n", from);
+		return 0;
+	}
+	const long long size = ps3b_file_size(in);
+	sysLv2FsUnlink(partial);
+	if (size < 0 || sysLv2FsOpen(partial, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &out, 0666, NULL, 0) != 0) {
+		bootLog("[ps3] could not create %s\n", partial);
+		sysLv2FsClose(in);
+		return 0;
+	}
+	enum { CHUNK = 2 << 20 };
+	char* buf = (char*)memalign(128, CHUNK);
+	unsigned long long done = 0;
+	const unsigned long long start = ps3b_timebase();
+	int nextStep = 5, ok = buf != NULL;
+	while (ok && done < (unsigned long long)size) {
+		const unsigned long long left = (unsigned long long)size - done;
+		const unsigned int want = left < CHUNK ? (unsigned int)left : (unsigned int)CHUNK;
+		u64 got = 0, written = 0;
+		if (sysLv2FsRead(in, buf, want, &got) != 0 || got == 0) {
+			bootLog("[ps3] FAILED reading %s after %d MB\n", from, sizeInMb(done));
+			ok = 0;
+			break;
+		}
+		if (sysLv2FsWrite(out, buf, got, &written) != 0 || written != got) {
+			bootLog("[ps3] FAILED writing %s after %d MB (is the hard drive full?)\n", partial, sizeInMb(done));
+			ok = 0;
+			break;
+		}
+		done += got;
+		if (ps3b_exit_requested()) {
+			bootLog("[ps3] copy stopped: the game is quitting\n");
+			ok = 0;
+			break;
+		}
+		const int percent = (int)(done * 100 / (unsigned long long)size);
+		if (progress && percent >= nextStep) {
+			const unsigned long long secs = (ps3b_timebase() - start) / ps3b_timebase_freq();
+			bootLog("[boot] %s: %d%% (%d of %d MB, %d s)\n", progress, percent, sizeInMb(done), sizeInMb(size), (int)secs);
+			nextStep = percent - percent % 5 + 5;
+		}
+	}
+	free(buf);
+	if (ok) {
+		sysLv2FsFsync(out); // (on the disk before it gets its real name; not every file system has to support it)
+	}
+	sysLv2FsClose(out);
+	sysLv2FsClose(in);
+	if (ok) {
+		sysLv2FsUnlink(to); // (only ever a damaged copy of the same file: see findImageIn)
+		ok = sysLv2FsRename(partial, to) == 0;
+		if (!ok) {
+			bootLog("[ps3] FAILED to rename %s to %s\n", partial, to);
+		}
+	}
+	if (!ok) {
+		sysLv2FsUnlink(partial);
+		return 0;
+	}
+	sysLv2FsChmod(to, 0666);
+	return 1;
+}
+
+extern "C" int ps3b_file_copy(const char* from, const char* to)
+{
+	char partial[300];
+	snprintf(partial, sizeof(partial), "%s.part", to);
+	return copyFile(from, to, partial, NULL);
+}
+
+// ---- the disc image
+
+static char sDiscImage[300];
+
+extern "C" const char* ps3b_disc_image(void)
+{
+	return sDiscImage[0] ? sDiscImage : NULL;
+}
+
+static void* sCheckAllocs[4];
+static int sCheckAllocCount;
+
+static void* checkAlloc(unsigned int size)
+{
+	if (sCheckAllocCount >= 4) {
+		return NULL;
+	}
+	void* p = malloc(size);
+	sCheckAllocs[sCheckAllocCount++] = p;
+	return p;
+}
+
+static int checkRead(void* ctx, void* dst, unsigned long long offset, unsigned int len)
+{
+	return ps3b_file_pread(*(int*)ctx, dst, offset, len);
+}
+
+// Why `path` is not a usable disc image, or NULL. Fills in the game ID and revision.
+static const char* checkImage(const char* path, char id[7], int* revision)
+{
+	int fd = ps3b_file_open(path);
+	if (fd < 0) {
+		return "it cannot be opened";
+	}
+	discimg::Image image;
+	const char* why = discimg::open(&image, checkRead, &fd, checkAlloc);
+	if (!why && !discimg::gameId(&image, id, revision)) {
+		why = "it cannot be read";
+	}
+	if (!why) {
+		unsigned char* fst = NULL;
+		if (!discimg::loadFst(&image, checkAlloc, &fst)) {
+			why = "its file table cannot be read (a damaged or incomplete image?)";
+		}
+	}
+	ps3b_file_close(fd);
+	for (int i = 0; i < sCheckAllocCount; i++) {
+		free(sCheckAllocs[i]);
+	}
+	sCheckAllocCount = 0;
+	return why;
+}
+
+static int hasImageExtension(const char* name)
+{
+	const char* dot = strrchr(name, '.');
+	if (!dot) {
+		return 0;
+	}
+	char ext[8];
+	int n = 0;
+	for (const char* p = dot + 1; *p && n < 7; p++) {
+		ext[n++] = (*p >= 'A' && *p <= 'Z') ? (char)(*p - 'A' + 'a') : *p;
+	}
+	ext[n] = 0;
+	return !strcmp(ext, "iso") || !strcmp(ext, "gcm") || !strcmp(ext, "ciso");
+}
+
+// Looks in `dir` for the Pikmin (North America) disc image. 1 and its path (and file name) if found.
+static int findImageIn(const char* dir, char* out, unsigned int outSize, const char** name)
+{
+	s32 dfd = -1;
+	if (sysLv2FsOpenDir(dir, &dfd) != 0) {
+		return 0;
+	}
+	int found = 0;
+	static sysFSDirent ent;
+	u64 n = 0;
+	while (!found && sysLv2FsReadDir(dfd, &ent, &n) == 0 && n > 0) {
+		if (!hasImageExtension(ent.d_name) || strncmp(ent.d_name, "._", 2) == 0) { // ("._" files: a Mac's notes)
+			continue;
+		}
+		char path[300];
+		snprintf(path, sizeof(path), "%s/%s", dir, ent.d_name);
+		char id[7]   = "";
+		int revision = 0;
+		const char* why = checkImage(path, id, &revision);
+		if (!why && strcmp(id, "GPIE01") != 0) {
+			bootLog("[boot] not using %s: its game ID is %s; this port needs Pikmin for North America (GPIE01)\n", path, id);
+			continue;
+		}
+		if (why) {
+			bootLog("[boot] not using %s: %s\n", path, why);
+			continue;
+		}
+		if (revision != 1) {
+			bootLog("[boot] note: %s is revision %d of the disc; this port was made from revision 1\n", path, revision);
+		}
+		snprintf(out, outSize, "%s", path);
+		if (name) {
+			*name = strrchr(out, '/') + 1;
+		}
+		found = 1;
+	}
+	sysLv2FsCloseDir(dfd);
+	return found;
+}
+
+static int findImageOnUsb(char* out, unsigned int outSize, const char** name)
+{
+	for (int i = 0; i < 8; i++) {
+		char dir[32];
+		snprintf(dir, sizeof(dir), "/dev_usb00%d", i);
+		if (!isDirectory(dir)) {
+			continue;
+		}
+		if (findImageIn(dir, out, outSize, name)) {
+			return 1;
+		}
+		snprintf(dir, sizeof(dir), "/dev_usb00%d/PIKMIN", i);
+		if (findImageIn(dir, out, outSize, name)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// Finds the game's data (see "where things are" above), copying a disc image from a USB drive to the hard drive
+// on the first start. 1 if there is something to play from.
+extern "C" int ps3b_prepare_game_data(void)
+{
+	const char* usrdir = ps3b_usrdir();
+	if (usrdir) {
+		sysLv2FsUnlink(COPY_PARTIAL); // a copy cut short last time (it starts again below)
+		if (findImageIn(usrdir, sDiscImage, sizeof(sDiscImage), NULL)) {
+			bootLog("[boot] game data: the disc image %s\n", sDiscImage);
+			return 1;
+		}
+	}
+	const char* root = ps3b_data_root();
+	if (root && usrdir && strncmp(root, usrdir, strlen(usrdir)) == 0) {
+		bootLog("[boot] game data: the extracted files in %s\n", root);
+		return 1;
+	}
+	char usb[300];
+	const char* name = NULL;
+	if (findImageOnUsb(usb, sizeof(usb), &name)) {
+		if (usrdir) {
+			char to[300];
+			snprintf(to, sizeof(to), "%s/%s", usrdir, name);
+			bootLog("[boot] First start: copying the disc image %s to the hard drive (%s).\n", usb, to);
+			bootLog("[boot] This happens once and takes a minute or two. The USB drive is not needed after that.\n");
+			if (copyFile(usb, to, COPY_PARTIAL, "copying the disc image")) {
+				bootLog("[boot] copied. From now on the game plays from the hard drive.\n");
+				snprintf(sDiscImage, sizeof(sDiscImage), "%s", to);
+				bootLog("[boot] game data: the disc image %s\n", sDiscImage);
+				return 1;
+			}
+			bootLog("[boot] The copy did not work; playing from the USB drive this time.\n");
+		}
+		snprintf(sDiscImage, sizeof(sDiscImage), "%s", usb);
+		bootLog("[boot] game data: the disc image %s\n", sDiscImage);
+		return 1;
+	}
+	if (root) {
+		bootLog("[boot] game data: the extracted files in %s\n", root);
+		bootLog("[boot] (to play from the hard drive, put the Pikmin disc image in %s, or on the USB drive for the game to copy)\n",
+		     usrdir ? usrdir : GAME_USRDIR);
+		return 1;
+	}
+	return 0;
+}
+
+// ---------------------------------------------------------------- log file
+
 // ---------------------------------------------------------------- log
 //
 // Log lines go to the on-screen console, the lv2 TTY and PIKMIN/pikmin_log.txt. Writing to the USB
@@ -318,6 +655,7 @@ extern "C" const char* ps3b_data_root(void)
 // away (on exit).
 
 static char sLogPath[256];
+static char sLogCopyPath[256]; // a second copy (the USB drive's PIKMIN folder), or ""
 static int sLogState                = 0; // 0 = not chosen yet, 1 = writing, -1 = no location / gave up
 static unsigned long long sLogBytes = 0;
 static int sLogLimitNoted           = 0;
@@ -335,25 +673,76 @@ static volatile int sLogInitDone = 0;
 // The console keeps the most recent lines for the on-screen view (see ps3_console.cpp).
 extern "C" void ps3b_console_append(const char* text);
 
-static int createLogFile(const char* path)
+// (No logging in here: the log is being set up.)
+static void copyQuietly(const char* from, const char* to)
 {
+	s32 in = -1, out = -1;
+	if (sysLv2FsOpen(from, SYS_O_RDONLY, &in, 0, NULL, 0) != 0) {
+		return;
+	}
+	if (sysLv2FsOpen(to, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &out, 0666, NULL, 0) == 0) {
+		static char buf[64 * 1024];
+		u64 got = 0, written = 0;
+		while (sysLv2FsRead(in, buf, sizeof(buf), &got) == 0 && got > 0) {
+			if (sysLv2FsWrite(out, buf, got, &written) != 0 || written != got) {
+				break;
+			}
+		}
+		sysLv2FsClose(out);
+		sysLv2FsChmod(to, 0666);
+	}
+	sysLv2FsClose(in);
+}
+
+// Starts a new log file in `dir`, keeping the last one as pikmin_log_previous.txt (so that a crash's log is not
+// lost by starting the game again before copying it). With `previousFrom`, the previous log is a copy of that
+// one instead (the USB drive's copy of the log: the last session may have been played without the drive).
+static int createLogFile(const char* dir, char* out, unsigned int outSize, const char* previousFrom = NULL)
+{
+	char path[256], previous[256];
+	snprintf(path, sizeof(path), "%s/pikmin_log.txt", dir);
+	snprintf(previous, sizeof(previous), "%s/pikmin_log_previous.txt", dir);
+	if (previousFrom && ps3b_file_exists(previousFrom)) {
+		sysLv2FsUnlink(previous);
+		copyQuietly(previousFrom, previous);
+	} else if (ps3b_file_exists(path)) {
+		sysLv2FsUnlink(previous);
+		sysLv2FsRename(path, previous);
+	}
 	s32 fd = -1;
 	if (sysLv2FsOpen(path, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, 0666, NULL, 0) != 0) {
 		return 0;
 	}
 	sysLv2FsClose(fd);
 	sysLv2FsChmod(path, 0666);
-	snprintf(sLogPath, sizeof(sLogPath), "%s", path);
+	snprintf(out, outSize, "%s", path);
 	return 1;
 }
 
 static void chooseLogFile()
 {
+	// The game's folder on the hard drive, and a copy in the USB drive's PIKMIN folder (easier to get at).
+	const char* usrdir = ps3b_usrdir();
+	const char* usb    = ps3b_usb_folder();
+	int have           = usrdir && createLogFile(usrdir, sLogPath, sizeof(sLogPath));
+	if (usb) {
+		if (!have) {
+			have = createLogFile(usb, sLogPath, sizeof(sLogPath));
+		} else {
+			char previous[256];
+			snprintf(previous, sizeof(previous), "%s/pikmin_log_previous.txt", usrdir);
+			if (!createLogFile(usb, sLogCopyPath, sizeof(sLogCopyPath), previous)) {
+				sLogCopyPath[0] = 0;
+			}
+		}
+	}
+	if (have) {
+		sLogState = 1;
+		return;
+	}
 	char path[256];
-	const char* root = ps3b_data_root();
-	if (root) {
-		snprintf(path, sizeof(path), "%s/pikmin_log.txt", root);
-		if (createLogFile(path)) {
+	if (const char* root = ps3b_data_root()) {
+		if (createLogFile(root, sLogPath, sizeof(sLogPath))) {
 			sLogState = 1;
 			return;
 		}
@@ -365,8 +754,7 @@ static void chooseLogFile()
 		if (!ps3b_file_exists(dev)) {
 			continue;
 		}
-		snprintf(path, sizeof(path), "%s/pikmin_log.txt", dev);
-		if (createLogFile(path)) {
+		if (createLogFile(dev, sLogPath, sizeof(sLogPath))) {
 			sLogState = 1;
 			return;
 		}
@@ -390,14 +778,17 @@ static void appendLogFile(const char* text, unsigned int len)
 		text           = note;
 		len            = strlen(note);
 	}
-	s32 fd = -1;
-	if (sysLv2FsOpen(sLogPath, SYS_O_WRONLY, &fd, 0, NULL, 0) != 0) {
-		return;
+	const char* paths[2] = { sLogPath, sLogCopyPath };
+	for (int i = 0; i < 2; i++) {
+		s32 fd = -1;
+		if (!paths[i][0] || sysLv2FsOpen(paths[i], SYS_O_WRONLY, &fd, 0, NULL, 0) != 0) {
+			continue;
+		}
+		u64 pos = 0, written = 0;
+		sysLv2FsLSeek64(fd, 0, 2 /* SEEK_END */, &pos);
+		sysLv2FsWrite(fd, text, len, &written);
+		sysLv2FsClose(fd);
 	}
-	u64 pos = 0, written = 0;
-	sysLv2FsLSeek64(fd, 0, 2 /* SEEK_END */, &pos);
-	sysLv2FsWrite(fd, text, len, &written);
-	sysLv2FsClose(fd);
 	sLogBytes += len;
 }
 
@@ -507,6 +898,11 @@ extern "C" void ps3b_log_flush(void)
 extern "C" const char* ps3b_log_path(void)
 {
 	return sLogState == 1 ? sLogPath : NULL;
+}
+
+extern "C" const char* ps3b_log_copy_path(void)
+{
+	return sLogState == 1 && sLogCopyPath[0] ? sLogCopyPath : NULL;
 }
 
 static inline s32 sysMemoryGetUserMemorySizeRaw(u32* info /* [0] = total, [1] = available */)
