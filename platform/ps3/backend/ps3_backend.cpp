@@ -2,6 +2,7 @@
 // See ps3_backend.h for why this is separate from the SDK layer.
 
 #include "ps3_backend.h"
+#include "../include/ps3/banner_icon.h"
 #include "../include/ps3/disc_image.h"
 
 #include <malloc.h>
@@ -296,7 +297,8 @@ extern "C" int ps3b_file_read_all(const char* path, char** out_data, unsigned in
 #ifndef PS3_APPID
 #define PS3_APPID "PIKM00001"
 #endif
-#define GAME_USRDIR   "/dev_hdd0/game/" PS3_APPID "/USRDIR"
+#define GAME_DIR      "/dev_hdd0/game/" PS3_APPID
+#define GAME_USRDIR   GAME_DIR "/USRDIR"
 #define SAVE_PARENT   "/dev_hdd0/data"
 #define SAVE_DIR      SAVE_PARENT "/pikmin"
 #define COPY_PARTIAL  GAME_USRDIR "/pikmin_copy.part" // an image being copied in (removed if the copy is cut short)
@@ -639,6 +641,113 @@ extern "C" int ps3b_prepare_game_data(void)
 		return 1;
 	}
 	return 0;
+}
+
+// ---- the XMB icon from the disc's banner (build 54; see ps3/banner_icon.h)
+
+struct BannerFind {
+	unsigned offset, length;
+	int found;
+};
+
+static void findBanner(void* user, unsigned int, bool isDir, const char* path, unsigned int offset, unsigned int length)
+{
+	BannerFind* f = (BannerFind*)user;
+	if (!isDir && !f->found && strcasecmp(path, "/opening.bnr") == 0) {
+		f->offset = offset;
+		f->length = length;
+		f->found  = 1;
+	}
+}
+
+// Reads the banner's picture (BANNER_BYTES) from the disc image or the extracted files. 1 if done.
+static int readBanner(unsigned char* out)
+{
+	unsigned char bnr[bannericon::BANNER_OFFSET + bannericon::BANNER_BYTES];
+	int ok = 0;
+	if (sDiscImage[0]) {
+		int fd = ps3b_file_open(sDiscImage);
+		discimg::Image image;
+		unsigned char* fst = NULL;
+		unsigned int size  = 0;
+		BannerFind find    = { 0, 0, 0 };
+		if (fd >= 0 && !discimg::open(&image, checkRead, &fd, checkAlloc) && (size = discimg::loadFst(&image, checkAlloc, &fst)) != 0) {
+			discimg::walkFst(fst, size, findBanner, &find);
+			ok = find.found && find.length >= sizeof(bnr) && discimg::readDisc(&image, bnr, find.offset, sizeof(bnr));
+		}
+		if (fd >= 0) {
+			ps3b_file_close(fd);
+		}
+		for (int i = 0; i < sCheckAllocCount; i++) {
+			free(sCheckAllocs[i]);
+		}
+		sCheckAllocCount = 0;
+	} else if (const char* root = ps3b_data_root()) {
+		char path[300];
+		snprintf(path, sizeof(path), "%s/files/opening.bnr", root);
+		int fd = ps3b_file_open(path);
+		if (fd >= 0) {
+			ok = ps3b_file_pread(fd, bnr, 0, sizeof(bnr)) == (int)sizeof(bnr);
+			ps3b_file_close(fd);
+		}
+	}
+	if (!ok || !bannericon::isBanner(bnr, sizeof(bnr))) {
+		return 0;
+	}
+	memcpy(out, bnr + bannericon::BANNER_OFFSET, bannericon::BANNER_BYTES);
+	return 1;
+}
+
+extern "C" void ps3b_update_icon(void)
+{
+	const char* icon = GAME_DIR "/ICON0.PNG";
+	char* current     = NULL;
+	unsigned int size = 0;
+	if (!ps3b_usrdir() || !ps3b_file_read_all(icon, &current, &size)) {
+		return; // (not installed as a package)
+	}
+	const bool standIn = bannericon::hasStandInMark((const unsigned char*)current, size);
+	free(current);
+	if (!standIn) {
+		return; // this package's own icon, or one made already
+	}
+	unsigned char* banner = (unsigned char*)malloc(bannericon::BANNER_BYTES + bannericon::BANNER_W * bannericon::BANNER_H * 4);
+	unsigned char* rgba   = (unsigned char*)malloc(bannericon::ICON_W * bannericon::ICON_H * 4);
+	unsigned char* png    = (unsigned char*)malloc(bannericon::PNG_BYTES);
+	void* work            = malloc(bannericon::workBytes());
+	if (!banner || !rgba || !png || !work) {
+		bootLog("[boot] XMB icon: not made (out of memory)\n");
+	} else if (!readBanner(banner)) {
+		bootLog("[boot] XMB icon: not made (the disc's banner, opening.bnr, could not be read)\n");
+	} else {
+		unsigned char* bannerRgba = banner + bannericon::BANNER_BYTES;
+		bannericon::decodeBanner(banner, bannerRgba);
+		bannericon::makeIcon(bannerRgba, rgba, work);
+		const unsigned bytes = bannericon::encodePng(rgba, png);
+		const char* partial  = GAME_DIR "/ICON0.PNG.part";
+		s32 fd               = -1;
+		u64 written          = 0;
+		int ok = sysLv2FsOpen(partial, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, 0666, NULL, 0) == 0;
+		if (ok) {
+			ok = sysLv2FsWrite(fd, png, bytes, &written) == 0 && written == bytes;
+			sysLv2FsClose(fd);
+		}
+		if (ok) {
+			sysLv2FsUnlink(icon);
+			ok = sysLv2FsRename(partial, icon) == 0;
+		}
+		if (ok) {
+			sysLv2FsChmod(icon, 0666);
+			bootLog("[boot] XMB icon: made from the disc's banner (%u bytes; the XMB shows it once the game has quit)\n", bytes);
+		} else {
+			sysLv2FsUnlink(partial);
+			bootLog("[boot] XMB icon: FAILED to write %s\n", icon);
+		}
+	}
+	free(banner);
+	free(rgba);
+	free(png);
+	free(work);
 }
 
 // ---------------------------------------------------------------- log file

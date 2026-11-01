@@ -62,6 +62,7 @@ const char* ps3b_usb_folder(void); // the PIKMIN folder on a USB drive, NULL if 
 const char* ps3b_work_dir(void);   // test switches (diagnostics.txt ...) and recordings: the USB PIKMIN folder, else USRDIR
 const char* ps3b_save_dir(void);   // the memory card file's folder: /dev_hdd0/data/pikmin
 int ps3b_file_copy(const char* from, const char* to); // via a temporary file; 1 if done
+void ps3b_update_icon(void);       // a stand-in XMB icon is replaced with the disc's banner (ps3/banner_icon.h)
 
 // ---- logging: TTY, log file next to the game data, and the on-screen console.
 // Lines are queued in memory and written out by a background thread about ten times a second, each

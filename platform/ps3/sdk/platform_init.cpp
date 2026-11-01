@@ -101,6 +101,7 @@ extern "C" void ps3PlatformInit(void)
 			ps3b_sleep_us(1000 * 1000);
 		}
 	}
+	ps3b_update_icon();
 
 	ps3BootStage("OS memory and clock");
 	ps3OsMiscInit();

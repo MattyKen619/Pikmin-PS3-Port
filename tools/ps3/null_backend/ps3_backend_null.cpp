@@ -37,6 +37,7 @@ const char* ps3b_work_dir(void) { return 0; }
 const char* ps3b_save_dir(void) { return 0; }
 int ps3b_file_copy(const char* from, const char* to) { (void)from; (void)to; return 0; }
 const char* ps3b_log_copy_path(void) { return 0; }
+void ps3b_update_icon(void) { }
 void ps3b_log_write(const char* text) { (void)text; }
 void ps3b_log_flush(void) { }
 void ps3b_free(void* p) { (void)p; }

@@ -21,8 +21,10 @@ TITLE     := Pikmin
 APPID     := PIKM00001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
 # The XMB icon: platform/ps3/pkg/ICON0.local.png if you made one (tools/ps3/make_icon.py; not in the
-# repository, as a game's logo is its publisher's artwork), else PSL1GHT's.
-ICON0     := $(firstword $(wildcard $(CURDIR)/platform/ps3/pkg/ICON0.local.png) $(PS3DEV)/bin/ICON0.PNG)
+# repository, as a game's logo is its publisher's artwork). Without one, PSL1GHT's icon marked as a stand-in
+# (tools/ps3/mark_icon.py): the game replaces it with the banner of the player's own disc when it starts.
+LOCAL_ICON := $(wildcard $(CURDIR)/platform/ps3/pkg/ICON0.local.png)
+ICON0     := $(if $(LOCAL_ICON),$(LOCAL_ICON),$(CURDIR)/$(BUILD)/icon_standin.png)
 
 #---------------------------------------------------------------------------------
 # Sources
@@ -59,7 +61,7 @@ DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w \
              -msave-toc-indirect -mno-pointers-to-nested-functions
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 53
+TEST_BUILD := 54
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -128,6 +130,13 @@ LDFLAGS := $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map
 all: $(BUILD)/$(TARGET).self
 
 pkg: $(BUILD)/$(TARGET).pkg
+
+ifeq ($(LOCAL_ICON),)
+$(BUILD)/$(TARGET).pkg: $(BUILD)/icon_standin.png
+endif
+$(BUILD)/icon_standin.png: $(PS3DEV)/bin/ICON0.PNG tools/ps3/mark_icon.py
+	@mkdir -p $(dir $@)
+	@python3 tools/ps3/mark_icon.py $< $@
 
 $(BUILD)/$(TARGET).elf: $(OBJECTS)
 	@echo linking ... $(notdir $@)

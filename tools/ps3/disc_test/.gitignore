@@ -1,5 +1,7 @@
 disc_test
 dvd_test
+icon_test
 *.ii
 *.o
 *.txt
+*.png
