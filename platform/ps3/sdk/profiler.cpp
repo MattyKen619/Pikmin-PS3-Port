@@ -227,6 +227,9 @@ void samplerThread(void*)
 void onExit()
 {
 	ps3SchedExitReport();
+	if (!sStarted) {
+		return; // (not sampling)
+	}
 	sStopped = 1;
 	ps3b_sleep_us(3000); // (let a sample in progress finish)
 	report("exit");
@@ -243,6 +246,10 @@ extern "C" unsigned int ps3ProfilerTicks(void) { return sTicks; }
 extern "C" void ps3ProfilerFrameStatus(char* buf, unsigned int size, float msPerFrame)
 {
 	const u32 samples = sHbSamples;
+	if (!sStarted) {
+		snprintf(buf, size, "game threads: not measured (diagnostics off), %.1f ms per frame", (double)msPerFrame);
+		return;
+	}
 	int n             = snprintf(buf, size, "game threads, ms per frame (%.1f ms):", (double)msPerFrame);
 	u32 running       = 0;
 	for (int i = 0; i < MAX_THREADS && n < (int)size - 40; i++) {
@@ -258,9 +265,10 @@ extern "C" void ps3ProfilerFrameStatus(char* buf, unsigned int size, float msPer
 	sHbSamples = 0;
 }
 
-extern "C" void ps3ProfilerStart(void)
+extern "C" void ps3ProfilerStart(int sample)
 {
-	if (sStarted) {
+	ps3b_set_exit_hook(onExit); // (the exit report, sampling or not)
+	if (sStarted || !sample) {
 		return;
 	}
 	sStarted    = true;
@@ -275,7 +283,6 @@ extern "C" void ps3ProfilerStart(void)
 	sGfxSelf.clear();
 	sGfxIncl.clear();
 	sStartedAt = ps3b_timebase();
-	ps3b_set_exit_hook(onExit);
 	ps3b_thread_create(samplerThread, NULL, 900, 0x8000, "pikmin_profiler");
 }
 

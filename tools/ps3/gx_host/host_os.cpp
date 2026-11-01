@@ -247,6 +247,7 @@ void ps3b_log_memory(const char* when) { (void)when; }
 // (the profiler that walks the stack is not part of the host build)
 void ps3b_thread_stack(unsigned long long* lo, unsigned long long* hi) { *lo = *hi = 0; }
 int ps3b_address_readable(unsigned long long addr) { (void)addr; return 1; }
+extern "C" int ps3DiagnosticsOn(void) { return 1; }
 
 int ps3b_thread_create(void (*entry)(void*), void* arg, int priority, unsigned int stackSize, const char* name)
 {

@@ -469,7 +469,7 @@ void traceStatus(char* buf, unsigned int size)
 extern "C" void ps3GxRecordRequested(void)
 {
 	static unsigned sRequests;
-	if (sRequests >= 4) {
+	if (sRequests >= 4 || !ps3DiagnosticsOn()) {
 		return;
 	}
 	char label[32];
@@ -492,7 +492,7 @@ extern "C" void ps3GxNoteSection(const char* name)
 		{ "file select", "file_select", 90 },     { "intro", "cutscene", 600 },    { "gameplay", "gameplay", 300 },
 		{ "gameplay", "gameplay_later", 1500 },
 	};
-	for (unsigned i = 0; i < sizeof(kPlan) / sizeof(kPlan[0]); i++) {
+	for (unsigned i = 0; i < sizeof(kPlan) / sizeof(kPlan[0]) && ps3DiagnosticsOn(); i++) {
 		if (strcmp(name, kPlan[i].section) == 0) {
 			ps3gx::traceSchedule(kPlan[i].label, kPlan[i].delay);
 		}

@@ -42,6 +42,22 @@ extern "C" void ps3HeapExhausted(const char* heapName, int requested, int freeBy
 	OSPanic(__FILE__, __LINE__, "out of memory in a game heap");
 }
 
+// PIKMIN/diagnostics.txt next to the game data turns on the testing extras (see sdk_internal.h).
+extern "C" int ps3DiagnosticsOn(void)
+{
+	static int sOn = -1;
+	if (sOn < 0) {
+		const char* root = ps3b_data_root();
+		char path[320];
+		sOn = 0;
+		if (root) {
+			snprintf(path, sizeof(path), "%s/diagnostics.txt", root);
+			sOn = ps3b_file_exists(path) != 0;
+		}
+	}
+	return sOn;
+}
+
 extern "C" void ps3PlatformInit(void)
 {
 	static int sDone;
@@ -52,7 +68,7 @@ extern "C" void ps3PlatformInit(void)
 
 	ps3b_init();
 	// The first log line also chooses and creates the log file (before anything that could crash).
-	ps3Log("[boot] Pikmin PS3 port, test build %d (built %s %s)\n", PS3_TEST_BUILD, __DATE__, __TIME__);
+	ps3Log("[boot] Pikmin PS3 port, build %d (built %s %s)\n", PS3_TEST_BUILD, __DATE__, __TIME__);
 	const char* logPath = ps3b_log_path();
 	ps3Log("[boot] log file: %s\n", logPath ? logPath : "none (no USB drive found)");
 	ps3b_log_memory("start");
@@ -65,7 +81,9 @@ extern "C" void ps3PlatformInit(void)
 
 	ps3BootStage("scheduler");
 	ps3SchedInit();
-	ps3ProfilerStart();
+	ps3Log("[boot] diagnostics: %s\n", ps3DiagnosticsOn() ? "on (PIKMIN/diagnostics.txt): profiler, frame recordings, heartbeats every 15 s"
+	                                                       : "off (crash and stall reports only; add PIKMIN/diagnostics.txt to turn them on)");
+	ps3ProfilerStart(ps3DiagnosticsOn());
 
 	ps3BootStage("looking for the game data");
 	const char* root = ps3b_data_root();

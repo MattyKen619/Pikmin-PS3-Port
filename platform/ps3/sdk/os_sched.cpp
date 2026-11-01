@@ -109,6 +109,7 @@ static void switchHooks(ThreadImpl* from, ThreadImpl* to)
 // walked the crashed main thread's stack and were ended in turn, so nothing reported the crash itself.
 static int sCheckPages = 1;     // 0 if the check does not work here (ps3SchedInit tries it)
 static volatile int sStackGone; // a walk found a game thread's stack gone (reported by the watchdog)
+static volatile unsigned long long sGoneAt; // the page it found unmapped
 
 static bool pageReadable(unsigned long long addr, unsigned long long* checked)
 {
@@ -117,6 +118,7 @@ static bool pageReadable(unsigned long long addr, unsigned long long* checked)
 		return true;
 	}
 	if (!ps3b_address_readable(page)) {
+		sGoneAt    = page;
 		sStackGone = 1;
 		return false;
 	}
@@ -1294,7 +1296,8 @@ static void watchdogThread(void*)
 		void* const sp     = ps3Hook.lastSp;
 		int running        = runner && runner->os && runner->os->state == OS_THREAD_STATE_RUNNING;
 		int same           = running && runner == lastRunner;
-		int still          = profilerIdle ? (pc == lastPc && sp == lastSp) : (moves == lastMoves);
+		// (the profiler off, diagnostics off: ticks stay 0)
+		int still          = (profilerIdle || ticks == 0) ? (pc == lastPc && sp == lastSp) : (moves == lastMoves);
 		idleBlocks         = (same && still) ? idleBlocks + 1 : 0;
 		lastRunner         = runner;
 		lastMoves          = moves;
@@ -1302,8 +1305,22 @@ static void watchdogThread(void*)
 		lastSp             = sp;
 
 		if (sStackGone && !goneReported) {
-			goneReported = true;
-			reportThreads("CRASH: a game thread's stack is gone (lv2 ends a thread that faults)", true);
+			// Build 51: a crash only if a game thread's own stack pointer is on a page that is gone. (Test 50: a walk
+			// once stopped at an unmapped page during the ending movie while every thread was fine.)
+			bool crashed = false;
+			for (int i = 0; i < sImplCount && !crashed; i++) {
+				ThreadImpl* t = &sImpls[i];
+				void* tsp     = hookOf(t).lastSp;
+				crashed       = t->os && t->started && !t->exiting && tsp && !ps3b_address_readable((unsigned long long)(uptr)tsp);
+			}
+			if (crashed) {
+				goneReported = true;
+				reportThreads("CRASH: a game thread's stack is gone (lv2 ends a thread that faults)", true);
+			} else {
+				ps3Log("[ps3] note: a stack walk stopped at an unmapped page (0x%llx); every game thread's stack is there\n",
+				       (unsigned long long)sGoneAt);
+				sStackGone = 0;
+			}
 		} else if (profilerIdle == 3) {
 			reportThreads("STALL: the profiler has stopped sampling (for 3 s)", true);
 		} else if (idleBlocks == 5 || (idleBlocks > 0 && idleBlocks % 30 == 0)) {
@@ -1315,7 +1332,7 @@ static void watchdogThread(void*)
 			char title[64];
 			snprintf(title, sizeof(title), "STALL: no SDK activity for %d s", idleSdk);
 			reportThreads(title, true);
-		} else if (seconds % 15 == 0) {
+		} else if (seconds % (ps3DiagnosticsOn() ? 15 : 60) == 0) {
 			reportThreads("heartbeat", false);
 		}
 	}

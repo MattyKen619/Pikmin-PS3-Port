@@ -33,7 +33,10 @@ int ps3InInterrupt(void);
 // Diagnostics
 void ps3NoteActivity(const char* what); // remembers the last SDK call, for stall reports
 void ps3ProfileSection(const char* name); // a game section starts: report the profile of the last one
-void ps3ProfilerStart(void);
+void ps3ProfilerStart(int sample); // sample: run the sampling profiler (diagnostics); the exit report either way
+// PIKMIN/diagnostics.txt exists (build 51): the profiler, frame recordings (automatic and with Select) and
+// heartbeats every 15 s instead of every minute. Crash and stall reports are on either way.
+int ps3DiagnosticsOn(void);
 unsigned int ps3ProfilerMoves(void); // samples where the game thread had moved on (watchdog)
 unsigned int ps3ProfilerTicks(void); // times the profiler has woken up to sample (0: not started)
 void ps3SchedExitReport(void);       // every thread's state, when the game quits (profiler.cpp: its exit hook)
