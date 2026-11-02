@@ -91,8 +91,8 @@ export PS3DEV=/usr/local/ps3dev
 export PSL1GHT=$PS3DEV
 export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PS3DEV/spu/bin:$PATH
 
-git clone https://github.com/MattyKen619/Pikin-PS3.git
-cd Pikin-PS3
+git clone https://github.com/MattyKen619/Pikmin-PS3.git
+cd Pikmin-PS3
 make -f Makefile.ps3 -j8 pkg
 ```
 
