@@ -50,9 +50,12 @@ static unsigned int sConMutex = 0;
 #ifndef PS3_TEST_BUILD
 #define PS3_TEST_BUILD 0
 #endif
+#ifndef PS3_VERSION
+#define PS3_VERSION "?"
+#endif
 #define CON_STR2(x) #x
 #define CON_STR(x)  CON_STR2(x)
-static const char sTitle[] = "Pikmin PS3 port - build " CON_STR(PS3_TEST_BUILD)
+static const char sTitle[] = "Pikmin PS3 port " PS3_VERSION " (build " CON_STR(PS3_TEST_BUILD) ")"
                              " - boot log   (exit: PS button > Quit Game, or hold Start+Select)";
 
 static void conLog(const char* fmt, ...)

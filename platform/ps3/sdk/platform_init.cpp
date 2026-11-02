@@ -18,6 +18,9 @@ extern "C" void ps3AudioStartOutput(void);
 #ifndef PS3_TEST_BUILD
 #define PS3_TEST_BUILD 0
 #endif
+#ifndef PS3_VERSION
+#define PS3_VERSION "?"
+#endif
 
 extern "C" void ps3BootStage(const char* what)
 {
@@ -69,7 +72,7 @@ extern "C" void ps3PlatformInit(void)
 
 	ps3b_init();
 	// The first log line also chooses and creates the log file (before anything that could crash).
-	ps3Log("[boot] Pikmin PS3 port, build %d (built %s %s)\n", PS3_TEST_BUILD, __DATE__, __TIME__);
+	ps3Log("[boot] Pikmin PS3 port %s, build %d (built %s %s)\n", PS3_VERSION, PS3_TEST_BUILD, __DATE__, __TIME__);
 	const char* logPath = ps3b_log_path();
 	ps3Log("[boot] log file: %s\n", logPath ? logPath : "none (nowhere to write it)");
 	if (const char* copy = ps3b_log_copy_path()) {

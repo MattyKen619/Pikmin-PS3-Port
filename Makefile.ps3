@@ -18,6 +18,10 @@ TARGET    := pikmin
 BUILD     := build/ps3
 BUILDDIR  := $(CURDIR)/$(BUILD)/pkgwork
 TITLE     := Pikmin
+# The release version: shown on the start-up screen and in the log, and (as APP_VER, in PARAM.SFO's form)
+# under Information > Version in the XMB. TEST_BUILD (below) still numbers every build.
+VERSION   := 1.0
+APP_VER   := 01.00
 APPID     := PIKM00001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
 # The XMB icon: platform/ps3/pkg/ICON0.local.png if you made one (tools/ps3/make_icon.py; not in the
@@ -65,8 +69,8 @@ DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w \
              -msave-toc-indirect -mno-pointers-to-nested-functions
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 56
-GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
+TEST_BUILD := 57
+GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD) -DPS3_VERSION=\"$(VERSION)\"
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
 # Game code (C++ and jaudio) is instrumented: function entries and exits keep a shadow call stack and the
@@ -104,7 +108,7 @@ PLATFORM_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -fno-threadsafe-statics $(
 STRICT_ALIGN     := -mstrict-align
 GAME_CXXFLAGS    := $(PLATFORM_CXXFLAGS) $(STRICT_ALIGN) $(INSTRUMENT)
 GAME_CFLAGS      := $(COMMON) $(STRICT_ALIGN) -std=gnu99 $(GAME_DEFS) $(GAME_INC)
-BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUILD) -DPS3_APPID=\"$(APPID)\" $(LIBPSL1GHT_INC)
+BACKEND_CXXFLAGS := $(COMMON) -std=gnu++14 -fno-rtti -DPS3_TEST_BUILD=$(TEST_BUILD) -DPS3_VERSION=\"$(VERSION)\" -DPS3_APPID=\"$(APPID)\" $(LIBPSL1GHT_INC)
 
 # The graphics code (command processor, transform, renderer): square roots as one instruction (no errno).
 GPU_OBJS := $(call objs_of,$(wildcard platform/ps3/gpu/*.cpp) $(RSX_CPP))
@@ -148,15 +152,21 @@ $(BUILD)/pkg_inputs.txt: FORCE
 .PHONY: FORCE
 FORCE:
 
+# PSL1GHT's PARAM.SFO template with this version's APP_VER.
+$(BUILD)/sfo.xml: $(SFOXML) Makefile.ps3
+	@mkdir -p $(dir $@)
+	@sed '/name="APP_VER"/{n;s/[0-9][0-9]\.[0-9][0-9]/$(APP_VER)/}' $< > $@
+	@grep -q '$(APP_VER)' $@ || (echo "could not set APP_VER in $@"; rm -f $@; false)
+
 # The package (in place of PSL1GHT's %.pkg rule: the folder starts empty each time, so that a background
 # taken out does not stay in, and the package is remade when the icon, the background or this file changes).
-$(BUILD)/$(TARGET).pkg: $(BUILD)/$(TARGET).self $(ICON0) $(LOCAL_PIC1) $(BUILD)/pkg_inputs.txt Makefile.ps3
+$(BUILD)/$(TARGET).pkg: $(BUILD)/$(TARGET).self $(ICON0) $(LOCAL_PIC1) $(BUILD)/pkg_inputs.txt $(BUILD)/sfo.xml Makefile.ps3
 	@echo building pkg ... $(notdir $@)
 	@rm -rf $(BUILDDIR)/pkg && mkdir -p $(BUILDDIR)/pkg/USRDIR
 	@cp $(ICON0) $(BUILDDIR)/pkg/ICON0.PNG
 	@$(if $(LOCAL_PIC1),cp $(LOCAL_PIC1) $(BUILDDIR)/pkg/PIC1.PNG,true)
 	@$(SELF_NPDRM) $(BUILDDIR)/$(basename $(notdir $<)).elf $(BUILDDIR)/pkg/USRDIR/EBOOT.BIN $(CONTENTID) >> /dev/null
-	@$(SFO) --title "$(TITLE)" --appid "$(APPID)" -f $(SFOXML) $(BUILDDIR)/pkg/PARAM.SFO
+	@$(SFO) --title "$(TITLE)" --appid "$(APPID)" -f $(BUILD)/sfo.xml $(BUILDDIR)/pkg/PARAM.SFO
 	@$(PKG) --contentid $(CONTENTID) $(BUILDDIR)/pkg/ $@ >> /dev/null
 	@cp $@ $(basename $@).gnpdrm.pkg
 	@$(PACKAGE_FINALIZE) $(basename $@).gnpdrm.pkg
