@@ -5,8 +5,8 @@
 #   make -f Makefile.ps3 pkg -j4    also build build/ps3/pikmin.pkg (install with Package Manager)
 #   make -f Makefile.ps3 clean
 #
-# The game data is NOT part of the package: extract it from your own disc with
-# tools/ps3/extract_disc.py and copy the PIKMIN folder to a USB drive (see docs in the port notes).
+# The game data is NOT part of the package: the player's own disc image goes in the game's folder on the
+# hard drive (or on a USB drive, copied over on the first start). See README.MD.
 #---------------------------------------------------------------------------------
 ifeq ($(strip $(PSL1GHT)),)
 $(error "PSL1GHT is not set. Add the ps3dev environment variables to your shell profile.")
@@ -25,6 +25,9 @@ CONTENTID := UP0001-$(APPID)_00-0000000000000000
 # (tools/ps3/mark_icon.py): the game replaces it with the banner of the player's own disc when it starts.
 LOCAL_ICON := $(wildcard $(CURDIR)/platform/ps3/pkg/ICON0.local.png)
 ICON0     := $(if $(LOCAL_ICON),$(LOCAL_ICON),$(CURDIR)/$(BUILD)/icon_standin.png)
+# The XMB background while the game is selected: platform/ps3/pkg/PIC1.local.png if you made one
+# (tools/ps3/make_background.py; not in the repository either), else none.
+LOCAL_PIC1 := $(wildcard $(CURDIR)/platform/ps3/pkg/PIC1.local.png)
 
 #---------------------------------------------------------------------------------
 # Sources
@@ -61,7 +64,7 @@ DEPFLAGS  := -MMD -MP
 COMMON    := -mcpu=cell $(MACHDEP) $(OPT) $(DEPFLAGS) -fno-exceptions -funsigned-char -w \
              -msave-toc-indirect -mno-pointers-to-nested-functions
 # Shown on screen and in the log, so a log can be matched to the build (and ELF) that wrote it.
-TEST_BUILD := 55
+TEST_BUILD := 56
 GAME_DEFS := -DBUILD_VERSION=5 -DVERSION_GPIE01_01 -DDTK_CONFIG_NONMATCHING=1 -DNDEBUG=1 -DTARGET_PS3=1 -DPS3_TEST_BUILD=$(TEST_BUILD)
 GAME_INC  := -nostdinc -isystem include/stl -Iinclude -Iplatform/ps3/include
 
@@ -131,12 +134,31 @@ all: $(BUILD)/$(TARGET).self
 
 pkg: $(BUILD)/$(TARGET).pkg
 
-ifeq ($(LOCAL_ICON),)
-$(BUILD)/$(TARGET).pkg: $(BUILD)/icon_standin.png
-endif
 $(BUILD)/icon_standin.png: $(PS3DEV)/bin/ICON0.PNG tools/ps3/mark_icon.py
 	@mkdir -p $(dir $@)
 	@python3 tools/ps3/mark_icon.py $< $@
+
+# Which icon and background go in (rewritten only when that changes, so that adding or taking out a
+# picture remakes the package).
+PKG_INPUTS := $(ICON0) $(LOCAL_PIC1)
+$(BUILD)/pkg_inputs.txt: FORCE
+	@mkdir -p $(dir $@)
+	@echo '$(PKG_INPUTS)' | cmp -s - $@ || echo '$(PKG_INPUTS)' > $@
+.PHONY: FORCE
+FORCE:
+
+# The package (in place of PSL1GHT's %.pkg rule: the folder starts empty each time, so that a background
+# taken out does not stay in, and the package is remade when the icon, the background or this file changes).
+$(BUILD)/$(TARGET).pkg: $(BUILD)/$(TARGET).self $(ICON0) $(LOCAL_PIC1) $(BUILD)/pkg_inputs.txt Makefile.ps3
+	@echo building pkg ... $(notdir $@)
+	@rm -rf $(BUILDDIR)/pkg && mkdir -p $(BUILDDIR)/pkg/USRDIR
+	@cp $(ICON0) $(BUILDDIR)/pkg/ICON0.PNG
+	@$(if $(LOCAL_PIC1),cp $(LOCAL_PIC1) $(BUILDDIR)/pkg/PIC1.PNG,true)
+	@$(SELF_NPDRM) $(BUILDDIR)/$(basename $(notdir $<)).elf $(BUILDDIR)/pkg/USRDIR/EBOOT.BIN $(CONTENTID) >> /dev/null
+	@$(SFO) --title "$(TITLE)" --appid "$(APPID)" -f $(SFOXML) $(BUILDDIR)/pkg/PARAM.SFO
+	@$(PKG) --contentid $(CONTENTID) $(BUILDDIR)/pkg/ $@ >> /dev/null
+	@cp $@ $(basename $@).gnpdrm.pkg
+	@$(PACKAGE_FINALIZE) $(basename $@).gnpdrm.pkg
 
 $(BUILD)/$(TARGET).elf: $(OBJECTS)
 	@echo linking ... $(notdir $@)

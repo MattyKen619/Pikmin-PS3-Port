@@ -52,3 +52,5 @@ build.py
 tools/vc6
 # PS3 port: your own XMB icon (tools/ps3/make_icon.py)
 platform/ps3/pkg/ICON0.local.png
+# PS3 port: your own XMB background (tools/ps3/make_background.py)
+platform/ps3/pkg/PIC1.local.png
