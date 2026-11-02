@@ -1,8 +1,8 @@
-# Pikmin-PS3
+# Pikmin-PS3-Port
 
 Pikmin for the PlayStation 3 (homebrew, PSL1GHT).
 
-Pikmin-PS3 is a native PS3 port of [projectPiki's Pikmin decompilation](https://github.com/projectPiki/pikmin),
+Pikmin-PS3-Port is a native PS3 port of [projectPiki's Pikmin decompilation](https://github.com/projectPiki/pikmin),
 the source code of the GameCube game (2001) rebuilt so that it compiles to the original, byte for byte. The
 game code is the decompilation's, almost untouched. What the game expected from the GameCube is rebuilt on
 the PS3's own hardware:
@@ -91,8 +91,8 @@ export PS3DEV=/usr/local/ps3dev
 export PSL1GHT=$PS3DEV
 export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PS3DEV/spu/bin:$PATH
 
-git clone https://github.com/MattyKen619/Pikmin-PS3.git
-cd Pikmin-PS3
+git clone https://github.com/MattyKen619/Pikmin-PS3-Port.git
+cd Pikmin-PS3-Port
 make -f Makefile.ps3 -j8 pkg
 ```
 
