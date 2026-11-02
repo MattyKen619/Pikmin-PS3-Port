@@ -108,7 +108,7 @@ named `diagnostics.txt` in that `PIKMIN` folder turns on the testing extras: a p
 The original GameCube build of the decompilation still works and still matches. See
 [README.decomp.md](README.decomp.md).
 
-## How it works (short version)
+## How it works
 
 - `src/`, `include/`: the decompiled game code, almost untouched. The PS3 build compiles the same files for a
   64-bit CPU. A handful of `TARGET_PS3` changes fix places where the original read memory it shouldn't have:
