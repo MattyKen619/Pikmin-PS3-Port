@@ -24,7 +24,8 @@ CONTENTID := UP0001-$(APPID)_00-0000000000000000
 # repository, as a game's logo is its publisher's artwork). Without one, PSL1GHT's icon marked as a stand-in
 # (tools/ps3/mark_icon.py): the game replaces it with the banner of the player's own disc when it starts.
 LOCAL_ICON := $(wildcard $(CURDIR)/platform/ps3/pkg/ICON0.local.png)
-ICON0     := $(if $(LOCAL_ICON),$(LOCAL_ICON),$(CURDIR)/$(BUILD)/icon_standin.png)
+STANDIN_ICON := $(CURDIR)/$(BUILD)/icon_standin.png
+ICON0     := $(if $(LOCAL_ICON),$(LOCAL_ICON),$(STANDIN_ICON))
 # The XMB background while the game is selected: platform/ps3/pkg/PIC1.local.png if you made one
 # (tools/ps3/make_background.py; not in the repository either), else none.
 LOCAL_PIC1 := $(wildcard $(CURDIR)/platform/ps3/pkg/PIC1.local.png)
@@ -134,7 +135,7 @@ all: $(BUILD)/$(TARGET).self
 
 pkg: $(BUILD)/$(TARGET).pkg
 
-$(BUILD)/icon_standin.png: $(PS3DEV)/bin/ICON0.PNG tools/ps3/mark_icon.py
+$(STANDIN_ICON): $(PS3DEV)/bin/ICON0.PNG tools/ps3/mark_icon.py
 	@mkdir -p $(dir $@)
 	@python3 tools/ps3/mark_icon.py $< $@
 

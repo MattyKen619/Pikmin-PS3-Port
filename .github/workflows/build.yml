@@ -1,64 +1,83 @@
-name: Build
+# PS3 port: builds the PS3 package on every push and pull request, and runs the checks that need no game
+# data. (The decompilation's own workflow, which builds the GameCube game, needs projectPiki's private build
+# image with the game files, so it can't run here.)
+#
+# The toolchain is the prebuilt ps3toolchain release the port is made and tested with (GCC 7.2 for the PPU
+# and SPU), with PSL1GHT built from source at a fixed commit. Both are cached between runs.
+
+name: PS3 build
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
-    container: ghcr.io/projectpiki/build:main
-
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [GPIE01_01, G98E01_PIKIDEMO, GPIE01_00, GPIP01_00, GPIJ01_01, GPIJ01_02, DPIJ01_PIKIDEMO, G98P01_PIKIDEMO]
+    env:
+      TOOLCHAIN_RELEASE: nightly-2026-06-16
+      PSL1GHT_COMMIT: f649a08fd536a9e27c08c7db2d93a2d7ee4c3bbe
 
     steps:
-    # Checkout the repository (shallow clone)
-    - name: Checkout
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
-        submodules: recursive
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # Set Git config
-    - name: Git config
-      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libelf-dev libgmp-dev libssl-dev zlib1g-dev pkg-config python3
 
-    # Copy the original files to the workspace
-    - name: Prepare
-      run: cp -R /orig .
+      - name: Set up the ps3dev environment
+        run: |
+          echo "PS3DEV=$HOME/ps3dev" >> "$GITHUB_ENV"
+          echo "PSL1GHT=$HOME/ps3dev" >> "$GITHUB_ENV"
+          echo "$HOME/ps3dev/bin" >> "$GITHUB_PATH"
+          echo "$HOME/ps3dev/ppu/bin" >> "$GITHUB_PATH"
+          echo "$HOME/ps3dev/spu/bin" >> "$GITHUB_PATH"
 
-    # Build the project
-    - name: Build
-      run: |
-        python configure.py --map --version ${{ matrix.version }} \
-            --binutils /binutils --compilers /compilers
-        ninja all_source progress build/${{ matrix.version }}/report.json
+      - name: Cache the toolchain and PSL1GHT
+        id: ps3dev-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ps3dev
+          key: ps3dev-${{ env.TOOLCHAIN_RELEASE }}-psl1ght-${{ env.PSL1GHT_COMMIT }}
 
-    # Upload progress if we're on the main branch
-    - name: Upload progress
-      if: github.ref == 'refs/heads/main'
-      continue-on-error: true
-      env:
-        PROGRESS_SLUG: pikmin
-        PROGRESS_API_KEY: ${{ secrets.PROGRESS_API_KEY }}
-      run: |
-        python tools/upload_progress.py -b https://progress.decomp.club/ \
-          -p $PROGRESS_SLUG -v ${{ matrix.version }} \
-          build/${{ matrix.version }}/report.json
+      - name: Download the toolchain
+        if: steps.ps3dev-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL "https://github.com/ps3dev/ps3toolchain/releases/download/$TOOLCHAIN_RELEASE/ps3dev-linux-X64.tar.gz" \
+            | tar -xz -C "$HOME"
 
-    # Upload map files
-    - name: Upload map
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ matrix.version }}_maps
-        path: build/${{ matrix.version }}/**/*.MAP
+      - name: Build PSL1GHT
+        if: steps.ps3dev-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/ps3dev/PSL1GHT.git "$RUNNER_TEMP/PSL1GHT"
+          cd "$RUNNER_TEMP/PSL1GHT"
+          git checkout "$PSL1GHT_COMMIT"
+          make install-ctrl
+          make
+          make install
 
-    # Upload progress report
-    - name: Upload report
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ matrix.version }}_report
-        path: build/${{ matrix.version }}/report.json
+      - name: Build the package
+        run: make -f Makefile.ps3 -j"$(nproc)" pkg
+
+      - name: Graphics checks
+        run: make -C tools/ps3/gx_host
+
+      - name: Sound checks
+        run: |
+          make -C tools/ps3/dsp_test
+          tools/ps3/dsp_test/dsp_test
+
+      - name: Icon writer checks
+        run: |
+          make -C tools/ps3/disc_test png_selftest
+          tools/ps3/disc_test/png_selftest
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pikmin-ps3-pkg
+          path: build/ps3/pikmin.pkg
+          if-no-files-found: error
